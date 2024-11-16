@@ -71,10 +71,24 @@ enum class PageAccess {
 };
 
 enum class AllocationType {
-  kReserve = 1 << 0,
-  kCommit = 1 << 1,
-  kReserveCommit = kReserve | kCommit,
+  kReserve = 0,
+  kCommit = 1,
+  kReserveCommit = 2,
+  kRelease = 3,
+  kReset = 4,
+  kDecommit = 5,
 };
+
+inline AllocationType operator|(AllocationType a, AllocationType b) {
+  return static_cast<AllocationType>(
+      static_cast<std::underlying_type_t<AllocationType>>(a) |
+      static_cast<std::underlying_type_t<AllocationType>>(b));
+}
+
+inline AllocationType& operator|=(AllocationType& a, AllocationType b) {
+  a = a | b;
+  return a;
+}
 
 enum class DeallocationType {
   kRelease = 1 << 0,
@@ -372,7 +386,7 @@ inline double load_and_swap<double>(const void* mem) {
 template <>
 inline std::string load_and_swap<std::string>(const void* mem) {
   std::string value;
-  for (int i = 0;; ++i) {
+  for (size_t i = 0;; ++i) {
     auto c =
         xe::load_and_swap<uint8_t>(reinterpret_cast<const uint8_t*>(mem) + i);
     if (!c) {
@@ -385,7 +399,7 @@ inline std::string load_and_swap<std::string>(const void* mem) {
 template <>
 inline std::u16string load_and_swap<std::u16string>(const void* mem) {
   std::u16string value;
-  for (int i = 0;; ++i) {
+  for (size_t i = 0;; ++i) {
     auto c =
         xe::load_and_swap<uint16_t>(reinterpret_cast<const uint16_t*>(mem) + i);
     if (!c) {
@@ -506,7 +520,7 @@ inline void store_and_swap<double>(void* mem, const double& value) {
 template <>
 inline void store_and_swap<std::string_view>(void* mem,
                                              const std::string_view& value) {
-  for (auto i = 0; i < value.size(); ++i) {
+  for (size_t i = 0; i < value.size(); ++i) {
     xe::store_and_swap<uint8_t>(reinterpret_cast<uint8_t*>(mem) + i, value[i]);
   }
 }
@@ -517,7 +531,7 @@ inline void store_and_swap<std::string>(void* mem, const std::string& value) {
 template <>
 inline void store_and_swap<std::u16string_view>(
     void* mem, const std::u16string_view& value) {
-  for (auto i = 0; i < value.size(); ++i) {
+  for (size_t i = 0; i < value.size(); ++i) {
     xe::store_and_swap<uint16_t>(reinterpret_cast<uint16_t*>(mem) + i,
                                  value[i]);
   }

@@ -71,10 +71,12 @@ const uint8_t A64Emitter::fpr_reg_map_[A64Emitter::FPR_COUNT] = {
 };
 
 A64Emitter::A64Emitter(A64Backend* backend)
-    : VectorCodeGenerator(assembly_buffer),
+    : VectorCodeGenerator(assembly_buffer, nullptr),
       processor_(backend->processor()),
       backend_(backend),
       code_cache_(backend->code_cache()) {
+  // Initialize base class after assembly_buffer is ready
+
   oaknut::CpuFeatures cpu_ = oaknut::detect_features();
 
   // Combine with id register detection
@@ -765,12 +767,13 @@ static const vec128_t v_consts[] = {
     /* V2To32               */ vec128f(0x1.0p32f),
 };
 
-// First location to try and place constants.
+#if XE_PLATFORM_MAC
+static const uintptr_t kConstDataLocation = 0x10000000;  // Start at 256MB mark for macOS
+#else
 static const uintptr_t kConstDataLocation = 0x20000000;
-static const uintptr_t kConstDataSize = sizeof(v_consts);
-
-// Increment the location by this amount for every allocation failure.
-static const uintptr_t kConstDataIncrement = 0x00001000;
+#endif
+static const size_t kConstDataSize = sizeof(v_consts);
+static const size_t kConstDataIncrement = 0x00100000;
 
 // This function places constant data that is used by the emitter later on.
 // Only called once and used by multiple instances of the emitter.
@@ -781,16 +784,43 @@ static const uintptr_t kConstDataIncrement = 0x00001000;
 uintptr_t A64Emitter::PlaceConstData() {
   uint8_t* ptr = reinterpret_cast<uint8_t*>(kConstDataLocation);
   void* mem = nullptr;
+  
+#if XE_PLATFORM_MAC
+  // On macOS, try multiple locations in low memory
+  const uintptr_t max_attempts = 16;  // Try up to 16 different locations
+  for (uintptr_t i = 0; i < max_attempts && !mem; ++i) {
+    mem = memory::AllocFixed(
+        ptr, xe::round_up(kConstDataSize, memory::page_size()),
+        memory::AllocationType::kReserveCommit, memory::PageAccess::kReadWrite);
+    
+    if (!mem || (reinterpret_cast<uintptr_t>(mem) & ~0x7FFFFFFF)) {
+      if (mem) {
+        memory::DeallocFixed(mem, xe::round_up(kConstDataSize, memory::page_size()),
+                            memory::DeallocationType::kRelease);
+        mem = nullptr;
+      }
+      ptr += kConstDataIncrement;
+      continue;
+    }
+    break;
+  }
+#else
   while (!mem) {
     mem = memory::AllocFixed(
         ptr, xe::round_up(kConstDataSize, memory::page_size()),
         memory::AllocationType::kReserveCommit, memory::PageAccess::kReadWrite);
-
     ptr += kConstDataIncrement;
   }
+#endif
 
   // The pointer must not be greater than 31 bits.
   assert_zero(reinterpret_cast<uintptr_t>(mem) & ~0x7FFFFFFF);
+  
+  if (!mem) {
+    // Failed to allocate in low memory
+    return 0;
+  }
+
   std::memcpy(mem, v_consts, sizeof(v_consts));
   memory::Protect(mem, kConstDataSize, memory::PageAccess::kReadOnly, nullptr);
 

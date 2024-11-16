@@ -59,7 +59,7 @@ class A64CodeCache : public CodeCache {
 
   bool has_indirection_table() { return indirection_table_base_ != nullptr; }
   void set_indirection_default(uint32_t default_value);
-  void AddIndirection(uint32_t guest_address, uint32_t host_address);
+  void AddIndirection(uint32_t guest_address, uint64_t host_address);
 
   void CommitExecutableRange(uint32_t guest_low, uint32_t guest_high);
 
@@ -80,12 +80,19 @@ class A64CodeCache : public CodeCache {
   // All executable code falls within 0x80000000 to 0x9FFFFFFF, so we can
   // only map enough for lookups within that range.
   static const size_t kIndirectionTableSize = 0x1FFFFFFF;
-  static const uintptr_t kIndirectionTableBase = 0x80000000;
+#if XE_PLATFORM_MAC
+  // On macOS, we let the OS choose the base addresses dynamically
+  static constexpr uint64_t kGeneratedCodeExecuteBase = 0;
+  static constexpr uint64_t kIndirectionTableBase = 0;
+#else
+  // Windows/Linux use fixed addresses
+  static constexpr uint64_t kGeneratedCodeExecuteBase = 0xA0000000;
+  static constexpr uint64_t kIndirectionTableBase = 0x80000000;
+#endif
   // The code range is 512MB, but we know the total code games will have is
   // pretty small (dozens of mb at most) and our expansion is reasonablish
   // so 256MB should be more than enough.
   static const size_t kGeneratedCodeSize = 0x0FFFFFFF;
-  static const uintptr_t kGeneratedCodeExecuteBase = 0xA0000000;
   // Used for writing when PageAccess::kExecuteReadWrite is not supported.
   static const uintptr_t kGeneratedCodeWriteBase =
       kGeneratedCodeExecuteBase + kGeneratedCodeSize + 1;
@@ -109,7 +116,11 @@ class A64CodeCache : public CodeCache {
   virtual void PlaceCode(uint32_t guest_address, void* machine_code,
                          const EmitFunctionInfo& func_info,
                          void* code_execute_address,
-                         UnwindReservation unwind_reservation) {}
+                         A64CodeCache::UnwindReservation unwind_reservation) {}
+  virtual void* CreateTrampoline(void* target_address) { return nullptr; }
+  virtual void* LookupUnwindInfo(uint64_t host_pc) override {
+    return nullptr;  // Base implementation
+  }
 
   std::filesystem::path file_name_;
   xe::memory::FileMappingHandle mapping_ =
@@ -141,6 +152,76 @@ class A64CodeCache : public CodeCache {
   // This can be used to bsearch on host PC to find the guest function.
   // The key is [start address | end address].
   std::vector<std::pair<uint64_t, GuestFunction*>> generated_code_map_;
+
+  // Base address for the code cache
+  void* mapping_base_ = nullptr;
+  // Size of the code cache mapping
+  size_t mapping_size_ = 0;
+  // Current offset within the code cache
+  std::atomic<size_t> offset_{0};
+};
+
+class MacOSA64CodeCache : public A64CodeCache {
+ public:
+  MacOSA64CodeCache();
+  ~MacOSA64CodeCache() override;
+
+  bool Initialize() override;
+
+ protected:
+  void PlaceCode(uint32_t guest_address, void* machine_code,
+                 const EmitFunctionInfo& func_info, void* code_execute_address,
+                 A64CodeCache::UnwindReservation unwind_reservation) override;
+
+ private:
+  static constexpr size_t kMaximumFunctionCount = 32768;
+  static constexpr size_t kTrampolineTableSize = 16 * 1024 * 1024;  // 16MB of trampoline space
+  static constexpr size_t kTrampolineSize = 16;  // Size of each trampoline entry (4 instructions)
+  static constexpr size_t kCacheLineSize = 16;   // ARM64 typical cache line size
+
+  // Function pointer types for thunks
+  using HostToGuestThunk = void (*)(void*);
+  using GuestToHostThunk = void (*)(void*);
+  using ResolveFunctionThunk = void (*)(void*);
+
+  void* AllocateLowMemory(size_t size);
+  void* AllocateTrampoline(void* target_address);
+  bool InitializeTrampolineTable();
+  void* CreateTrampoline(void* target_address) override;
+
+  // Trampoline table
+  uint8_t* trampoline_table_base_ = nullptr;  // Base address of the trampoline table (execute view)
+  uint8_t* trampoline_table_write_base_ = nullptr;  // Base address of the trampoline table write view
+  xe::memory::FileMappingHandle mapping_trampoline_ = xe::memory::kFileMappingHandleInvalid;  // File mapping handle for trampoline table
+  std::atomic<size_t> trampoline_table_offset_ = {0};  // Current offset into the trampoline table
+
+  // Thunk pointers
+  HostToGuestThunk host_to_guest_thunk_ = nullptr;
+  GuestToHostThunk guest_to_host_thunk_ = nullptr;
+  ResolveFunctionThunk resolve_function_thunk_ = nullptr;
+
+  // Code cache
+  struct UnwindInfo {
+    uintptr_t begin_address;  // Start of function
+    uintptr_t end_address;    // End of function
+    uint32_t offset;          // Offset to unwind data
+    uint32_t size;            // Size of function
+    uint8_t data[32];        // Fixed size buffer for unwind data
+  };
+
+  UnwindReservation RequestUnwindReservation(uint8_t* entry_address) override;
+  void* LookupUnwindInfo(uint64_t host_pc) override;
+
+  std::vector<UnwindInfo> unwind_table_;
+  std::atomic<uint32_t> unwind_table_count_ = {0};
+
+  struct TrampolineEntry {
+    void* target_address;
+    uint8_t* trampoline_address;
+  };
+
+  std::vector<TrampolineEntry> trampoline_entries_;
+  std::mutex trampoline_mutex_;
 };
 
 }  // namespace a64

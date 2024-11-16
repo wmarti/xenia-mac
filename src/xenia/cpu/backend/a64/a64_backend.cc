@@ -124,8 +124,7 @@ bool A64Backend::Initialize(Processor* processor) {
   resolve_function_thunk_ = thunk_emitter.EmitResolveFunctionThunk();
 
   // Set the code cache to use the ResolveFunction thunk for default
-  // indirections.
-  assert_zero(uint64_t(resolve_function_thunk_) & 0xFFFFFFFF00000000ull);
+  // indirections. The code cache will create a trampoline if needed.
   code_cache_->set_indirection_default(
       uint32_t(uint64_t(resolve_function_thunk_)));
 

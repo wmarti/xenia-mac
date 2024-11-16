@@ -20,6 +20,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
+#include "xenia/base/logging.h"
 
 #if XE_PLATFORM_MAC
 #define MAP_ANONYMOUS MAP_ANON
@@ -95,35 +96,35 @@ uint32_t ToPosixProtectFlags(PageAccess access) {
 
 bool IsWritableExecutableMemorySupported() { return true; }
 
-void* AllocFixed(void* base_address, size_t length,
-                 AllocationType allocation_type, PageAccess access) {
+void* AllocFixed(void* base_address, size_t length, AllocationType allocation_type,
+                 PageAccess access) {
   // mmap does not support reserve / commit, so ignore allocation_type.
-  uint32_t prot = ToPosixProtectFlags(access);
-  
-  // On ARM64 macOS, we need to ensure the address is properly aligned
-  uintptr_t aligned_addr = reinterpret_cast<uintptr_t>(base_address);
-  size_t page_mask = page_size() - 1;
-  if (aligned_addr & page_mask) {
-    aligned_addr = (aligned_addr + page_mask) & ~page_mask;
-  }
-
-  // For large addresses on ARM64, we need VM_FLAGS_ANYWHERE to allow high memory allocations
+  int prot = ToPosixProtectFlags(access);
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-  if (base_address) {
-    flags |= MAP_FIXED;
-  }
-#if defined(__aarch64__)
-  if (aligned_addr >= 0x100000000ULL) {
-    flags |= VM_FLAGS_ANYWHERE;
+  
+  // On macOS, we need MAP_JIT for executable memory
+#ifdef __APPLE__
+  if (prot & PROT_EXEC) {
+    flags |= MAP_JIT;
   }
 #endif
   
-  void* result = mmap(reinterpret_cast<void*>(aligned_addr), length,
-                     prot, flags, -1, 0);
-  if (result == MAP_FAILED) {
-    return nullptr;
+  // Let the OS choose the address if possible
+  void* result = mmap(base_address, length, prot, flags, -1, 0);
+  
+  if (result != MAP_FAILED) {
+    return result;
   }
-  return result;
+  
+  // If that fails and we had a specific address request, try with MAP_FIXED
+  if (base_address) {
+    result = mmap(base_address, length, prot, flags | MAP_FIXED, -1, 0);
+    if (result != MAP_FAILED) {
+      return result;
+    }
+  }
+  
+  return nullptr;
 }
 
 bool DeallocFixed(void* base_address, size_t length,

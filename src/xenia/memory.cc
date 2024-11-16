@@ -123,66 +123,78 @@ Memory::~Memory() {
   virtual_membase_ = nullptr;
   physical_membase_ = nullptr;
 }
+
 static const struct {
   uint64_t virtual_address_start;
   uint64_t virtual_address_end;
   uint64_t target_address;
+  uint64_t alignment;  // Required alignment for this region
 } map_info[] = {
     // (1024mb) - virtual 4k pages
     {
         0x00000000,
         0x3FFFFFFF,
         0x0000000000000000ull,
+        4096,
     },
     // (1024mb) - virtual 64k pages (cont)
     {
         0x40000000,
         0x7EFFFFFF,
         0x0000000040000000ull,
+        64 * 1024,
     },
     //   (16mb) - GPU writeback + 15mb of XPS?
     {
         0x7F000000,
         0x7FFFFFFF,
         0x0000000100000000ull,
+        4096,
     },
     //  (256mb) - xex 64k pages
     {
         0x80000000,
         0x8FFFFFFF,
         0x0000000080000000ull,
+        64 * 1024,
     },
     //  (256mb) - xex 4k pages
     {
         0x90000000,
         0x9FFFFFFF,
         0x0000000080000000ull,
+        4096,
     },
     //  (512mb) - physical 64k pages
     {
         0xA0000000,
         0xBFFFFFFF,
         0x0000000100000000ull,
+        64 * 1024,
     },
     //          - physical 16mb pages
     {
         0xC0000000,
         0xDFFFFFFF,
         0x0000000100000000ull,
+        16 * 1024 * 1024,
     },
     //          - physical 4k pages
     {
         0xE0000000,
         0xFFFFFFFF,
         0x0000000100001000ull,
+        4096,
     },
     //          - physical raw
     {
         0x100000000,
         0x11FFFFFFF,
         0x0000000100000000ull,
+        4096,
     },
 };
+
 bool Memory::Initialize() {
     file_name_ = fmt::format("/tmp/xenia_memory");
 
@@ -193,116 +205,207 @@ bool Memory::Initialize() {
         0x11FFFFFFF, xe::memory::PageAccess::kReadWrite, false);
     if (mapping_ == xe::memory::kFileMappingHandleInvalid) {
         XELOGE("Unable to reserve the 4gb guest address space.");
-        assert_always();
         return false;
     }
 
-    // Attempt to create our views. Let the OS choose the base address.
-    if (MapViews()) {
+    // Attempt to create our views
+    if (MapViews() != 0) {
         XELOGE("Unable to map views");
-        assert_always();
         return false;
     }
 
-    // Set mapping_base_ to the base address of the first mapped view.
+    // Set mapping_base_ to the base address of the first mapped view
     mapping_base_ = views_.all_views[0];
     virtual_membase_ = mapping_base_;
+    physical_membase_ = nullptr;
 
-    // Find the physical memory base by matching the target address
+    // Find the physical memory range
     for (size_t n = 0; n < xe::countof(map_info); n++) {
-        if (map_info[n].virtual_address_start == 0x100000000) {
+        if (map_info[n].virtual_address_start == 0x100000000ull) {
             physical_membase_ = views_.all_views[n];
             break;
         }
+    }
+
+    if (!physical_membase_) {
+        XELOGE("Unable to find physical memory base");
+        return false;
     }
 
     // Log the mapping base addresses
     XELOGI("virtual_membase_: {}", (void*)virtual_membase_);
     XELOGI("physical_membase_: {}", (void*)physical_membase_);
 
-    // Prepare virtual heaps
-    heaps_.v00000000.Initialize(this, virtual_membase_, HeapType::kGuestVirtual,
-                                0x00000000, 0x40000000, 4096);
-    heaps_.v40000000.Initialize(this, virtual_membase_, HeapType::kGuestVirtual,
-                                0x40000000, 0x40000000 - 0x01000000, 64 * 1024);
-    heaps_.v80000000.Initialize(this, virtual_membase_, HeapType::kGuestXex,
-                                0x80000000, 0x10000000, 64 * 1024);
-    heaps_.v90000000.Initialize(this, virtual_membase_, HeapType::kGuestXex,
-                                0x90000000, 0x10000000, 4096);
+    // Initialize heaps using the actual mapped addresses
+    uint8_t* heap_base = virtual_membase_;
+    
+    // Initialize the virtual heaps
+    heaps_.v00000000.Initialize(this, heap_base, HeapType::kGuestVirtual,
+                               0x00000000, 0x40000000, 4096);
+    heap_base += 0x40000000;
+    
+    heaps_.v40000000.Initialize(this, heap_base, HeapType::kGuestVirtual,
+                               0x40000000, 0x40000000 - 0x01000000, 64 * 1024);
+    heap_base += 0x40000000;
+    
+    heaps_.v80000000.Initialize(this, heap_base, HeapType::kGuestXex,
+                               0x80000000, 0x10000000, 64 * 1024);
+    heap_base += 0x10000000;
+    
+    heaps_.v90000000.Initialize(this, heap_base, HeapType::kGuestXex,
+                               0x90000000, 0x10000000, 4096);
 
-    // Prepare physical heaps
+    // Initialize physical heaps
     heaps_.physical.Initialize(this, physical_membase_, HeapType::kGuestPhysical,
-                               0x00000000, 0x20000000, 4096);
+                             0x00000000, 0x20000000, 4096);
+    
+    // Initialize virtual heaps that map to physical memory
     heaps_.vA0000000.Initialize(this, virtual_membase_, HeapType::kGuestPhysical,
-                                0xA0000000, 0x20000000, 64 * 1024,
-                                &heaps_.physical);
+                               0xA0000000, 0x20000000, 64 * 1024,
+                               &heaps_.physical);
+    
     heaps_.vC0000000.Initialize(this, virtual_membase_, HeapType::kGuestPhysical,
-                                0xC0000000, 0x20000000, 16 * 1024 * 1024,
-                                &heaps_.physical);
+                               0xC0000000, 0x20000000, 16 * 1024 * 1024,
+                               &heaps_.physical);
+    
     heaps_.vE0000000.Initialize(this, virtual_membase_, HeapType::kGuestPhysical,
-                                0xE0000000, 0x1FD00000, 4096, &heaps_.physical);
+                               0xE0000000, 0x1FD00000, 4096,
+                               &heaps_.physical);
 
     // Protect the first and last 64kb of memory
-    heaps_.v00000000.AllocFixed(
-        0x00000000, 0x10000, 0x10000,
-        kMemoryAllocationReserve | kMemoryAllocationCommit,
-        !cvars::protect_zero ? kMemoryProtectRead | kMemoryProtectWrite
-                             : kMemoryProtectNoAccess);
-    heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000,
-                               kMemoryAllocationReserve, kMemoryProtectNoAccess);
+    if (!heaps_.v00000000.AllocFixed(
+            0x00000000, 0x10000, 0x10000,
+            kMemoryAllocationReserve | kMemoryAllocationCommit,
+            !cvars::protect_zero ? kMemoryProtectRead | kMemoryProtectWrite
+                               : kMemoryProtectNoAccess)) {
+        XELOGE("Unable to protect zero page");
+        return false;
+    }
 
-  // GPU writeback.
-  // 0xC... is physical, 0x7F... is virtual. We may need to overlay these.
-  heaps_.vC0000000.AllocFixed(
-      0xC0000000, 0x01000000, 32,
-      kMemoryAllocationReserve | kMemoryAllocationCommit,
-      kMemoryProtectRead | kMemoryProtectWrite);
+    if (!heaps_.physical.AllocFixed(
+            0x1FFF0000, 0x10000, 0x10000,
+            kMemoryAllocationReserve, kMemoryProtectNoAccess)) {
+        XELOGE("Unable to protect last page");
+        return false;
+    }
 
-  // Add handlers for MMIO.
-  mmio_handler_ = cpu::MMIOHandler::Install(
-      virtual_membase_, physical_membase_, physical_membase_ + 0x1FFFFFFF,
-      HostToGuestVirtualThunk, this, AccessViolationCallbackThunk, this);
-  if (!mmio_handler_) {
-    XELOGE("Unable to install MMIO handlers");
-    assert_always();
-    return false;
-  }
+    // GPU writeback
+    if (!heaps_.vC0000000.AllocFixed(
+            0xC0000000, 0x01000000, 32,
+            kMemoryAllocationReserve | kMemoryAllocationCommit,
+            kMemoryProtectRead | kMemoryProtectWrite)) {
+        XELOGE("Unable to allocate GPU writeback");
+        return false;
+    }
 
-  // ?
-  uint32_t unk_phys_alloc;
-  heaps_.vA0000000.Alloc(0x340000, 64 * 1024, kMemoryAllocationReserve,
-                         kMemoryProtectNoAccess, true, &unk_phys_alloc);
+    // Add handlers for MMIO
+    mmio_handler_ = cpu::MMIOHandler::Install(
+        virtual_membase_, physical_membase_, physical_membase_ + 0x1FFFFFFF,
+        HostToGuestVirtualThunk, this, AccessViolationCallbackThunk, this);
+    if (!mmio_handler_) {
+        XELOGE("Unable to install MMIO handlers");
+        return false;
+    }
 
-  return true;
+    // Allocate unknown physical memory region
+    uint32_t unk_phys_alloc;
+    if (!heaps_.vA0000000.Alloc(0x340000, 64 * 1024, kMemoryAllocationReserve,
+                              kMemoryProtectNoAccess, true, &unk_phys_alloc)) {
+        XELOGE("Unable to allocate unknown physical memory region");
+        return false;
+    }
+
+    return true;
 }
 
 int Memory::MapViews() {
     assert_true(xe::countof(map_info) == xe::countof(views_.all_views));
 
-    uint64_t granularity_mask = ~uint64_t(system_allocation_granularity_ - 1);
-
+    // Calculate total size needed
+    uint64_t total_size = 0;
     for (size_t n = 0; n < xe::countof(map_info); n++) {
-        // Compute aligned length
-        size_t aligned_length = map_info[n].virtual_address_end - map_info[n].virtual_address_start + 1;
-        aligned_length = ((aligned_length + granularity_mask) & granularity_mask);
-        size_t target_offset = map_info[n].target_address & granularity_mask;
+        uint64_t view_size = map_info[n].virtual_address_end - map_info[n].virtual_address_start;
+        uint64_t end_addr = view_size + map_info[n].virtual_address_start;
+        total_size = (end_addr > total_size) ? end_addr : total_size;
+    }
+    
+    // Round up to page size
+    total_size = (total_size + system_page_size_ - 1) & ~(system_page_size_ - 1);
 
-        // Let the OS choose the base address
-        views_.all_views[n] = reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
-            mapping_, nullptr, aligned_length, xe::memory::PageAccess::kReadWrite, target_offset));
+    // Try to map at a lower address first (around 1GB mark)
+    void* base_result = xe::memory::AllocFixed(
+        reinterpret_cast<void*>(0x40000000),  // Try 1GB mark first
+        static_cast<size_t>(total_size),
+        xe::memory::AllocationType::kReserve,
+        xe::memory::PageAccess::kNoAccess);
 
-        if (!views_.all_views[n]) {
-            // Unmap any previous successful views if a mapping fails
-            UnmapViews();
+    if (!base_result) {
+        // Try at 2GB mark
+        base_result = xe::memory::AllocFixed(
+            reinterpret_cast<void*>(0x80000000),
+            static_cast<size_t>(total_size),
+            xe::memory::AllocationType::kReserve,
+            xe::memory::PageAccess::kNoAccess);
+            
+        if (!base_result) {
+            // Last resort - let OS choose
+            base_result = xe::memory::AllocFixed(
+                nullptr,
+                static_cast<size_t>(total_size),
+                xe::memory::AllocationType::kReserve,
+                xe::memory::PageAccess::kNoAccess);
+            
+            if (!base_result) {
+                XELOGE("Unable to reserve memory region of size {:#x}", total_size);
+                return 1;
+            }
+        }
+    }
+
+    XELOGI("Successfully reserved memory at {:p}", base_result);
+
+    // Now map each view within our reserved space
+    uint8_t* base_ptr = reinterpret_cast<uint8_t*>(base_result);
+    
+    // First map the virtual memory base (view 0)
+    uint64_t base_size = map_info[0].virtual_address_end - map_info[0].virtual_address_start;
+    void* view0_addr = xe::memory::AllocFixed(
+        base_ptr,
+        static_cast<size_t>(base_size),
+        xe::memory::AllocationType::kCommit,
+        xe::memory::PageAccess::kReadWrite);
+        
+    if (!view0_addr) {
+        XELOGE("Failed to map base view");
+        return 1;
+    }
+    
+    views_.all_views[0] = reinterpret_cast<uint8_t*>(view0_addr);
+    XELOGI("Mapped view 0 at {:p} (size: {:#x})", views_.all_views[0], base_size);
+
+    // Map remaining views relative to the base
+    for (size_t n = 1; n < xe::countof(map_info); n++) {
+        uint64_t view_size = map_info[n].virtual_address_end - map_info[n].virtual_address_start;
+        uint64_t offset = map_info[n].virtual_address_start - map_info[0].virtual_address_start;
+        
+        void* view_addr = xe::memory::AllocFixed(
+            base_ptr + offset,
+            static_cast<size_t>(view_size),
+            xe::memory::AllocationType::kCommit,
+            xe::memory::PageAccess::kReadWrite);
+
+        if (!view_addr) {
+            XELOGE("Failed to map view {} at offset {:#x}", n, offset);
             return 1;
         }
 
-        // Log the mapping
-        XELOGI("Mapped view {} at address {} (length {})\n", n, (void*)views_.all_views[n], aligned_length);
+        views_.all_views[n] = reinterpret_cast<uint8_t*>(view_addr);
+        XELOGI("Mapped view {} at {:p} (relative offset: {:#x}, size: {:#x})",
+               n, views_.all_views[n], offset, view_size);
     }
+
     return 0;
 }
-
 
 void Memory::UnmapViews() {
   for (size_t n = 0; n < xe::countof(views_.all_views); n++) {

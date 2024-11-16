@@ -126,14 +126,30 @@ void A64CodeCache::set_indirection_default(uint32_t default_value) {
 }
 
 void A64CodeCache::AddIndirection(uint32_t guest_address,
-                                  uint32_t host_address) {
+                                uint64_t host_address) {
   if (!indirection_table_base_) {
     return;
   }
 
   uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
       indirection_table_base_ + (guest_address - kIndirectionTableBase));
-  *indirection_slot = host_address;
+
+  // Calculate relative offset from the indirection slot to target
+  int64_t offset = static_cast<int64_t>(host_address) - 
+                   reinterpret_cast<int64_t>(indirection_slot);
+                   
+  // We need to store a branch instruction that can reach the target
+  uint32_t branch_instruction;
+  if (std::abs(offset) < (1LL << 27)) {  // ±128MB range for B
+    // Direct branch: B target
+    branch_instruction = 0x14000000 | ((offset >> 2) & 0x3FFFFFF);
+  } else {
+    XELOGE("Target address too far for branch instruction: offset = {}", offset);
+    // Fall back to a safe default that will trap if executed
+    branch_instruction = 0xD4200000;  // BRK #0
+  }
+  
+  *indirection_slot = branch_instruction;
 }
 
 void A64CodeCache::CommitExecutableRange(uint32_t guest_low,
@@ -170,98 +186,109 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
                                   GuestFunction* function_info,
                                   void*& code_execute_address_out,
                                   void*& code_write_address_out) {
-  // Hold a lock while we bump the pointers up. This is important as the
-  // unwind table requires entries AND code to be sorted in order.
-  size_t low_mark;
-  size_t high_mark;
-  uint8_t* code_execute_address;
+  const size_t page_size = 16 * 1024;  // 16KB macOS ARM64 page size
+  
+  // Validate code size components
+  size_t computed_total = func_info.code_size.prolog + 
+                         func_info.code_size.body +
+                         func_info.code_size.epilog + 
+                         func_info.code_size.tail;
+                         
+  XELOGI("PlaceGuestCode: guest_address={:08X}, machine_code={:p}", guest_address, machine_code);
+  XELOGI("  Code size details: prolog={:X}, body={:X}, epilog={:X}, tail={:X}", 
+         func_info.code_size.prolog, func_info.code_size.body,
+         func_info.code_size.epilog, func_info.code_size.tail);
+  XELOGI("  Total sizes: computed={:X}, stored={:X}", 
+         computed_total, func_info.code_size.total);
+         
+  if (computed_total != func_info.code_size.total) {
+    XELOGE("Code size mismatch! Using computed total for safety");
+    const_cast<EmitFunctionInfo&>(func_info).code_size.total = computed_total;
+  }
+  
+  if (computed_total == 0) {
+    XELOGE("Invalid code size - zero length code block");
+    return;
+  }
+
+  // Calculate total size needed for code
+  // ARM64 instructions must be 4-byte aligned, but we allocate in 16-byte chunks
+  // for better memory alignment
+  size_t code_size = xe::round_up(func_info.code_size.total, 16);
+  generated_code_offset_ += code_size;
+  XELOGI("  Code placement: actual_size={:X}, aligned_size={:X}, new_offset={:X}", 
+         func_info.code_size.total, code_size, generated_code_offset_);
+
+  // Calculate low/high marks for code memory
+  size_t low_mark = generated_code_offset_ - code_size;
+  size_t high_mark = generated_code_offset_;
+
+  // Get both write and execute addresses for the same offset
+  uint8_t* code_write_address = generated_code_write_base_ + low_mark;
+  uint8_t* code_execute_address = generated_code_execute_base_ + low_mark;
+
+  // Commit memory if needed
+  size_t old_commit_mark = generated_code_commit_mark_.load();
+  size_t new_commit_mark = old_commit_mark;
+  if (high_mark > old_commit_mark) {
+    new_commit_mark = xe::round_up(high_mark, page_size);
+    XELOGI("  Committing memory: new_mark={:X}", new_commit_mark);
+    
+    if (!xe::memory::AllocFixed(
+        generated_code_execute_base_ + old_commit_mark,
+        new_commit_mark - old_commit_mark,
+        xe::memory::AllocationType::kCommit,
+        xe::memory::PageAccess::kExecuteReadOnly)) {
+      XELOGE("Failed to commit execute memory at {:p} size {:X}", 
+             generated_code_execute_base_ + old_commit_mark,
+             new_commit_mark - old_commit_mark);
+      return;
+    }
+    
+    if (!xe::memory::AllocFixed(
+        generated_code_write_base_ + old_commit_mark,
+        new_commit_mark - old_commit_mark,
+        xe::memory::AllocationType::kCommit,
+        xe::memory::PageAccess::kReadWrite)) {
+      XELOGE("Failed to commit write memory at {:p} size {:X}", 
+             generated_code_write_base_ + old_commit_mark,
+             new_commit_mark - old_commit_mark);
+      return;
+    }
+    
+    generated_code_commit_mark_.store(new_commit_mark);
+  }
+
+  // Copy code to write address
+  XELOGI("  Copying code: src={:p}, dst={:p}, size={:X}", 
+         machine_code, code_write_address, func_info.code_size.total);
+         
+  if (!code_write_address || !machine_code) {
+    XELOGE("Invalid pointers for code copy: write={:p}, machine={:p}", 
+           code_write_address, machine_code);
+    return;
+  }
+
+  // Copy the actual code first
+  std::memcpy(code_write_address, machine_code, func_info.code_size.total);
+
+  // Zero the padding between actual code and aligned size
+  size_t padding = code_size - func_info.code_size.total;
+  if (padding > 0 && padding < 16) {  // Sanity check on padding
+    std::memset(code_write_address + func_info.code_size.total, 0x00, padding);
+  }
+
+  // Return both addresses
+  code_execute_address_out = code_execute_address;
+  code_write_address_out = code_write_address;
+
+  // Notify subclasses of placed code.
   UnwindReservation unwind_reservation;
-  {
-    auto global_lock = global_critical_region_.Acquire();
-
-    low_mark = generated_code_offset_;
-
-    // Reserve code.
-    // Always move the code to land on 16b alignment.
-    code_execute_address =
-        generated_code_execute_base_ + generated_code_offset_;
-    code_execute_address_out = code_execute_address;
-    uint8_t* code_write_address =
-        generated_code_write_base_ + generated_code_offset_;
-    code_write_address_out = code_write_address;
-    generated_code_offset_ += xe::round_up(func_info.code_size.total, 16);
-
-    auto tail_write_address =
-        generated_code_write_base_ + generated_code_offset_;
-
-    // Reserve unwind info.
-    // We go on the high size of the unwind info as we don't know how big we
-    // need it, and a few extra bytes of padding isn't the worst thing.
-    unwind_reservation = RequestUnwindReservation(generated_code_write_base_ +
-                                                  generated_code_offset_);
-    generated_code_offset_ += xe::round_up(unwind_reservation.data_size, 16);
-
-    auto end_write_address =
-        generated_code_write_base_ + generated_code_offset_;
-
-    high_mark = generated_code_offset_;
-
-    // Store in map. It is maintained in sorted order of host PC dependent on
-    // us also being append-only.
-    generated_code_map_.emplace_back(
-        (uint64_t(code_execute_address - generated_code_execute_base_) << 32) |
-            generated_code_offset_,
-        function_info);
-
-    // TODO(DrChat): The following code doesn't really need to be under the
-    // global lock except for PlaceCode (but it depends on the previous code
-    // already being ran)
-
-    // If we are going above the high water mark of committed memory, commit
-    // some more. It's ok if multiple threads do this, as redundant commits
-    // aren't harmful.
-    size_t old_commit_mark, new_commit_mark;
-    do {
-      old_commit_mark = generated_code_commit_mark_;
-      if (high_mark <= old_commit_mark) break;
-
-      new_commit_mark = old_commit_mark + 16_MiB;
-      if (generated_code_execute_base_ == generated_code_write_base_) {
-        xe::memory::AllocFixed(generated_code_execute_base_, new_commit_mark,
-                               xe::memory::AllocationType::kCommit,
-                               xe::memory::PageAccess::kExecuteReadWrite);
-      } else {
-        xe::memory::AllocFixed(generated_code_execute_base_, new_commit_mark,
-                               xe::memory::AllocationType::kCommit,
-                               xe::memory::PageAccess::kExecuteReadOnly);
-        xe::memory::AllocFixed(generated_code_write_base_, new_commit_mark,
-                               xe::memory::AllocationType::kCommit,
-                               xe::memory::PageAccess::kReadWrite);
-      }
-    } while (generated_code_commit_mark_.compare_exchange_weak(
-        old_commit_mark, new_commit_mark));
-
-    // Copy code.
-    std::memcpy(code_write_address, machine_code, func_info.code_size.total);
-
-    // Fill unused slots with 0x00
-    std::memset(tail_write_address, 0x00,
-                static_cast<size_t>(end_write_address - tail_write_address));
-
-    // Notify subclasses of placed code.
-    PlaceCode(guest_address, machine_code, func_info, code_execute_address,
-              unwind_reservation);
+  if (function_info) {
+    unwind_reservation = RequestUnwindReservation(code_execute_address);
   }
-
-  // Now that everything is ready, fix up the indirection table.
-  // Note that we do support code that doesn't have an indirection fixup, so
-  // ignore those when we see them.
-  if (guest_address && indirection_table_base_) {
-    uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
-        indirection_table_base_ + (guest_address - kIndirectionTableBase));
-    *indirection_slot =
-        uint32_t(reinterpret_cast<uint64_t>(code_execute_address));
-  }
+  PlaceCode(guest_address, machine_code, func_info, code_execute_address,
+            unwind_reservation);
 }
 
 uint32_t A64CodeCache::PlaceData(const void* data, size_t length) {
