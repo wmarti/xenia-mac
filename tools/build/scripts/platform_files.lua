@@ -42,19 +42,22 @@ local function match_platform_files(base_path, base_match)
       base_path.."/"..base_match.."_gtk.cc",
     })
   filter("platforms:Mac")
+    -- First add all Mac-specific files
     files({
+      base_path.."/"..base_match.."_mac.h",
       base_path.."/"..base_match.."_mac.cc",
-      base_path.."/"..base_match.."_posix.h",
-      -- base_path.."/"..base_match.."_posix.cc",
-      -- base_path.."/"..base_match.."_linux.h",
-      -- base_path.."/"..base_match.."_linux.cc",
-      -- base_path.."/"..base_match.."_gnulinux.h",
-      -- base_path.."/"..base_match.."_gnulinux.cc",
-      -- base_path.."/"..base_match.."_x11.h",
-      -- base_path.."/"..base_match.."_x11.cc",
-      -- base_path.."/"..base_match.."_gtk.h",
-      -- base_path.."/"..base_match.."_gtk.cc",
     })
+    -- Then add POSIX files as fallbacks
+    files({
+      base_path.."/"..base_match.."_posix.h",
+      base_path.."/"..base_match.."_posix.cc",
+    })
+    -- For each Mac file that exists, remove the corresponding POSIX file
+    local mac_files = os.matchfiles(base_path.."/"..base_match.."_mac.cc")
+    for _, mac_file in ipairs(mac_files) do
+      local posix_file = mac_file:gsub("_mac%.cc$", "_posix.cc")
+      removefiles({posix_file})
+    end
   filter("platforms:Android-*")
     files({
       base_path.."/"..base_match.."_android.h",
