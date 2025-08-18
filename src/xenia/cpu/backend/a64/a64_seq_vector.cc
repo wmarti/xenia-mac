@@ -1362,13 +1362,14 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
 
     e.LDR(Q0, VConstData, e.GetVConstOffset(VPackD3DCOLORSat));
     e.FMIN(i.dest.reg().S4(), i.dest.reg().S4(), Q0.S4());
+    // Debug: The saturated value should now be ready for extraction
     // Extract bytes.
     // RGBA (XYZW) -> ARGB (WXYZ)
     // w = ((src1.uw & 0xFF) << 24) | ((src1.ux & 0xFF) << 16) |
     //     ((src1.uy & 0xFF) << 8) | (src1.uz & 0xFF)
     e.LDR(Q0, VConstData, e.GetVConstOffset(VPackD3DCOLOR));
-    // ARM64 TBL zeros bytes when index >= 16
-    // The constant now uses 0x10 for bytes that should be zero
+    // ARM64 TBL with 0xFF indices should produce zeros
+    // Actually, let me check what happens if we just do TBL without any masking
     e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16()}, Q0.B16());
   }
     static uint8x16_t EmulateFLOAT16_2(void*, std::byte src1[16]) {

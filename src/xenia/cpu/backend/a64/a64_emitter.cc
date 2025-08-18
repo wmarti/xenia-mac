@@ -861,18 +861,17 @@ static const vec128_t v_consts[] = {
     /* VPermuteByteMask     */ vec128b(0x1F),
     /* VPackD3DCOLORSat     */ vec128i(0x404000FFu),
     /* VPackD3DCOLOR        */
-    // ARM64 TBL zeros bytes when index >= 16, so use 0x10 (16) instead of 0xFF
-    // Bytes 0-3: Extract from source as ARGB (indices 12, 0, 4, 8)
-    // Bytes 4-15: Should be zero (use index 16 which is out of range)
-    vec128i(0x10101010u, 0x10101010u, 0x10101010u, 0x0C000408u),
+    // Note: x86 PSHUFB uses 0xFF to zero bytes, ARM TBL uses indices >= 16
+    // Keep original 0xFF for consistency, handle in implementation
+    vec128i(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x0C000408u),
     /* VUnpackD3DCOLOR      */
     vec128i(0xFFFFFF0Eu, 0xFFFFFF0Du, 0xFFFFFF0Cu, 0xFFFFFF0Fu),
     /* VPackFLOAT16_2       */
-    vec128i(0x10101010u, 0x10101010u, 0x10101010u, 0x01000302u),
+    vec128i(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x01000302u),
     /* VUnpackFLOAT16_2     */
     vec128i(0x0D0C0F0Eu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu),
     /* VPackFLOAT16_4       */
-    vec128i(0x10101010u, 0x10101010u, 0x01000302u, 0x05040706u),
+    vec128i(0xFFFFFFFFu, 0xFFFFFFFFu, 0x01000302u, 0x05040706u),
     /* VUnpackFLOAT16_4     */
     vec128i(0x09080B0Au, 0x0D0C0F0Eu, 0xFFFFFFFFu, 0xFFFFFFFFu),
     /* VPackSHORT_Min       */ vec128i(0x403F8001u),
