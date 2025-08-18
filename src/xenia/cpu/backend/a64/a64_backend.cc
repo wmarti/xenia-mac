@@ -126,7 +126,6 @@ bool A64Backend::Initialize(Processor* processor) {
 #if XE_PLATFORM_MAC && defined(__aarch64__)
   // On macOS ARM64, we use 64-bit addresses and the indirection table now
   // supports 64-bit entries, so we can store the actual thunk address directly.
-  XELOGI("Setting 64-bit indirection default to thunk address: 0x{:016X}", uint64_t(resolve_function_thunk_));
   static_cast<A64CodeCache*>(code_cache_.get())->set_indirection_default_64(
       uint64_t(resolve_function_thunk_));
 #else
@@ -526,22 +525,6 @@ HostToGuestThunk A64ThunkEmitter::EmitHostToGuestThunk() {
   func_info.stack_size = stack_size;
 
   void* fn = Emplace(func_info);
-  XELOGI("A64ThunkEmitter::EmitHostToGuestThunk: Created thunk at address 0x{:016X}", 
-         (uintptr_t)fn);
-  XELOGI("A64ThunkEmitter::EmitHostToGuestThunk: Thunk code size = {} bytes", 
-         func_info.code_size.total);
-  
-  // Dump the first 32 bytes of the thunk to see what instructions we generated
-  const uint8_t* thunk_bytes = reinterpret_cast<const uint8_t*>(fn);
-  XELOGI("A64ThunkEmitter::EmitHostToGuestThunk: Thunk bytes (first 32): {:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}",
-         thunk_bytes[0], thunk_bytes[1], thunk_bytes[2], thunk_bytes[3],
-         thunk_bytes[4], thunk_bytes[5], thunk_bytes[6], thunk_bytes[7],
-         thunk_bytes[8], thunk_bytes[9], thunk_bytes[10], thunk_bytes[11],
-         thunk_bytes[12], thunk_bytes[13], thunk_bytes[14], thunk_bytes[15],
-         thunk_bytes[16], thunk_bytes[17], thunk_bytes[18], thunk_bytes[19],
-         thunk_bytes[20], thunk_bytes[21], thunk_bytes[22], thunk_bytes[23],
-         thunk_bytes[24], thunk_bytes[25], thunk_bytes[26], thunk_bytes[27],
-         thunk_bytes[28], thunk_bytes[29], thunk_bytes[30], thunk_bytes[31]);
   
   return (HostToGuestThunk)fn;
 }

@@ -108,7 +108,6 @@ bool A64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
                       uint32_t debug_info_flags, FunctionDebugInfo* debug_info,
                       void** out_code_address, size_t* out_code_size,
                       std::vector<SourceMapEntry>* out_source_map) {
-  XELOGI("A64Emitter::Emit: Starting emit for function 0x{:08X}", function->address());
   SCOPE_profile_cpu_f("cpu");
 
   // Reset.
@@ -118,32 +117,23 @@ bool A64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
   source_map_arena_.Reset();
 
   // Fill the generator with code.
-  XELOGI("A64Emitter::Emit: About to call Emit(builder, func_info)");
   EmitFunctionInfo func_info = {};
   if (!Emit(builder, func_info)) {
-    XELOGI("A64Emitter::Emit: Emit(builder, func_info) failed");
     return false;
   }
-  XELOGI("A64Emitter::Emit: Emit(builder, func_info) completed successfully");
 
   // Copy the final code to the cache and relocate it.
   *out_code_size = offset();
-  XELOGI("A64Emitter::Emit: About to call Emplace");
   *out_code_address = Emplace(func_info, function);
-  XELOGI("A64Emitter::Emit: Emplace completed successfully");
 
   // Stash source map.
-  XELOGI("A64Emitter::Emit: About to clone source map");
   source_map_arena_.CloneContents(out_source_map);
-  XELOGI("A64Emitter::Emit: Source map cloned successfully");
 
   return true;
 }
 
 void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
                           GuestFunction* function) {
-  XELOGI("A64Emitter::Emplace: Starting emplace for function 0x{:08X}", 
-         function ? function->address() : 0);
   // Copy the current oaknut instruction-buffer into the code-cache
   void* new_execute_address;
   void* new_write_address;
@@ -151,29 +141,22 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
   assert_true(func_info.code_size.total == offset());
 
   if (function) {
-    XELOGI("A64Emitter::Emplace: About to call PlaceGuestCode");
     code_cache_->PlaceGuestCode(function->address(), assembly_buffer.data(),
                                 func_info, function, new_execute_address,
                                 new_write_address);
-    XELOGI("A64Emitter::Emplace: PlaceGuestCode completed successfully");
   } else {
-    XELOGI("A64Emitter::Emplace: About to call PlaceHostCode");
     code_cache_->PlaceHostCode(0, assembly_buffer.data(), func_info,
                                new_execute_address, new_write_address);
-    XELOGI("A64Emitter::Emplace: PlaceHostCode completed successfully");
   }
 
   // Reset the oaknut instruction-buffer
-  XELOGI("A64Emitter::Emplace: About to reset assembly buffer");
   assembly_buffer.clear();
   label_lookup_.clear();
-  XELOGI("A64Emitter::Emplace: Assembly buffer reset completed");
 
   return new_execute_address;
 }
 
 bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
-  XELOGI("A64Emitter::Emit(HIRBuilder): Starting HIR to ARM64 compilation");
   oaknut::Label epilog_label;
   epilog_label_ = &epilog_label;
 
@@ -195,7 +178,6 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
   stack_offset -= StackLayout::GUEST_STACK_SIZE;
   stack_offset = xe::align(stack_offset, static_cast<size_t>(16));
 
-  XELOGI("A64Emitter::Emit(HIRBuilder): Stack calculation completed, starting code generation");
   struct _code_offsets {
     size_t prolog;
     size_t prolog_stack_alloc;
@@ -268,11 +250,9 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
       offsetof(ppc::PPCContext, virtual_membase));
 
   // Body.
-  XELOGI("A64Emitter::Emit(HIRBuilder): Starting instruction processing loop");
   auto block = builder->first_block();
   int block_count = 0;
   while (block) {
-    XELOGI("A64Emitter::Emit(HIRBuilder): Processing block {}", block_count++);
     // Mark block labels.
     auto label = block->label_head;
     while (label) {
@@ -284,24 +264,20 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
     const Instr* instr = block->instr_head;
     int instr_count = 0;
     while (instr) {
-      XELOGI("A64Emitter::Emit(HIRBuilder): Processing instruction {} in block {}: {}", instr_count++, block_count-1, instr->opcode->name);
       const Instr* new_tail = instr;
       if (!SelectSequence(this, instr, &new_tail)) {
         // No sequence found!
         // NOTE: If you encounter this after adding a new instruction, do a full
         // rebuild!
-        XELOGI("A64Emitter::Emit(HIRBuilder): Failed to process instruction {}", instr->opcode->name);
         assert_always();
         XELOGE("Unable to process HIR opcode {}", instr->opcode->name);
         break;
       }
-      XELOGI("A64Emitter::Emit(HIRBuilder): Successfully processed instruction {}", instr->opcode->name);
       instr = new_tail;
     }
 
     block = block->next;
   }
-  XELOGI("A64Emitter::Emit(HIRBuilder): Completed instruction processing, generating epilog");
 
   // Function epilog.
   l(epilog_label);
@@ -431,13 +407,11 @@ void A64Emitter::UnimplementedInstr(const hir::Instr* i) {
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
 
-  XELOGI("ResolveFunction called with target_address=0x{:016X}", target_address);
   
   uint32_t guest_address;
   
   // Check if this is a 64-bit host address that needs to be mapped back to guest address
   if (target_address > 0xFFFFFFFF) {
-    XELOGI("ResolveFunction: Received 64-bit address 0x{:016X}, attempting to map to guest address", target_address);
     
     // Special case: detect if we received a context pointer instead of target address
     // Context pointers typically have patterns like 0x0000000XXXXXXXXX
@@ -454,13 +428,10 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     auto guest_function = code_cache->LookupFunction(target_address);
     if (guest_function) {
       guest_address = guest_function->MapMachineCodeToGuestAddress(target_address);
-      XELOGI("ResolveFunction: Mapped host address 0x{:016X} to guest address 0x{:08X}", 
-             target_address, guest_address);
     } else {
       // This might be a guest memory address stored in 64-bit form
       // Extract the lower 32 bits as the potential guest address
       uint32_t potential_guest = static_cast<uint32_t>(target_address);
-      XELOGI("ResolveFunction: No function mapping found, using lower 32 bits 0x{:08X} as guest address", potential_guest);
       guest_address = potential_guest;
     }
   } else {
