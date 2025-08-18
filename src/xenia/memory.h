@@ -325,8 +325,8 @@ class Memory {
         if (heap) {
             host_address += heap->host_address_offset();
         }
-        // Optional logging - disabled for performance
-        // XELOGI("TranslateVirtual: guest_address=0x{:08X}, host_address={:p}", guest_address, host_address);
+        // Optional logging
+        XELOGI("TranslateVirtual: guest_address=0x{:08X}, host_address={:p}", guest_address, static_cast<void*>(host_address));
         return reinterpret_cast<T>(host_address);
     }
 
@@ -411,12 +411,6 @@ class Memory {
   // Since granularity of callbacks is one single page, an invalidation
   // notification handler must invalidate the all the data stored in the touched
   // pages.
-  //
-  // Because large ranges (like whole framebuffers) may be written to and
-  // exceptions are expensive, it's better to unprotect multiple pages as a
-  // result of a write access violation, so the shortest common range returned
-  // by all the invalidation callbacks (clamped to a sane range and also not to
-  // touch pages with provider callbacks) is unprotected.
   //
   // - Data providers:
   //
