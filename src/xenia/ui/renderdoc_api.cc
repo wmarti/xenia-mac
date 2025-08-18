@@ -23,6 +23,11 @@ namespace xe {
 namespace ui {
 
 bool RenderdocApi::Initialize() {
+#if XE_PLATFORM_MAC
+  // RenderDoc is not supported on macOS
+  XELOGI("RenderDoc is not supported on macOS - using stub implementation");
+  return false;
+#else
   Shutdown();
   pRENDERDOC_GetAPI get_api = nullptr;
   // The RenderDoc library should be already loaded into the process if
@@ -58,9 +63,11 @@ bool RenderdocApi::Initialize() {
   }
   XELOGI("RenderDoc API initialized");
   return true;
+#endif  // !XE_PLATFORM_MAC
 }
 
 void RenderdocApi::Shutdown() {
+#if !XE_PLATFORM_MAC
   api_1_0_0_ = nullptr;
   if (library_) {
 #if XE_PLATFORM_LINUX
@@ -70,6 +77,7 @@ void RenderdocApi::Shutdown() {
     // the reference count.
     library_ = nullptr;
   }
+#endif  // !XE_PLATFORM_MAC
 }
 
 }  // namespace ui
