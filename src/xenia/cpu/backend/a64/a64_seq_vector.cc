@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2024 Xenia Developers. All rights reserved.                      *
+ * Copyright 2025 Xenia Developers. All rights reserved.                      *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -1357,21 +1357,20 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     // are valid - max before min to pack NaN as zero (5454082B is heavily
     // affected by the order - packs 0xFFFFFFFF in matrix code to get a 0
     // constant).
-    // Use FMAXNM/FMINNM (numeric max/min) to handle NaN correctly on macOS
-    // FMAXNM returns the non-NaN value when one operand is NaN
+    // Use FMAXNM/FMINNM (numeric max/min) instead of FMAX/FMIN to handle NaN
+    // correctly. FMAXNM returns the non-NaN value when one operand is NaN,
+    // matching x86 behavior and Windows ARM64 expectations.
     e.LDR(Q0, VConstData, e.GetVConstOffset(V3333));
     e.FMAXNM(i.dest.reg().S4(), src.S4(), Q0.S4());
 
     e.LDR(Q0, VConstData, e.GetVConstOffset(VPackD3DCOLORSat));
     e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q0.S4());
-    // Debug: The saturated value should now be ready for extraction
+    
     // Extract bytes.
     // RGBA (XYZW) -> ARGB (WXYZ)
     // w = ((src1.uw & 0xFF) << 24) | ((src1.ux & 0xFF) << 16) |
     //     ((src1.uy & 0xFF) << 8) | (src1.uz & 0xFF)
     e.LDR(Q0, VConstData, e.GetVConstOffset(VPackD3DCOLOR));
-    // ARM64 TBL with 0xFF indices should produce zeros
-    // Actually, let me check what happens if we just do TBL without any masking
     e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16()}, Q0.B16());
   }
     static uint8x16_t EmulateFLOAT16_2(void*, std::byte src1[16]) {
