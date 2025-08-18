@@ -1382,7 +1382,19 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       std::memset(b, 0, sizeof(b));
 
       for (int i = 0; i < 2; i++) {
-        b[7 - i] = half_float::detail::float2half<std::round_toward_zero>(a[i]);
+        float x = a[i];
+        uint16_t h;
+        
+        // Xbox 360 saturation behavior
+        if (x >= 65504.0f) {
+          h = 0x7FFF;  // Positive saturation sentinel
+        } else if (x <= -65504.0f) {
+          h = 0xFFFF;  // Negative saturation sentinel  
+        } else {
+          h = half_float::detail::float2half<std::round_toward_zero>(x);
+        }
+        
+        b[7 - i] = h;
       }
 
       // Store the uint16_t array into a uint8x16_t NEON register
@@ -1398,7 +1410,47 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       if (i.src1.is_constant) {
         e.LoadConstantV(src1, i.src1.constant());
       }
+      
+      // Perform IEEE conversion first
       e.FCVTN(i.dest.reg().toD().H4(), src1.S4());
+      
+      // Xbox 360 rule: infinity values should be replaced with 0x7FFF/0xFFFF
+      // After FCVTN, +inf becomes 0x7C00, -inf becomes 0xFC00
+      // We need to detect these and replace them
+      
+      // Create masks for infinity detection
+      QReg abs_mask = Q1;
+      QReg inf_pattern = Q2;
+      QReg is_inf = Q3;
+      QReg sign_mask = Q4;
+      QReg sentinel = Q5;
+      
+      // Get absolute value of halfwords (clear sign bit)  
+      e.MOVI(abs_mask.B16(), 0xFF);  // 0xFFFF
+      e.USHR(abs_mask.H8(), abs_mask.H8(), 1);  // 0x7FFF
+      e.AND(is_inf.toD().B8(), i.dest.reg().toD().B8(), abs_mask.toD().B8());
+      
+      // Check if abs value == 0x7C00 (infinity)
+      e.MOVI(inf_pattern.H8(), 0x7C, oaknut::LslSymbol{}, 8);  // 0x7C00
+      e.CMEQ(is_inf.toD().H4(), is_inf.toD().H4(), inf_pattern.toD().H4());
+      
+      // Get sign bits
+      e.MOVI(sign_mask.H8(), 0x80, oaknut::LslSymbol{}, 8);  // 0x8000
+      e.AND(sign_mask.toD().B8(), i.dest.reg().toD().B8(), sign_mask.toD().B8());
+      
+      // Create sentinel value: sign | 0x7FFF
+      e.MOVI(sentinel.B16(), 0xFF);  // 0xFFFF
+      e.USHR(sentinel.H8(), sentinel.H8(), 1);  // 0x7FFF
+      e.ORR(sentinel.toD().B8(), sentinel.toD().B8(), sign_mask.toD().B8());
+      
+      // Apply replacement where infinity was detected
+      // Use BSL to replace infinities with sentinels
+      // BSL: result = (mask & src1) | (~mask & src2)
+      // We want: where is_inf is true, use sentinel; else use original
+      e.BSL(is_inf.toD().B8(), sentinel.toD().B8(), i.dest.reg().toD().B8());
+      e.MOV(i.dest.reg().toD().B8(), is_inf.toD().B8());
+      
+      // Keep existing layout adjustments
       e.MOVI(Q0.B16(), 0);
       e.EXT(i.dest.reg().B16(), Q0.B16(), i.dest.reg().B16(), 4);
       e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
@@ -1454,20 +1506,44 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitSHORT_2(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
+    
+    // Check if input is constant zero - special case
+    if (i.src1.is_constant && i.src1.value->IsConstantZero()) {
+      e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16());
+      return;
+    }
+    
     QReg src = i.src1;
     if (i.src1.is_constant) {
       src = i.dest;
       e.LoadConstantV(src, i.src1.constant());
+    } else {
+      // Copy src to dest if they're different registers
+      if (src.index() != i.dest.reg().index()) {
+        e.MOV(i.dest.reg().B16(), src.B16());
+      }
     }
+    
     const XReg VConstData = X3;
     e.MOV(VConstData, e.GetVConstPtr());
 
-    // Saturate
+    // Check if the value is zero (0x00000000) - if so, skip min/max
+    // Zero is a special case that doesn't use the mantissa trick
+    // Create a mask for zero elements
+    e.CMEQ(Q0.S4(), i.dest.reg().S4(), 0);
+    
+    // Save the zero mask
+    e.MOV(Q2.B16(), Q0.B16());
+
+    // Saturate non-zero values - use FMAXNM/FMINNM to handle NaN correctly
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Min));
-    e.FMAX(i.dest.reg().S4(), src.S4(), Q1.S4());
+    e.FMAXNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
 
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Max));
-    e.FMIN(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
+    e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
+    
+    // Use BIC to clear values that were originally zero
+    e.BIC(i.dest.reg().B16(), i.dest.reg().B16(), Q2.B16());
 
     // Pack
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_2));
@@ -1475,20 +1551,44 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitSHORT_4(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
+    
+    // Check if input is constant zero - special case
+    if (i.src1.is_constant && i.src1.value->IsConstantZero()) {
+      e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16());
+      return;
+    }
+    
     QReg src = i.src1;
     if (i.src1.is_constant) {
       src = i.dest;
       e.LoadConstantV(src, i.src1.constant());
+    } else {
+      // Copy src to dest if they're different registers
+      if (src.index() != i.dest.reg().index()) {
+        e.MOV(i.dest.reg().B16(), src.B16());
+      }
     }
+    
     const XReg VConstData = X3;
     e.MOV(VConstData, e.GetVConstPtr());
 
-    // Saturate
+    // Check if the value is zero (0x00000000) - if so, skip min/max
+    // Zero is a special case that doesn't use the mantissa trick
+    // Create a mask for zero elements
+    e.CMEQ(Q0.S4(), i.dest.reg().S4(), 0);
+    
+    // Save the zero mask
+    e.MOV(Q2.B16(), Q0.B16());
+
+    // Saturate non-zero values - use FMAXNM/FMINNM to handle NaN correctly
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Min));
-    e.FMAX(i.dest.reg().S4(), src.S4(), Q1.S4());
+    e.FMAXNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
 
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Max));
-    e.FMIN(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
+    e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
+    
+    // Use BIC to clear values that were originally zero
+    e.BIC(i.dest.reg().B16(), i.dest.reg().B16(), Q2.B16());
 
     // Pack
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_4));
@@ -1783,12 +1883,14 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     } else {
       src = i.src1;
     }
-    // src = ZZYYXXWW
+    // src = ZZYYXXWW (ARGB packed as bytes)
     // Unpack to 000000ZZ,000000YY,000000XX,000000WW
     e.LDR(Q1, VConstData, e.GetVConstOffset(VUnpackD3DCOLOR));
     e.TBL(i.dest.reg().B16(), List{src.B16()}, Q1.B16());
-    // Add 1.0f to each.
-    e.FMOV(Q1.S4(), FImm8(0, 7, 0));
+    // Convert to float by adding float bias
+    // XOR with 1.0f (0x3F800000) sets the exponent for values 0-127
+    // For values 128-255, we need to handle differently
+    e.FMOV(Q1.S4(), FImm8(0, 7, 0));  // Load 1.0f (0x3F800000)
     e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), Q1.B16());
     // To convert to 0 to 1, games multiply by 0x47008081 and add 0xC7008081.
   }
@@ -1801,7 +1903,16 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
       std::memset(b, 0, sizeof(b));
 
       for (int i = 0; i < 2; i++) {
-        b[i] = half_float::detail::half2float(a[VEC128_W(6 + i)]);
+        uint16_t h = a[VEC128_W(6 + i)];
+        
+        // Xbox 360 sentinel value handling
+        if (h == 0x7FFF) {
+          b[i] = 131008.0f;   // Special positive sentinel (0x47FFE000)
+        } else if (h == 0xFFFF) {
+          b[i] = -131008.0f;  // Special negative sentinel (0xC7FFE000)
+        } else {
+          b[i] = half_float::detail::half2float(h);
+        }
       }
 
       // Constants, or something
@@ -1816,16 +1927,83 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     // D3D10 half float format
 
     if (e.IsFeatureEnabled(kA64EmitF16C)) {
-      const QReg src1 = i.src1.is_constant ? Q0 : i.src1;
+      // Load source properly
+      const QReg src = i.src1.is_constant ? Q0 : i.src1;
       if (i.src1.is_constant) {
-        e.LoadConstantV(src1, i.src1.constant());
+        e.LoadConstantV(src, i.src1.constant());
       }
-
-      // Move the upper 4 bytes to the lower 4 bytes, zero the rest
-      e.EOR(Q0.B16(), Q0.B16(), Q0.B16());
-      e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), Q0.B16(), 12);
-
-      e.FCVTL(i.dest.reg().S4(), i.dest.reg().toD().H4());
+      
+      // 1) Put src bytes [12..15] into bytes [0..3] of a temp
+      // EXT(..., #12) copies exactly those 4 bytes; the rest are zero
+      QReg halves = Q1;
+      e.EOR(Q0.B16(), Q0.B16(), Q0.B16());           // Q0 = 0
+      e.EXT(halves.B16(), src.B16(), Q0.B16(), 12);  // halves[0..3] = src[12..15]
+      
+      // Keep copy for sentinel detection (before conversion)
+      QReg halves_copy = Q2;
+      e.MOV(halves_copy.B16(), halves.B16());
+      
+      // 2) Convert low 4 halfwords -> 4 floats. FCVTL reads H0..H3 (low 64 bits)
+      // After the EXT, H0 = low halfword of element 3, H1 = high halfword, H2 = H3 = 0
+      e.FCVTL(i.dest.reg().S4(), halves.toD().H4());
+      
+      // Note: We do NOT swap the order - the natural order from EXT is correct
+      
+      // 3) Xbox 360 rule: 0x7FFF → +131008.0f, 0xFFFF → -131008.0f
+      
+      // Create sentinel patterns for halfword comparison
+      QReg h_7FFF = Q3;
+      QReg h_FFFF = Q4;
+      
+      // Create 0xFFFF - all bytes 0xFF
+      e.MOVI(h_FFFF.B16(), 0xFF);  // All bytes 0xFF = 0xFFFF per halfword
+      // Create 0x7FFF by shifting 0xFFFF right by 1
+      e.USHR(h_7FFF.H8(), h_FFFF.H8(), 1);  // 0xFFFF >> 1 = 0x7FFF
+      
+      // Compare only the low 64 bits (H0-H3) with sentinels
+      // After EXT, only H0 and H1 have data, H2 and H3 are zero
+      QReg mask_7FFF_H = Q5;
+      QReg mask_FFFF_H = Q6;
+      // Initialize masks to zero first
+      e.EOR(mask_7FFF_H.B16(), mask_7FFF_H.B16(), mask_7FFF_H.B16());
+      e.EOR(mask_FFFF_H.B16(), mask_FFFF_H.B16(), mask_FFFF_H.B16());
+      // Compare only the low 64 bits
+      e.CMEQ(mask_7FFF_H.toD().H4(), halves_copy.toD().H4(), h_7FFF.toD().H4());
+      e.CMEQ(mask_FFFF_H.toD().H4(), halves_copy.toD().H4(), h_FFFF.toD().H4());
+      
+      // Widen halfword masks to word masks for blending with float32 values
+      // Use high-numbered registers to avoid any aliasing
+      QReg mask_7FFF_S = Q13;
+      QReg mask_FFFF_S = Q14;
+      e.SXTL(mask_7FFF_S.S4(), mask_7FFF_H.toD().H4());
+      e.SXTL(mask_FFFF_S.S4(), mask_FFFF_H.toD().H4());
+      
+      // Prepare replacement values: ±131008.0f (broadcast to all lanes)
+      QReg f_pos_131008 = Q9;
+      QReg f_neg_131008 = Q10;
+      // Load immediate into S[0] then duplicate
+      e.MOV(W0, 0x47FFE000);
+      e.MOV(f_pos_131008.Selem()[0], W0);
+      e.DUP(f_pos_131008.S4(), f_pos_131008.Selem()[0]);  // +131008.0f
+      
+      e.MOV(W0, 0xC7FFE000);
+      e.MOV(f_neg_131008.Selem()[0], W0);
+      e.DUP(f_neg_131008.S4(), f_neg_131008.Selem()[0]);  // -131008.0f
+      
+      // 5) Blend using BIT which has clearer semantics
+      // BIT Vd, Vn, Vm => Vd = (Vn & Vm) | (Vd & ~Vm)
+      // When mask==0: result = (replacement & 0) | (original & 0xFFFF) = original
+      // When mask==0xFFFF: result = (replacement & 0xFFFF) | (original & 0) = replacement
+      // This is what we want!
+      
+      // Apply sentinel replacements using BIT
+      // BIT Vd, Vn, Vm => Vd = (Vn & Vm) | (Vd & ~Vm)
+      // When mask is 0: keep original, when mask is 0xFFFFFFFF: use replacement
+      e.BIT(i.dest.reg().B16(), f_pos_131008.B16(), mask_7FFF_S.B16());
+      e.BIT(i.dest.reg().B16(), f_neg_131008.B16(), mask_FFFF_S.B16());
+      
+      // 6) Swap S0 and S1 to match Xbox 360 halfword read order
+      // The software reads halfword 7 first, then 6, but EXT gives us 6 then 7
       e.REV64(i.dest.reg().S4(), i.dest.reg().S4());
 
       // Write 1.0 to element 3
