@@ -32,8 +32,17 @@ void LaunchWebBrowser(const std::string_view url) {
 void LaunchFileExplorer(const std::filesystem::path& path) { assert_always(); }
 
 void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
-  void* libsdl2 = dlopen("libSDL2.so", RTLD_LAZY | RTLD_LOCAL);
-  assert_not_null(libsdl2);
+  void* libsdl2 = dlopen("libSDL2.dylib", RTLD_LAZY | RTLD_LOCAL);
+  if (!libsdl2) {
+    // Try alternative paths
+    libsdl2 = dlopen("libSDL2-2.0.0.dylib", RTLD_LAZY | RTLD_LOCAL);
+  }
+  if (!libsdl2) {
+    // Try framework path
+    libsdl2 = dlopen("/Library/Frameworks/SDL2.framework/SDL2", RTLD_LAZY | RTLD_LOCAL);
+  }
+  // Don't assert, just return if SDL2 is not available
+  // assert_not_null(libsdl2);
   if (libsdl2) {
     auto* pSDL_ShowSimpleMessageBox =
         reinterpret_cast<decltype(SDL_ShowSimpleMessageBox)*>(
