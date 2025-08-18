@@ -1357,11 +1357,13 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     // are valid - max before min to pack NaN as zero (5454082B is heavily
     // affected by the order - packs 0xFFFFFFFF in matrix code to get a 0
     // constant).
+    // Use FMAXNM/FMINNM (numeric max/min) to handle NaN correctly on macOS
+    // FMAXNM returns the non-NaN value when one operand is NaN
     e.LDR(Q0, VConstData, e.GetVConstOffset(V3333));
-    e.FMAX(i.dest.reg().S4(), src.S4(), Q0.S4());
+    e.FMAXNM(i.dest.reg().S4(), src.S4(), Q0.S4());
 
     e.LDR(Q0, VConstData, e.GetVConstOffset(VPackD3DCOLORSat));
-    e.FMIN(i.dest.reg().S4(), i.dest.reg().S4(), Q0.S4());
+    e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q0.S4());
     // Debug: The saturated value should now be ready for extraction
     // Extract bytes.
     // RGBA (XYZW) -> ARGB (WXYZ)
