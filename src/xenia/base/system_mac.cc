@@ -39,7 +39,8 @@ void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
   }
   if (!libsdl2) {
     // Try framework path
-    libsdl2 = dlopen("/Library/Frameworks/SDL2.framework/SDL2", RTLD_LAZY | RTLD_LOCAL);
+    libsdl2 = dlopen("/Library/Frameworks/SDL2.framework/SDL2",
+                     RTLD_LAZY | RTLD_LOCAL);
   }
   // Don't assert, just return if SDL2 is not available
   // assert_not_null(libsdl2);

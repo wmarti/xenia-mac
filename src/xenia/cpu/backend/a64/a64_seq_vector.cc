@@ -1181,7 +1181,8 @@ struct PERMUTE_V128
 
   static void EmitByInt16(A64Emitter& e, const EmitArgType& i) {
     // Permute 16-bit halfwords between src2 and src3.
-    // src1 is an array of 16-bit indices corresponding to positions within src2 and src3.
+    // src1 is an array of 16-bit indices corresponding to positions within src2
+    // and src3.
     if (i.src3.value->IsConstantZero()) {
       if (i.src2.value->IsConstantZero()) {
         // src2 & src3 are zero, so result will always be zero.
@@ -1193,27 +1194,29 @@ struct PERMUTE_V128
     // This implementation is adapted from the x64 backend
     assert_true(i.src1.is_constant);
 
-    // Process the constant indices to create byte shuffle masks and blend control
+    // Process the constant indices to create byte shuffle masks and blend
+    // control
     vec128_t perm = (i.src1.constant() & vec128s(0xF)) ^ vec128s(0x1);
     vec128_t perm_bytes = vec128b(0);
     vec128_t blend_mask = vec128b(0);
-    
+
     for (int idx = 0; idx < 8; idx++) {
       bool from_src3 = perm.i16[idx] > 7;
-      
+
       // Create byte indices for this 16-bit element
       uint8_t base_byte_idx = uint8_t(perm.u16[idx] & 7) * 2;
       perm_bytes.u8[idx * 2] = base_byte_idx;
       perm_bytes.u8[idx * 2 + 1] = base_byte_idx + 1;
-      
-      // Create blend mask (0xFF means take from src3, 0x00 means take from src2)
+
+      // Create blend mask (0xFF means take from src3, 0x00 means take from
+      // src2)
       blend_mask.u8[idx * 2] = from_src3 ? 0xFF : 0x00;
       blend_mask.u8[idx * 2 + 1] = from_src3 ? 0xFF : 0x00;
     }
 
     // Load the byte shuffle mask
     e.LoadConstantV(Q0, perm_bytes);
-    
+
     // Load the blend mask
     e.LoadConstantV(Q1, blend_mask);
 
@@ -1234,8 +1237,8 @@ struct PERMUTE_V128
     e.TBL(Q3.B16(), List{Q3.B16()}, Q0.B16());
 
     // Blend the results: dest = (Q3 & Q1) | (Q2 & ~Q1)
-    e.AND(Q3.B16(), Q3.B16(), Q1.B16());    // Q3 & mask
-    e.BIC(Q2.B16(), Q2.B16(), Q1.B16());    // Q2 & ~mask  
+    e.AND(Q3.B16(), Q3.B16(), Q1.B16());            // Q3 & mask
+    e.BIC(Q2.B16(), Q2.B16(), Q1.B16());            // Q2 & ~mask
     e.ORR(i.dest.reg().B16(), Q3.B16(), Q2.B16());  // combine
   }
 
@@ -1365,7 +1368,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
 
     e.LDR(Q0, VConstData, e.GetVConstOffset(VPackD3DCOLORSat));
     e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q0.S4());
-    
+
     // Extract bytes.
     // RGBA (XYZW) -> ARGB (WXYZ)
     // w = ((src1.uw & 0xFF) << 24) | ((src1.ux & 0xFF) << 16) |
@@ -1384,16 +1387,16 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       for (int i = 0; i < 2; i++) {
         float x = a[i];
         uint16_t h;
-        
+
         // Xbox 360 saturation behavior
         if (x >= 65504.0f) {
           h = 0x7FFF;  // Positive saturation sentinel
         } else if (x <= -65504.0f) {
-          h = 0xFFFF;  // Negative saturation sentinel  
+          h = 0xFFFF;  // Negative saturation sentinel
         } else {
           h = half_float::detail::float2half<std::round_toward_zero>(x);
         }
-        
+
         b[7 - i] = h;
       }
 
@@ -1410,46 +1413,47 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       if (i.src1.is_constant) {
         e.LoadConstantV(src1, i.src1.constant());
       }
-      
+
       // Perform IEEE conversion first
       e.FCVTN(i.dest.reg().toD().H4(), src1.S4());
-      
+
       // Xbox 360 rule: infinity values should be replaced with 0x7FFF/0xFFFF
       // After FCVTN, +inf becomes 0x7C00, -inf becomes 0xFC00
       // We need to detect these and replace them
-      
+
       // Create masks for infinity detection
       QReg abs_mask = Q1;
       QReg inf_pattern = Q2;
       QReg is_inf = Q3;
       QReg sign_mask = Q4;
       QReg sentinel = Q5;
-      
-      // Get absolute value of halfwords (clear sign bit)  
-      e.MOVI(abs_mask.B16(), 0xFF);  // 0xFFFF
+
+      // Get absolute value of halfwords (clear sign bit)
+      e.MOVI(abs_mask.B16(), 0xFF);             // 0xFFFF
       e.USHR(abs_mask.H8(), abs_mask.H8(), 1);  // 0x7FFF
       e.AND(is_inf.toD().B8(), i.dest.reg().toD().B8(), abs_mask.toD().B8());
-      
+
       // Check if abs value == 0x7C00 (infinity)
       e.MOVI(inf_pattern.H8(), 0x7C, oaknut::LslSymbol{}, 8);  // 0x7C00
       e.CMEQ(is_inf.toD().H4(), is_inf.toD().H4(), inf_pattern.toD().H4());
-      
+
       // Get sign bits
       e.MOVI(sign_mask.H8(), 0x80, oaknut::LslSymbol{}, 8);  // 0x8000
-      e.AND(sign_mask.toD().B8(), i.dest.reg().toD().B8(), sign_mask.toD().B8());
-      
+      e.AND(sign_mask.toD().B8(), i.dest.reg().toD().B8(),
+            sign_mask.toD().B8());
+
       // Create sentinel value: sign | 0x7FFF
-      e.MOVI(sentinel.B16(), 0xFF);  // 0xFFFF
+      e.MOVI(sentinel.B16(), 0xFF);             // 0xFFFF
       e.USHR(sentinel.H8(), sentinel.H8(), 1);  // 0x7FFF
       e.ORR(sentinel.toD().B8(), sentinel.toD().B8(), sign_mask.toD().B8());
-      
+
       // Apply replacement where infinity was detected
       // Use BSL to replace infinities with sentinels
       // BSL: result = (mask & src1) | (~mask & src2)
       // We want: where is_inf is true, use sentinel; else use original
       e.BSL(is_inf.toD().B8(), sentinel.toD().B8(), i.dest.reg().toD().B8());
       e.MOV(i.dest.reg().toD().B8(), is_inf.toD().B8());
-      
+
       // Keep existing layout adjustments
       e.MOVI(Q0.B16(), 0);
       e.EXT(i.dest.reg().B16(), Q0.B16(), i.dest.reg().B16(), 4);
@@ -1506,13 +1510,13 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitSHORT_2(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
-    
+
     // Check if input is constant zero - special case
     if (i.src1.is_constant && i.src1.value->IsConstantZero()) {
       e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16());
       return;
     }
-    
+
     QReg src = i.src1;
     if (i.src1.is_constant) {
       src = i.dest;
@@ -1523,7 +1527,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
         e.MOV(i.dest.reg().B16(), src.B16());
       }
     }
-    
+
     const XReg VConstData = X3;
     e.MOV(VConstData, e.GetVConstPtr());
 
@@ -1531,7 +1535,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     // Zero is a special case that doesn't use the mantissa trick
     // Create a mask for zero elements
     e.CMEQ(Q0.S4(), i.dest.reg().S4(), 0);
-    
+
     // Save the zero mask
     e.MOV(Q2.B16(), Q0.B16());
 
@@ -1541,7 +1545,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
 
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Max));
     e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
-    
+
     // Use BIC to clear values that were originally zero
     e.BIC(i.dest.reg().B16(), i.dest.reg().B16(), Q2.B16());
 
@@ -1551,13 +1555,13 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitSHORT_4(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
-    
+
     // Check if input is constant zero - special case
     if (i.src1.is_constant && i.src1.value->IsConstantZero()) {
       e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16());
       return;
     }
-    
+
     QReg src = i.src1;
     if (i.src1.is_constant) {
       src = i.dest;
@@ -1568,7 +1572,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
         e.MOV(i.dest.reg().B16(), src.B16());
       }
     }
-    
+
     const XReg VConstData = X3;
     e.MOV(VConstData, e.GetVConstPtr());
 
@@ -1576,7 +1580,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     // Zero is a special case that doesn't use the mantissa trick
     // Create a mask for zero elements
     e.CMEQ(Q0.S4(), i.dest.reg().S4(), 0);
-    
+
     // Save the zero mask
     e.MOV(Q2.B16(), Q0.B16());
 
@@ -1586,7 +1590,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
 
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Max));
     e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
-    
+
     // Use BIC to clear values that were originally zero
     e.BIC(i.dest.reg().B16(), i.dest.reg().B16(), Q2.B16());
 
@@ -1718,8 +1722,10 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
             e.LoadConstantV(src2, i.src2.constant());
           }
 
-          e.SQXTUN(i.dest.reg().toD().B8(), src1.H8());   // src1 first (lower 64 bits)
-          e.SQXTUN2(i.dest.reg().B16(), src2.H8());       // src2 second (upper 64 bits)
+          e.SQXTUN(i.dest.reg().toD().B8(),
+                   src1.H8());  // src1 first (lower 64 bits)
+          e.SQXTUN2(i.dest.reg().B16(),
+                    src2.H8());  // src2 second (upper 64 bits)
 
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
           e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
@@ -1731,8 +1737,10 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       } else {
         if (IsPackOutSaturate(flags)) {
           // signed -> signed + saturate
-          e.SQXTN(i.dest.reg().toD().B8(), i.src1.reg().H8());    // src1 first (lower 64 bits)
-          e.SQXTN2(i.dest.reg().B16(), i.src2.reg().H8());       // src2 second (upper 64 bits)
+          e.SQXTN(i.dest.reg().toD().B8(),
+                  i.src1.reg().H8());  // src1 first (lower 64 bits)
+          e.SQXTN2(i.dest.reg().B16(),
+                   i.src2.reg().H8());  // src2 second (upper 64 bits)
 
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
         } else {
@@ -1763,21 +1771,24 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
           // Create saturation limit: 0xFFFF in all lanes
           e.MOV(W0, 0xFFFF);
           e.DUP(Q2.S4(), W0);
-          
+
           // Saturate both sources
           e.UMIN(Q0.S4(), src1.S4(), Q2.S4());  // Saturate src1 (v3)
           e.UMIN(Q1.S4(), src2.S4(), Q2.S4());  // Saturate src2 (v4)
-          
+
           // Pack: src1 first (lower 64 bits), then src2 (upper 64 bits)
-          e.UQXTN(i.dest.reg().toD().H4(), Q0.S4());   // Pack src1 to lower 64 bits
-          e.UQXTN2(i.dest.reg().H8(), Q1.S4());       // Pack src2 to upper 64 bits
-          
+          e.UQXTN(i.dest.reg().toD().H4(),
+                  Q0.S4());                      // Pack src1 to lower 64 bits
+          e.UQXTN2(i.dest.reg().H8(), Q1.S4());  // Pack src2 to upper 64 bits
+
           // Fix endianness: reverse 16-bit values within 32-bit words
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
         } else {
           // unsigned -> unsigned
-          e.XTN(i.dest.reg().toD().H4(), i.src1.reg().S4());   // src1 first (lower 64 bits)
-          e.XTN2(i.dest.reg().H8(), i.src2.reg().S4());       // src2 second (upper 64 bits)
+          e.XTN(i.dest.reg().toD().H4(),
+                i.src1.reg().S4());  // src1 first (lower 64 bits)
+          e.XTN2(i.dest.reg().H8(),
+                 i.src2.reg().S4());  // src2 second (upper 64 bits)
 
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
         }
@@ -1794,8 +1805,10 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       if (IsPackOutUnsigned(flags)) {
         if (IsPackOutSaturate(flags)) {
           // signed -> unsigned + saturate
-          e.SQXTUN(i.dest.reg().toD().H4(), i.src1.reg().S4());   // src1 first (lower 64 bits)
-          e.SQXTUN2(i.dest.reg().H8(), i.src2.reg().S4());       // src2 second (upper 64 bits)
+          e.SQXTUN(i.dest.reg().toD().H4(),
+                   i.src1.reg().S4());  // src1 first (lower 64 bits)
+          e.SQXTUN2(i.dest.reg().H8(),
+                    i.src2.reg().S4());  // src2 second (upper 64 bits)
 
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
         } else {
@@ -1814,8 +1827,10 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
           if (i.src2.is_constant) {
             e.LoadConstantV(src2, i.src2.constant());
           }
-          e.SQXTN(i.dest.reg().toD().H4(), src1.S4());   // src1 first (lower 64 bits)
-          e.SQXTN2(i.dest.reg().H8(), src2.S4());       // src2 second (upper 64 bits)
+          e.SQXTN(i.dest.reg().toD().H4(),
+                  src1.S4());  // src1 first (lower 64 bits)
+          e.SQXTN2(i.dest.reg().H8(),
+                   src2.S4());  // src2 second (upper 64 bits)
 
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
         } else {
@@ -1904,10 +1919,10 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
 
       for (int i = 0; i < 2; i++) {
         uint16_t h = a[VEC128_W(6 + i)];
-        
+
         // Xbox 360 sentinel value handling
         if (h == 0x7FFF) {
-          b[i] = 131008.0f;   // Special positive sentinel (0x47FFE000)
+          b[i] = 131008.0f;  // Special positive sentinel (0x47FFE000)
         } else if (h == 0xFFFF) {
           b[i] = -131008.0f;  // Special negative sentinel (0xC7FFE000)
         } else {
@@ -1932,34 +1947,36 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
       if (i.src1.is_constant) {
         e.LoadConstantV(src, i.src1.constant());
       }
-      
+
       // 1) Put src bytes [12..15] into bytes [0..3] of a temp
       // EXT(..., #12) copies exactly those 4 bytes; the rest are zero
       QReg halves = Q1;
-      e.EOR(Q0.B16(), Q0.B16(), Q0.B16());           // Q0 = 0
-      e.EXT(halves.B16(), src.B16(), Q0.B16(), 12);  // halves[0..3] = src[12..15]
-      
+      e.EOR(Q0.B16(), Q0.B16(), Q0.B16());  // Q0 = 0
+      e.EXT(halves.B16(), src.B16(), Q0.B16(),
+            12);  // halves[0..3] = src[12..15]
+
       // Keep copy for sentinel detection (before conversion)
       QReg halves_copy = Q2;
       e.MOV(halves_copy.B16(), halves.B16());
-      
-      // 2) Convert low 4 halfwords -> 4 floats. FCVTL reads H0..H3 (low 64 bits)
-      // After the EXT, H0 = low halfword of element 3, H1 = high halfword, H2 = H3 = 0
+
+      // 2) Convert low 4 halfwords -> 4 floats. FCVTL reads H0..H3 (low 64
+      // bits) After the EXT, H0 = low halfword of element 3, H1 = high
+      // halfword, H2 = H3 = 0
       e.FCVTL(i.dest.reg().S4(), halves.toD().H4());
-      
+
       // Note: We do NOT swap the order - the natural order from EXT is correct
-      
+
       // 3) Xbox 360 rule: 0x7FFF → +131008.0f, 0xFFFF → -131008.0f
-      
+
       // Create sentinel patterns for halfword comparison
       QReg h_7FFF = Q3;
       QReg h_FFFF = Q4;
-      
+
       // Create 0xFFFF - all bytes 0xFF
       e.MOVI(h_FFFF.B16(), 0xFF);  // All bytes 0xFF = 0xFFFF per halfword
       // Create 0x7FFF by shifting 0xFFFF right by 1
       e.USHR(h_7FFF.H8(), h_FFFF.H8(), 1);  // 0xFFFF >> 1 = 0x7FFF
-      
+
       // Compare only the low 64 bits (H0-H3) with sentinels
       // After EXT, only H0 and H1 have data, H2 and H3 are zero
       QReg mask_7FFF_H = Q5;
@@ -1970,14 +1987,14 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
       // Compare only the low 64 bits
       e.CMEQ(mask_7FFF_H.toD().H4(), halves_copy.toD().H4(), h_7FFF.toD().H4());
       e.CMEQ(mask_FFFF_H.toD().H4(), halves_copy.toD().H4(), h_FFFF.toD().H4());
-      
+
       // Widen halfword masks to word masks for blending with float32 values
       // Use high-numbered registers to avoid any aliasing
       QReg mask_7FFF_S = Q13;
       QReg mask_FFFF_S = Q14;
       e.SXTL(mask_7FFF_S.S4(), mask_7FFF_H.toD().H4());
       e.SXTL(mask_FFFF_S.S4(), mask_FFFF_H.toD().H4());
-      
+
       // Prepare replacement values: ±131008.0f (broadcast to all lanes)
       QReg f_pos_131008 = Q9;
       QReg f_neg_131008 = Q10;
@@ -1985,23 +2002,23 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
       e.MOV(W0, 0x47FFE000);
       e.MOV(f_pos_131008.Selem()[0], W0);
       e.DUP(f_pos_131008.S4(), f_pos_131008.Selem()[0]);  // +131008.0f
-      
+
       e.MOV(W0, 0xC7FFE000);
       e.MOV(f_neg_131008.Selem()[0], W0);
       e.DUP(f_neg_131008.S4(), f_neg_131008.Selem()[0]);  // -131008.0f
-      
+
       // 5) Blend using BIT which has clearer semantics
       // BIT Vd, Vn, Vm => Vd = (Vn & Vm) | (Vd & ~Vm)
-      // When mask==0: result = (replacement & 0) | (original & 0xFFFF) = original
-      // When mask==0xFFFF: result = (replacement & 0xFFFF) | (original & 0) = replacement
-      // This is what we want!
-      
+      // When mask==0: result = (replacement & 0) | (original & 0xFFFF) =
+      // original When mask==0xFFFF: result = (replacement & 0xFFFF) | (original
+      // & 0) = replacement This is what we want!
+
       // Apply sentinel replacements using BIT
       // BIT Vd, Vn, Vm => Vd = (Vn & Vm) | (Vd & ~Vm)
       // When mask is 0: keep original, when mask is 0xFFFFFFFF: use replacement
       e.BIT(i.dest.reg().B16(), f_pos_131008.B16(), mask_7FFF_S.B16());
       e.BIT(i.dest.reg().B16(), f_neg_131008.B16(), mask_FFFF_S.B16());
-      
+
       // 6) Swap S0 and S1 to match Xbox 360 halfword read order
       // The software reads halfword 7 first, then 6, but EXT gives us 6 then 7
       e.REV64(i.dest.reg().S4(), i.dest.reg().S4());
@@ -2210,16 +2227,14 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
                                 2 * 0x04'04'04'04 + 0x03'02'01'00,
                                 1 * 0x04'04'04'04 + 0x03'02'01'00,
                                 0 * 0x04'04'04'04 + 0x03'02'01'00));
-    e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16(), Q0.B16()},
-          Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16(), Q0.B16()}, Q1.B16());
 
     // Reorder as XYZW.
     e.LoadConstantV(Q1, vec128i(3 * 0x04'04'04'04 + 0x03'02'01'00,
                                 1 * 0x04'04'04'04 + 0x03'02'01'00,
                                 2 * 0x04'04'04'04 + 0x03'02'01'00,
                                 0 * 0x04'04'04'04 + 0x03'02'01'00));
-    e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16(), Q0.B16()},
-          Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16(), Q0.B16()}, Q1.B16());
     // Drop the excess upper nibble in XZ and sign-extend XYZ.
     e.SHL(i.dest.reg().S4(), i.dest.reg().S4(), 12);
     e.SSHR(i.dest.reg().S4(), i.dest.reg().S4(), 12);

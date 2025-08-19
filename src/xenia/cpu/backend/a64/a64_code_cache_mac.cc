@@ -10,13 +10,13 @@
 
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
 
-#include <cstdlib>
-#include <cstring>
+#include <libkern/OSCacheControl.h>
+#include <libunwind.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <libunwind.h>
-#include <libkern/OSCacheControl.h>
-#include <pthread.h>
+#include <cstdlib>
+#include <cstring>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
@@ -35,22 +35,22 @@ struct JITWriteContext {
 // JIT write callback function for Hardened Runtime compatibility
 static int jit_write_callback(void* ctx) {
   JITWriteContext* context = static_cast<JITWriteContext*>(ctx);
-  
+
   // Validate the write parameters
   if (!context || !context->dest || !context->src || context->size == 0) {
     XELOGE("JIT write callback: Invalid parameters");
     return -1;
   }
-  
+
   // Additional validation - ensure reasonable size bounds
   if (context->size > 16 * 1024 * 1024) {  // 16MB max per write
     XELOGE("JIT write callback: Size too large: {}", context->size);
     return -1;
   }
-  
+
   // Perform the memory copy
   std::memcpy(context->dest, context->src, context->size);
-  
+
   return 0;
 }
 
@@ -69,8 +69,9 @@ namespace a64 {
 typedef enum _UNWIND_OP_CODES_MACHO {
   UWOP_MACHO_NOP = 0x00,
   UWOP_MACHO_ALLOC_STACK = 0x01,  // DWARF CFI: adjust stack pointer
-  UWOP_MACHO_SAVE_FP_LR = 0x02,    // DWARF CFI: save frame pointer and link register
-  UWOP_MACHO_SET_FP = 0x03,        // DWARF CFI: set frame pointer
+  UWOP_MACHO_SAVE_FP_LR =
+      0x02,                  // DWARF CFI: save frame pointer and link register
+  UWOP_MACHO_SET_FP = 0x03,  // DWARF CFI: set frame pointer
   UWOP_MACHO_END = 0xFF,
 } UNWIND_CODE_OPS_MACHO;
 
@@ -100,8 +101,8 @@ class MacOSA64CodeCache : public A64CodeCache {
 
   UnwindReservation RequestUnwindReservation(uint8_t* entry_address) override;
   void PlaceCode(uint32_t guest_address, void* machine_code,
-                const EmitFunctionInfo& func_info, void* code_execute_address,
-                UnwindReservation unwind_reservation) override;
+                 const EmitFunctionInfo& func_info, void* code_execute_address,
+                 UnwindReservation unwind_reservation) override;
 
   void InitializeUnwindEntry(uint8_t* unwind_entry_address,
                              size_t unwind_table_slot,
@@ -129,10 +130,12 @@ bool MacOSA64CodeCache::Initialize() {
     return false;
   }
 
-  // Resize (not reserve) space for unwind table entries to ensure vector has actual elements
+  // Resize (not reserve) space for unwind table entries to ensure vector has
+  // actual elements
   unwind_table_.resize(kMaximumFunctionCount);
 
-  // Skip JIT callback freezing - using MAP_JIT with pthread_jit_write_protect_np
+  // Skip JIT callback freezing - using MAP_JIT with
+  // pthread_jit_write_protect_np
 #if XE_PLATFORM_MAC && defined(__aarch64__)
 #else
 #endif
@@ -143,26 +146,26 @@ bool MacOSA64CodeCache::Initialize() {
   return true;
 }
 
-void MacOSA64CodeCache::CopyMachineCode(void* dest, const void* src, size_t size) {
+void MacOSA64CodeCache::CopyMachineCode(void* dest, const void* src,
+                                        size_t size) {
 #if XE_PLATFORM_MAC && defined(__aarch64__)
   // On ARM64 macOS with MAP_JIT, use pthread_jit_write_protect_np dance
-  
+
   // Enable write access for this thread (disable execute)
   pthread_jit_write_protect_np(0);
-  
+
   // Copy the machine code
   std::memcpy(dest, src, size);
-  
+
   // Re-enable execute access for this thread (disable write)
   pthread_jit_write_protect_np(1);
-  
+
 #else
   // Using regular RWX memory instead of MAP_JIT - simple memcpy is sufficient
-  
+
   // Copy the machine code
   std::memcpy(dest, src, size);
 #endif
-  
 }
 
 MacOSA64CodeCache::UnwindReservation
@@ -181,36 +184,42 @@ void MacOSA64CodeCache::PlaceCode(uint32_t guest_address, void* machine_code,
                                   void* code_execute_address,
                                   UnwindReservation unwind_reservation) {
   // Add unwind info.
-  InitializeUnwindEntry(reinterpret_cast<uint8_t*>(unwind_reservation.entry_address),
-                        unwind_reservation.table_slot, code_execute_address,
-                        func_info);
+  InitializeUnwindEntry(
+      reinterpret_cast<uint8_t*>(unwind_reservation.entry_address),
+      unwind_reservation.table_slot, code_execute_address, func_info);
 
   // NOTE: Fixed double-storage bug - only store in the reserved slot, not both
   // Add entry to unwind table at the reserved slot only
   UnwindInfo unwind_info;
   unwind_info.begin_address = reinterpret_cast<uintptr_t>(code_execute_address);
-  unwind_info.end_address = unwind_info.begin_address + func_info.code_size.total;
-  
+  unwind_info.end_address =
+      unwind_info.begin_address + func_info.code_size.total;
+
   // Store in the reserved slot
   unwind_table_[unwind_reservation.table_slot] = unwind_info;
-  
+
   // Check memory permissions before flushing
-  
+
   // Validate address alignment before calling sys_icache_invalidate
   if ((uintptr_t)code_execute_address % 4 != 0) {
-    XELOGW("MacOSA64CodeCache::PlaceCode: WARNING - code address 0x{:016X} is not 4-byte aligned", 
-           (uintptr_t)code_execute_address);
+    XELOGW(
+        "MacOSA64CodeCache::PlaceCode: WARNING - code address 0x{:016X} is not "
+        "4-byte aligned",
+        (uintptr_t)code_execute_address);
   }
-  
+
   if (func_info.code_size.total % 4 != 0) {
-    XELOGW("MacOSA64CodeCache::PlaceCode: WARNING - code size {} is not 4-byte aligned", 
-           func_info.code_size.total);
+    XELOGW(
+        "MacOSA64CodeCache::PlaceCode: WARNING - code size {} is not 4-byte "
+        "aligned",
+        func_info.code_size.total);
   }
-  
+
   // Check if memory region is actually accessible
-  
+
 #if XE_PLATFORM_MAC && defined(__aarch64__)
-  // On MAP_JIT memory, just flush instruction cache - memory is already executable
+  // On MAP_JIT memory, just flush instruction cache - memory is already
+  // executable
   sys_icache_invalidate(code_execute_address, func_info.code_size.total);
 #else
   // On RWX memory, just flush instruction cache - no JIT protection needed
@@ -225,8 +234,9 @@ void MacOSA64CodeCache::InitializeUnwindEntry(
   // In practice, you would populate this with proper DWARF unwind info
   // based on the function prologue and epilogue.
 
-  // NOTE: Unwind info is already stored in PlaceCode, so we don't store it again here
-  // to avoid the double-storage bug that was causing memory corruption.
+  // NOTE: Unwind info is already stored in PlaceCode, so we don't store it
+  // again here to avoid the double-storage bug that was causing memory
+  // corruption.
 }
 
 void* MacOSA64CodeCache::LookupUnwindInfo(uint64_t host_pc) {

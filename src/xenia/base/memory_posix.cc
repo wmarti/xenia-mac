@@ -12,8 +12,8 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <cstddef>
 #include <cerrno>
+#include <cstddef>
 
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
@@ -230,22 +230,21 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
   uint32_t prot = ToPosixProtectFlags(access);
 #ifdef __APPLE__
   // File-backed mapping on Apple platforms — use MAP_SHARED to allow writes.
-  void* result = mmap(base_address, length, prot, MAP_SHARED, handle,
-                      file_offset);
+  void* result =
+      mmap(base_address, length, prot, MAP_SHARED, handle, file_offset);
   if (result == MAP_FAILED) {
     return nullptr;
   }
   return result;
 #else
-  void* result = mmap64(base_address, length, prot, MAP_SHARED, handle,
-                        file_offset);
+  void* result =
+      mmap64(base_address, length, prot, MAP_SHARED, handle, file_offset);
   if (result == MAP_FAILED) {
     return nullptr;
   }
   return result;
 #endif
 }
-
 
 bool UnmapFileView(FileMappingHandle handle, void* base_address,
                    size_t length) {

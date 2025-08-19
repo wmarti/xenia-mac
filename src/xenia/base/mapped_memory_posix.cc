@@ -48,7 +48,7 @@ class PosixMappedMemory : public MappedMemory {
 
     size_t map_length = length;
     if (!length) {
-      #ifdef __APPLE__
+#ifdef __APPLE__
       struct stat file_stat;
       if (fstat(file_descriptor, &file_stat)) {
         close(file_descriptor);

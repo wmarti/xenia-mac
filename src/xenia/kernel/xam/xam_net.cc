@@ -30,8 +30,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/socket.h>
 
 // Define INADDR_LOOPBACK if not defined (macOS doesn't always have it)
 #ifndef INADDR_LOOPBACK

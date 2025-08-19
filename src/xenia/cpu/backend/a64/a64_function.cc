@@ -38,8 +38,7 @@ namespace backend {
 namespace a64 {
 
 A64Function::A64Function(Module* module, uint32_t address)
-    : GuestFunction(module, address) {
-}
+    : GuestFunction(module, address) {}
 
 A64Function::~A64Function() {
   // machine_code_ is freed by code cache.
@@ -64,7 +63,7 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
   // Make the actual thunk call
   thunk(machine_code_, thread_state->context(),
         reinterpret_cast<void*>(uintptr_t(return_address)));
-  
+
   return true;
 }
 

@@ -126,8 +126,8 @@ bool A64Backend::Initialize(Processor* processor) {
 #if XE_PLATFORM_MAC && defined(__aarch64__)
   // On macOS ARM64, we use 64-bit addresses and the indirection table now
   // supports 64-bit entries, so we can store the actual thunk address directly.
-  static_cast<A64CodeCache*>(code_cache_.get())->set_indirection_default_64(
-      uint64_t(resolve_function_thunk_));
+  static_cast<A64CodeCache*>(code_cache_.get())
+      ->set_indirection_default_64(uint64_t(resolve_function_thunk_));
 #else
   assert_zero(uint64_t(resolve_function_thunk_) & 0xFFFFFFFF00000000ull);
   code_cache_->set_indirection_default(
@@ -525,7 +525,7 @@ HostToGuestThunk A64ThunkEmitter::EmitHostToGuestThunk() {
   func_info.stack_size = stack_size;
 
   void* fn = Emplace(func_info);
-  
+
   return (HostToGuestThunk)fn;
 }
 
