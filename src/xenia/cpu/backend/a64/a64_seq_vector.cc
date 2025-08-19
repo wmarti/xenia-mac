@@ -1688,16 +1688,31 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
           if (i.src2.is_constant) {
             e.LoadConstantV(src2, i.src2.constant());
           }
+          // Windows ARM64 requires src2->src1 ordering with EXT swap
+          // macOS works with src1->src2 without EXT
+#ifdef _WIN32
+          e.UQXTN(i.dest.reg().toD().B8(), src2.H8());
+          e.UQXTN2(i.dest.reg().B16(), src1.H8());
+          e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+          e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
+#else
           e.UQXTN(i.dest.reg().toD().B8(), src1.H8());
           e.UQXTN2(i.dest.reg().B16(), src2.H8());
-
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+#endif
         } else {
           // unsigned -> unsigned
+          // Windows ARM64 requires src2->src1 ordering with EXT swap
+#ifdef _WIN32
+          e.XTN(i.dest.reg().toD().B8(), i.src2.reg().H8());
+          e.XTN2(i.dest.reg().B16(), i.src1.reg().H8());
+          e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+          e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
+#else
           e.XTN(i.dest.reg().toD().B8(), i.src1.reg().H8());
           e.XTN2(i.dest.reg().B16(), i.src2.reg().H8());
-
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+#endif
         }
       } else {
         if (IsPackOutSaturate(flags)) {
@@ -1722,14 +1737,17 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
             e.LoadConstantV(src2, i.src2.constant());
           }
 
-          e.SQXTUN(i.dest.reg().toD().B8(),
-                   src1.H8());  // src1 first (lower 64 bits)
-          e.SQXTUN2(i.dest.reg().B16(),
-                    src2.H8());  // src2 second (upper 64 bits)
-
+          // Windows ARM64 requires src2->src1 ordering with EXT swap
+#ifdef _WIN32
+          e.SQXTUN(i.dest.reg().toD().B8(), src2.H8());
+          e.SQXTUN2(i.dest.reg().B16(), src1.H8());
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
           e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
-          e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
+#else
+          e.SQXTUN(i.dest.reg().toD().B8(), src1.H8());
+          e.SQXTUN2(i.dest.reg().B16(), src2.H8());
+          e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+#endif
         } else {
           // signed -> unsigned
           assert_always();
@@ -1737,12 +1755,17 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       } else {
         if (IsPackOutSaturate(flags)) {
           // signed -> signed + saturate
-          e.SQXTN(i.dest.reg().toD().B8(),
-                  i.src1.reg().H8());  // src1 first (lower 64 bits)
-          e.SQXTN2(i.dest.reg().B16(),
-                   i.src2.reg().H8());  // src2 second (upper 64 bits)
-
+          // Windows ARM64 requires src2->src1 ordering with EXT swap
+#ifdef _WIN32
+          e.SQXTN(i.dest.reg().toD().B8(), i.src2.reg().H8());
+          e.SQXTN2(i.dest.reg().B16(), i.src1.reg().H8());
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+          e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
+#else
+          e.SQXTN(i.dest.reg().toD().B8(), i.src1.reg().H8());
+          e.SQXTN2(i.dest.reg().B16(), i.src2.reg().H8());
+          e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+#endif
         } else {
           // signed -> signed
           assert_always();
@@ -1776,21 +1799,30 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
           e.UMIN(Q0.S4(), src1.S4(), Q2.S4());  // Saturate src1 (v3)
           e.UMIN(Q1.S4(), src2.S4(), Q2.S4());  // Saturate src2 (v4)
 
-          // Pack: src1 first (lower 64 bits), then src2 (upper 64 bits)
-          e.UQXTN(i.dest.reg().toD().H4(),
-                  Q0.S4());                      // Pack src1 to lower 64 bits
-          e.UQXTN2(i.dest.reg().H8(), Q1.S4());  // Pack src2 to upper 64 bits
-
-          // Fix endianness: reverse 16-bit values within 32-bit words
+          // Windows ARM64 requires src2->src1 ordering with EXT swap
+#ifdef _WIN32
+          e.UQXTN(i.dest.reg().toD().H4(), Q1.S4());  // Pack src2 to lower 64 bits
+          e.UQXTN2(i.dest.reg().H8(), Q0.S4());       // Pack src1 to upper 64 bits
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+          e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
+#else
+          e.UQXTN(i.dest.reg().toD().H4(), Q0.S4());  // Pack src1 to lower 64 bits
+          e.UQXTN2(i.dest.reg().H8(), Q1.S4());       // Pack src2 to upper 64 bits
+          e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+#endif
         } else {
           // unsigned -> unsigned
-          e.XTN(i.dest.reg().toD().H4(),
-                i.src1.reg().S4());  // src1 first (lower 64 bits)
-          e.XTN2(i.dest.reg().H8(),
-                 i.src2.reg().S4());  // src2 second (upper 64 bits)
-
+          // Windows ARM64 requires src2->src1 ordering with EXT swap
+#ifdef _WIN32
+          e.XTN(i.dest.reg().toD().H4(), i.src2.reg().S4());
+          e.XTN2(i.dest.reg().H8(), i.src1.reg().S4());
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+          e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
+#else
+          e.XTN(i.dest.reg().toD().H4(), i.src1.reg().S4());
+          e.XTN2(i.dest.reg().H8(), i.src2.reg().S4());
+          e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+#endif
         }
       } else {
         if (IsPackOutSaturate(flags)) {
@@ -1805,12 +1837,17 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       if (IsPackOutUnsigned(flags)) {
         if (IsPackOutSaturate(flags)) {
           // signed -> unsigned + saturate
-          e.SQXTUN(i.dest.reg().toD().H4(),
-                   i.src1.reg().S4());  // src1 first (lower 64 bits)
-          e.SQXTUN2(i.dest.reg().H8(),
-                    i.src2.reg().S4());  // src2 second (upper 64 bits)
-
+          // Windows ARM64 requires src2->src1 ordering with EXT swap
+#ifdef _WIN32
+          e.SQXTUN(i.dest.reg().toD().H4(), i.src2.reg().S4());
+          e.SQXTUN2(i.dest.reg().H8(), i.src1.reg().S4());
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+          e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
+#else
+          e.SQXTUN(i.dest.reg().toD().H4(), i.src1.reg().S4());
+          e.SQXTUN2(i.dest.reg().H8(), i.src2.reg().S4());
+          e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+#endif
         } else {
           // signed -> unsigned
           assert_always();
@@ -1827,12 +1864,17 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
           if (i.src2.is_constant) {
             e.LoadConstantV(src2, i.src2.constant());
           }
-          e.SQXTN(i.dest.reg().toD().H4(),
-                  src1.S4());  // src1 first (lower 64 bits)
-          e.SQXTN2(i.dest.reg().H8(),
-                   src2.S4());  // src2 second (upper 64 bits)
-
+          // Windows ARM64 requires src2->src1 ordering with EXT swap
+#ifdef _WIN32
+          e.SQXTN(i.dest.reg().toD().H4(), src2.S4());
+          e.SQXTN2(i.dest.reg().H8(), src1.S4());
           e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+          e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16(), 8);
+#else
+          e.SQXTN(i.dest.reg().toD().H4(), src1.S4());
+          e.SQXTN2(i.dest.reg().H8(), src2.S4());
+          e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
+#endif
         } else {
           // signed -> signed
           assert_always();
