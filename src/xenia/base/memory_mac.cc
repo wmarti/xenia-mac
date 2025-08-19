@@ -112,12 +112,12 @@ void* AllocFixed(void* base_address, size_t length,
 #if XE_PLATFORM_MAC && defined(__aarch64__)
         // On ARM64 macOS, MAP_JIT is mandatory for executable pages
         flags |= MAP_JIT;
-        XELOGI("Memory: Using MAP_JIT for ExecuteReadWrite allocation on ARM64 macOS (flags: 0x{:X})", flags);
+        XELOGD("Memory: Using MAP_JIT for ExecuteReadWrite allocation on ARM64 macOS (flags: 0x{:X})", flags);
 #else
-        XELOGI("Memory: Using regular RWX allocation for ExecuteReadWrite (flags: 0x{:X})", flags);
+        XELOGD("Memory: Using regular RWX allocation for ExecuteReadWrite (flags: 0x{:X})", flags);
 #endif
     } else {
-        XELOGI("Memory: Using standard allocation for access type {} (flags: 0x{:X})", static_cast<int>(access), flags);
+        XELOGD("Memory: Using standard allocation for access type {} (flags: 0x{:X})", static_cast<int>(access), flags);
     }
     
     void* result = nullptr;
@@ -129,7 +129,7 @@ void* AllocFixed(void* base_address, size_t length,
                       flags | MAP_FIXED, -1, 0);
         
         if (result == MAP_FAILED) {
-            XELOGW("Fixed address mapping at 0x{:X} failed, trying OS-chosen address", aligned_addr);
+            XELOGD("Fixed address mapping at 0x{:X} failed, trying OS-chosen address", aligned_addr);
             // Fall back to letting OS choose the address
             result = mmap(nullptr, length, prot, flags, -1, 0);
         }
@@ -149,16 +149,6 @@ void* AllocFixed(void* base_address, size_t length,
         XELOGE("Memory Allocation Failed: {} (errno: {})", strerror(err), err);
         return nullptr;
     }
-    
-    // Log successful allocation with detailed info
-    XELOGI("Memory Mapped from 0x{:X} to 0x{:X} (size: {} bytes)", 
-           (size_t)result, (size_t)result + length - 1, length);
-    XELOGI("Memory Protection: {} (prot: 0x{:X}, flags: 0x{:X})", 
-           access == PageAccess::kExecuteReadWrite ? "RWX (regular)" :
-           access == PageAccess::kReadWrite ? "RW" :
-           access == PageAccess::kExecuteReadOnly ? "RX" :
-           access == PageAccess::kReadOnly ? "R" : "None",
-           prot, flags);
     
     return result;
 }
@@ -195,7 +185,7 @@ bool VerifyJITMemoryState(void* address, size_t size) {
     volatile char test = *static_cast<char*>(address);
     (void)test; // Avoid unused variable warning
     
-    XELOGI("VerifyJITMemoryState: Memory at 0x{:016X} (size {}) is readable", 
+    XELOGD("VerifyJITMemoryState: Memory at 0x{:016X} (size {}) is readable", 
            (uintptr_t)address, size);
     
     return true;
@@ -288,7 +278,7 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
         
         if (result == MAP_FAILED) {
             int err = errno;
-            XELOGW("Fixed address file mapping at 0x{:X} failed: {} (errno: {}), trying OS-chosen address", 
+            XELOGD("Fixed address file mapping at 0x{:X} failed: {} (errno: {}), trying OS-chosen address", 
                    aligned_addr, strerror(err), err);
             
             // Fall back to letting OS choose the address
@@ -317,7 +307,7 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
         return nullptr;
     }
     
-    XELOGI("Shared Memory Object {} Mapped from 0x{:X} to 0x{:X}", 
+    XELOGD("Shared Memory Object {} Mapped from 0x{:X} to 0x{:X}", 
            (int)handle, (size_t)result, (size_t)result + length);
     
     return result;

@@ -286,14 +286,11 @@ void A64CodeCache::CommitExecutableRange(uint32_t guest_low,
   uint32_t start_offset = (guest_low - kGuestAddressBase) * 2;  // 8-byte entries
   uint32_t size = (guest_high - guest_low) * 2;
   
-  // Check bounds - the address space is much larger than our table
+  // Sanity check bounds; the table should fully cover the XEX guest range now.
   if (start_offset + size > kIndirectionTableSize) {
-    XELOGW("Guest range exceeds table size, using modulo addressing");
-    // Use modulo addressing to wrap around in the available space
-    start_offset = start_offset % kIndirectionTableSize;
-    if (start_offset + size > kIndirectionTableSize) {
-      size = kIndirectionTableSize - start_offset;  // Truncate to fit
-    }
+    XELOGE("CommitExecutableRange: range [0x{:08X}, 0x{:08X}) exceeds table (size 0x{:X})",
+           guest_low, guest_high, (unsigned)kIndirectionTableSize);
+    return;
   }
   
   // The memory should already be allocated, just fill with default value
@@ -452,11 +449,9 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
     // Check if the slot address is within bounds
     uintptr_t table_end = reinterpret_cast<uintptr_t>(indirection_table_base_) + kIndirectionTableSize;
     if (slot_address >= table_end) {
-      XELOGE("A64CodeCache::PlaceGuestCode: ERROR - slot_address 0x{:016X} is beyond table end 0x{:016X}!", 
+      XELOGE("A64CodeCache::PlaceGuestCode: slot 0x{:016X} beyond table end 0x{:016X}",
              slot_address, table_end);
-      XELOGE("A64CodeCache::PlaceGuestCode: This guest address (0x{:08X}) cannot be mapped in current table size", 
-             guest_address);
-      return;  // Avoid the hanging write
+      return;
     }
     
     *indirection_slot = reinterpret_cast<uint64_t>(code_execute_address);

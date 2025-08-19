@@ -412,17 +412,16 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   
   // Check if this is a 64-bit host address that needs to be mapped back to guest address
   if (target_address > 0xFFFFFFFF) {
-    
-    // Special case: detect if we received a context pointer instead of target address
-    // Context pointers typically have patterns like 0x0000000XXXXXXXXX
-    uint64_t upper_32 = target_address >> 32;
-    if (upper_32 > 0 && upper_32 < 0x10000) {
-      XELOGE("ResolveFunction: Received what appears to be a context pointer 0x{:016X}", target_address);
-      XELOGE("ResolveFunction: This indicates a bug in PowerPC register handling");
+    // Precise guard: if target_address is within the PPCContext, this is a bug.
+    auto ctx_ptr = reinterpret_cast<uint64_t>(thread_state->context());
+    if (target_address >= ctx_ptr &&
+        target_address < ctx_ptr + sizeof(ppc::PPCContext)) {
+      XELOGE("ResolveFunction: target_address 0x{:016X} is within PPCContext [0x{:016X}, 0x{:016X})",
+             target_address, ctx_ptr, ctx_ptr + sizeof(ppc::PPCContext));
       XELOGE("ResolveFunction: The target register contains a context pointer instead of a function address");
       return 0;
     }
-    
+
     // Try to find a function that contains this host address
     auto code_cache = static_cast<A64CodeCache*>(thread_state->processor()->backend()->code_cache());
     auto guest_function = code_cache->LookupFunction(target_address);
@@ -489,12 +488,12 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
 #if XE_PLATFORM_MAC && defined(__aarch64__)
     // On macOS ARM64, addresses may be allocated in higher memory space
     if (uint64_t(fn->machine_code()) & 0xFFFFFFFF00000000) {
-      XELOGW("Function machine code at high address 0x{:X}, using ResolveFunction", 
+      XELOGD("Function machine code at high address 0x{:X}, using ResolveFunction", 
              uint64_t(fn->machine_code()));
       // Use ResolveFunction to avoid memory access issues with high addresses
+      // Thunk expects: X0=function ptr, X0 replaced with context, X1=arg0
       MOV(X0, reinterpret_cast<uint64_t>(ResolveFunction));
-      MOV(X1, GetContextReg());
-      MOV(W2, function->address());  // Use W register for 32-bit address
+      MOV(W1, function->address());  // Pass guest address in arg0 (X1)
       auto thunk = backend()->guest_to_host_thunk();
       MOV(X16, reinterpret_cast<uint64_t>(thunk));
       BLR(X16);
@@ -515,10 +514,9 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     MOV(W17, function->address());
 #if XE_PLATFORM_MAC && XE_ARCH_ARM64
     // On macOS ARM64, the indirection table is not mapped at guest addresses
-    // Use ResolveFunction directly
+    // Use ResolveFunction directly. Thunk will supply context in X0.
     MOV(X0, reinterpret_cast<uint64_t>(ResolveFunction));
-    MOV(X1, GetContextReg());
-    MOV(W2, function->address());  // Use W register for 32-bit address
+    MOV(W1, function->address());  // Pass guest address in arg0 (X1)
     auto thunk = backend()->guest_to_host_thunk();
     MOV(X16, reinterpret_cast<uint64_t>(thunk));
     BLR(X16);
@@ -534,8 +532,7 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // Not too important because indirection table is almost always available.
     // TODO: Overwrite the call-site with a straight call.
     MOV(X0, reinterpret_cast<uint64_t>(ResolveFunction));
-    MOV(X1, GetContextReg());
-    MOV(W2, function->address());  // Use W register for 32-bit address
+    MOV(W1, function->address());  // Pass guest address in arg0 (X1)
     auto thunk = backend()->guest_to_host_thunk();
     MOV(X16, reinterpret_cast<uint64_t>(thunk));
     BLR(X16);
@@ -584,34 +581,10 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
     }
 #if XE_PLATFORM_MAC && XE_ARCH_ARM64
     // On macOS ARM64, the indirection table is not mapped at guest addresses
-    // Use ResolveFunction directly
-    
-    // Store the original register value for debugging
-    STR(reg, SP, kStashOffset);
-    
-    // DEBUG: The register contains 0x0000000AD08DC000 which looks like a context pointer
-    // This suggests we might need to read the actual target address from memory
-    // pointed to by this register, rather than using the register value directly
-    
-    // Let's try treating the register as a pointer to the target address
-    // First, let's check if the register value looks like a valid host pointer
-    // If so, try to read a 32-bit value from that location
-    
-    // For PowerPC indirect calls, the register might contain a pointer to 
-    // a function descriptor or jump table entry
-    
-    // Try to read the target address from the location pointed to by the register
-    // But we need to be careful about memory access - use the membase
-    
-    // For now, let's extract a potentially valid guest address from this pattern
-    // The address 0x0000000AD08DC000 has lower 32 bits 0xD08DC000
-    // Let's see if there's a pattern we can extract
-    
-    // Create a simpler call that matches the ResolveFunctionThunk signature
+    // Use ResolveFunction directly. Thunk will supply context in X0.
     MOV(X0, reinterpret_cast<uint64_t>(ResolveFunction));
-    MOV(X1, GetContextReg());
-    // Extract only the lower 32 bits for the target address
-    MOV(W2, reg.toW());  // Use only the W register (32-bit) portion
+    // Extract only the lower 32 bits for the target address into X1
+    MOV(W1, reg.toW());
     auto thunk = backend()->guest_to_host_thunk();
     MOV(X16, reinterpret_cast<uint64_t>(thunk));
     BLR(X16);
@@ -626,8 +599,7 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
     // Old-style resolve.
     // Not too important because indirection table is almost always available.
     MOV(X0, reinterpret_cast<uint64_t>(ResolveFunction));
-    MOV(X1, GetContextReg());
-    MOV(W2, reg.toW());  // Use W register for 32-bit address
+    MOV(W1, reg.toW());  // Pass guest address in arg0 (X1)
     auto thunk = backend()->guest_to_host_thunk();
     MOV(X16, reinterpret_cast<uint64_t>(thunk));
     BLR(X16);
@@ -940,7 +912,7 @@ uintptr_t A64Emitter::PlaceConstData() {
 #if XE_PLATFORM_MAC && XE_ARCH_ARM64
   // On macOS ARM64, memory is often allocated in high address space
   if (reinterpret_cast<uintptr_t>(mem) & ~0x7FFFFFFF) {
-    XELOGW("Const data allocated at high address {:#x}, may cause compatibility issues", 
+    XELOGD("Const data allocated at high address {:#x}, may cause compatibility issues", 
            reinterpret_cast<uintptr_t>(mem));
     // Continue anyway since we'll handle it later
   }
