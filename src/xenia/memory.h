@@ -325,8 +325,6 @@ class Memory {
         if (heap) {
             host_address += heap->host_address_offset();
         }
-        // Optional logging
-        XELOGI("TranslateVirtual: guest_address=0x{:08X}, host_address={:p}", guest_address, static_cast<void*>(host_address));
         return reinterpret_cast<T>(host_address);
     }
 
@@ -478,7 +476,11 @@ class Memory {
   bool Restore(ByteStream* stream);
 
  private:
-  int MapViews();
+#if XE_PLATFORM_MAC
+  int MapViewsMac();
+#else
+  int MapViews(uint8_t* mapping_base);
+#endif
   void UnmapViews();
 
   static uint32_t HostToGuestVirtualThunk(const void* context,
