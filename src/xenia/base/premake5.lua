@@ -13,6 +13,13 @@ project("xenia-base")
   local_platform_files()
   removefiles({"console_app_main_*.cc"})
   removefiles({"main_init_*.cc"})
+  -- Remove architecture-specific files, then add the correct ones
+  removefiles({"*_x64.cc", "*_a64.cc"})
+  filter("architecture:x86_64")
+    files({"*_x64.cc"})
+  filter("architecture:ARM64")
+    files({"*_a64.cc"})
+  filter({})
   files({
     "debug_visualizers.natvis",
   })

@@ -21,6 +21,7 @@ project("xenia-ui")
 
   filter("platforms:Windows-*")
     links({
-      "dwmapi",
       "dxgi",
+      "dwmapi",
+      "shlwapi",  -- For QISearch and other shell functions
     })

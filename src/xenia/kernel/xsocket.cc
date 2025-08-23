@@ -51,11 +51,19 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
     proto = Protocol::XE_IPPROTO_UDP;
   }
 
+#ifdef XE_PLATFORM_WIN32
+  SOCKET sock = socket(af, type, proto);
+  if (sock == INVALID_SOCKET) {
+    return X_STATUS_UNSUCCESSFUL;
+  }
+  native_handle_ = static_cast<uint64_t>(sock);
+#else
   int sock = socket(af, type, proto);
   if (sock == -1) {
     return X_STATUS_UNSUCCESSFUL;
   }
   native_handle_ = static_cast<uint64_t>(sock);
+#endif
 
   return X_STATUS_SUCCESS;
 }

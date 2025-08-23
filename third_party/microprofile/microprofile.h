@@ -1067,8 +1067,9 @@ inline void MicroProfileThreadJoin(MicroProfileThread* pThread)
 #include <stdarg.h>
 #include <math.h>
 #include <algorithm>
+#if defined(__APPLE__) || defined(__linux__)
 #include <strings.h>
-#include <stdlib.h>
+#endif
 
 
 #ifndef MICROPROFILE_DEBUG

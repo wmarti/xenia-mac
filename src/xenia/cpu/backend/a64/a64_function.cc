@@ -9,10 +9,12 @@
 
 #include "xenia/cpu/backend/a64/a64_function.h"
 
+#ifdef XE_PLATFORM_MAC
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_map.h>
 #include <pthread.h>
+#endif
 
 #include "xenia/base/logging.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"

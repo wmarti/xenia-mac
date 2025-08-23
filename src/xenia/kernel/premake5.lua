@@ -21,3 +21,8 @@ project("xenia-kernel")
   files({
     "debug_visualizers.natvis",
   })
+  
+  filter("platforms:Windows-*")
+    links({
+      "ws2_32",  -- Windows Sockets API
+    })

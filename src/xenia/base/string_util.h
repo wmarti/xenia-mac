@@ -138,7 +138,10 @@ inline std::string to_hex_string(const vec128_t& value) {
                      value.u32[1], value.u32[2], value.u32[3]);
 }
 
-// Overload for uintptr_t
+// Overload for uintptr_t (only define if it's a distinct type from uint32_t/uint64_t)
+// On Windows, uintptr_t is the same type as uint64_t, so this would be a duplicate
+// On Unix-like systems, uintptr_t is unsigned long, which is distinct from unsigned long long
+#if !defined(_WIN32)
 inline std::string to_hex_string(uintptr_t value) {
     if constexpr (sizeof(uintptr_t) == sizeof(uint32_t)) {
         return to_hex_string(static_cast<uint32_t>(value));
@@ -149,6 +152,7 @@ inline std::string to_hex_string(uintptr_t value) {
                       "Unsupported uintptr_t size for to_hex_string.");
     }
 }
+#endif
 
 template <typename T>
 inline T from_string(const std::string_view value, bool force_hex = false) {

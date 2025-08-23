@@ -58,6 +58,16 @@ filter({"configurations:Checked", "platforms:Windows-*"})
   buildoptions({
     "/RTCsu",           -- Full Run-Time Checks.
   })
+filter({"platforms:Windows-*"})
+  defines({
+    "_CRT_SECURE_NO_WARNINGS",  -- Disable CRT security warnings
+  })
+  disablewarnings({
+    "4068",  -- Disable warning about unknown pragmas (for clang pragmas in fmt)
+    "4566",  -- Disable warning about characters that cannot be represented in current code page
+    "4146",  -- Disable warning about unary minus operator applied to unsigned type
+    "4267",  -- Disable warning about conversion from 'size_t' to smaller types
+  })
 filter({"configurations:Checked", "platforms:Linux"})
   defines({
     "_GLIBCXX_DEBUG",   -- libstdc++ debug mode
@@ -152,9 +162,9 @@ filter("platforms:Mac")
   })
 
     -- Optimization Flags per Configuration
-    filter("configurations:Debug")
+    filter({"configurations:Debug", "toolset:clang or toolset:gcc"})
     buildoptions({
-      "-O0",  -- Disable optimizations for Debug
+      "-O0",  -- Disable optimizations for Debug (GCC/Clang only)
     })
   
   filter("configurations:Release")
