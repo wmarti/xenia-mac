@@ -206,7 +206,7 @@ X_STATUS XFile::ReadScatter(uint32_t segments_guest_address, uint32_t length,
 
     uint32_t bytes_read = 0;
     result = Read(read_buffer, read_length,
-                  byte_offset ? ((byte_offset != -1 && byte_offset != -2)
+                  byte_offset ? ((byte_offset != static_cast<uint64_t>(-1) && byte_offset != static_cast<uint64_t>(-2))
                                      ? byte_offset + read_total
                                      : byte_offset)
                               : -1,

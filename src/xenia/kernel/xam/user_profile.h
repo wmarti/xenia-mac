@@ -110,6 +110,7 @@ class UserProfile {
           size(size),
           is_set(is_set),
           loaded_title_id(0) {}
+    virtual ~Setting() = default;
     virtual void Append(X_USER_PROFILE_SETTING_DATA* data,
                         SettingByteStream* stream) {
       data->type = static_cast<uint8_t>(type);

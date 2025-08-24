@@ -1171,7 +1171,7 @@ uint32_t Processor::StepToGuestSafePoint(uint32_t thread_id, bool ignore_host) {
     cpu::GuestFunction* thunk_func = nullptr;
     cpu::Export* export_data = nullptr;
     uint32_t first_pc = 0;
-    for (int i = 0; i < count; i++) {
+    for (size_t i = 0; i < count; i++) {
       auto& frame = cpu_frames[i];
       if (frame.type == cpu::StackFrame::Type::kGuest && frame.guest_pc) {
         auto func = frame.guest_symbol.function;

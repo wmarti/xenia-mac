@@ -515,7 +515,7 @@ class Memory {
       uint8_t* physical;
     };
     uint8_t* all_views[9];
-  } views_ = {{0}};
+  } views_ = {};
 
   std::unique_ptr<cpu::MMIOHandler> mmio_handler_;
 

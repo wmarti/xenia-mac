@@ -506,7 +506,7 @@ inline void store_and_swap<double>(void* mem, const double& value) {
 template <>
 inline void store_and_swap<std::string_view>(void* mem,
                                              const std::string_view& value) {
-  for (auto i = 0; i < value.size(); ++i) {
+  for (size_t i = 0; i < value.size(); ++i) {
     xe::store_and_swap<uint8_t>(reinterpret_cast<uint8_t*>(mem) + i, value[i]);
   }
 }
@@ -517,7 +517,7 @@ inline void store_and_swap<std::string>(void* mem, const std::string& value) {
 template <>
 inline void store_and_swap<std::u16string_view>(
     void* mem, const std::u16string_view& value) {
-  for (auto i = 0; i < value.size(); ++i) {
+  for (size_t i = 0; i < value.size(); ++i) {
     xe::store_and_swap<uint16_t>(reinterpret_cast<uint16_t*>(mem) + i,
                                  value[i]);
   }

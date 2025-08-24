@@ -12,9 +12,18 @@ project("xenia-cpu")
     "mspack",
   })
   includedirs({
-    project_root.."/third_party/llvm/include",
     project_root.."/third_party/oaknut/include",
   })
+  -- Add LLVM includes as system headers to suppress warnings
+  filter("toolset:clang or toolset:gcc")
+    externalincludedirs({
+      project_root.."/third_party/llvm/include",
+    })
+  filter("toolset:msc")
+    includedirs({
+      project_root.."/third_party/llvm/include",
+    })
+  filter({})
   local_platform_files()
   local_platform_files("backend")
   local_platform_files("backend/a64")

@@ -147,10 +147,10 @@ void AudioSystem::WorkerThreadMain() {
 }
 
 int AudioSystem::FindFreeClient() {
-  for (int i = 0; i < kMaximumClientCount; i++) {
+  for (size_t i = 0; i < kMaximumClientCount; i++) {
     auto& client = clients_[i];
     if (!client.in_use) {
-      return i;
+      return static_cast<int>(i);
     }
   }
 
@@ -214,7 +214,7 @@ void AudioSystem::UnregisterClient(size_t index) {
   assert_true(index < kMaximumClientCount);
   DestroyDriver(clients_[index].driver);
   memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
-  clients_[index] = {0};
+  clients_[index] = {};
 
   // Drain the semaphore of its count.
   auto client_semaphore = client_semaphores_[index].get();
@@ -232,7 +232,7 @@ bool AudioSystem::Save(ByteStream* stream) {
   // Count the number of used clients first.
   // Any gaps should be handled gracefully.
   uint32_t used_clients = 0;
-  for (int i = 0; i < kMaximumClientCount; i++) {
+  for (size_t i = 0; i < kMaximumClientCount; i++) {
     if (clients_[i].in_use) {
       used_clients++;
     }

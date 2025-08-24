@@ -53,7 +53,7 @@ dword_result_t XamContentResolve_entry(dword_t user_index,
                                        lpunknown_t buffer_ptr,
                                        dword_t buffer_size, dword_t unk1,
                                        dword_t unk2, dword_t unk3) {
-  auto content_data = content_data_ptr.as<XCONTENT_DATA*>();
+  [[maybe_unused]] auto content_data = content_data_ptr.as<XCONTENT_DATA*>();
 
   // Result of buffer_ptr is sent to RtlInitAnsiString.
   // buffer_size is usually 260 (max path).

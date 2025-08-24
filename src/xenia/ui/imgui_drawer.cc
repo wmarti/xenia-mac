@@ -240,7 +240,7 @@ void ImGuiDrawer::SetPresenter(Presenter* new_presenter) {
     if (!dialogs_.empty()) {
       presenter_->RemoveUIDrawerFromUIThread(this);
     }
-    ImGuiIO& io = GetIO();
+    [[maybe_unused]] ImGuiIO& io = GetIO();
   }
   presenter_ = new_presenter;
   if (presenter_) {
@@ -404,7 +404,7 @@ void ImGuiDrawer::OnMouseDown(MouseEvent& e) {
       break;
     }
   }
-  if (button >= 0 && button < std::size(io.MouseDown)) {
+  if (button >= 0 && button < static_cast<int>(std::size(io.MouseDown))) {
     if (!io.MouseDown[button]) {
       if (!ImGui::IsAnyMouseDown()) {
         window_->CaptureMouse();
@@ -436,7 +436,7 @@ void ImGuiDrawer::OnMouseUp(MouseEvent& e) {
       break;
     }
   }
-  if (button >= 0 && button < std::size(io.MouseDown)) {
+  if (button >= 0 && button < static_cast<int>(std::size(io.MouseDown))) {
     if (io.MouseDown[button]) {
       io.MouseDown[button] = false;
       if (!ImGui::IsAnyMouseDown()) {

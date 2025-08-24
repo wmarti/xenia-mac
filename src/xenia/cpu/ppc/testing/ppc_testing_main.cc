@@ -335,7 +335,7 @@ class TestRunner {
         size_t space_pos = it.second.find(" ");
         auto address_str = it.second.substr(0, space_pos);
         auto bytes_str = it.second.substr(space_pos + 1);
-        uint32_t address = std::strtoul(address_str.c_str(), nullptr, 16);
+        uint32_t address = static_cast<uint32_t>(std::strtoul(address_str.c_str(), nullptr, 16));
         auto p = memory_->TranslateVirtual(address);
         const char* c = bytes_str.c_str();
         while (*c) {
@@ -345,7 +345,7 @@ class TestRunner {
           }
           char ccs[3] = {c[0], c[1], 0};
           c += 2;
-          uint32_t b = std::strtoul(ccs, nullptr, 16);
+          uint32_t b = static_cast<uint32_t>(std::strtoul(ccs, nullptr, 16));
           *p = static_cast<uint8_t>(b);
           ++p;
         }
@@ -375,12 +375,12 @@ class TestRunner {
         size_t space_pos = it.second.find(" ");
         auto address_str = it.second.substr(0, space_pos);
         auto bytes_str = it.second.substr(space_pos + 1);
-        uint32_t address = std::strtoul(address_str.c_str(), nullptr, 16);
+        uint32_t address = static_cast<uint32_t>(std::strtoul(address_str.c_str(), nullptr, 16));
         auto base_address = memory_->TranslateVirtual(address);
         auto p = base_address;
         const char* c = bytes_str.c_str();
         bool failed = false;
-        size_t count = 0;
+        [[maybe_unused]] size_t count = 0;
         StringBuffer expecteds;
         StringBuffer actuals;
         while (*c) {
@@ -391,9 +391,9 @@ class TestRunner {
           char ccs[3] = {c[0], c[1], 0};
           c += 2;
           count++;
-          uint32_t current_address =
+          [[maybe_unused]] uint32_t current_address =
               address + static_cast<uint32_t>(p - base_address);
-          uint32_t expected = std::strtoul(ccs, nullptr, 16);
+          uint32_t expected = static_cast<uint32_t>(std::strtoul(ccs, nullptr, 16));
           uint8_t actual = *p;
 
           expecteds.AppendFormat(" {:02X}", expected);
@@ -468,7 +468,7 @@ void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
 }
 
 bool RunTests(const std::string_view test_name) {
-    int result_code = 1;
+    [[maybe_unused]] int result_code = 1;
     int failed_count = 0;
     int passed_count = 0;
 

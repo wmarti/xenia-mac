@@ -138,7 +138,7 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
   void* new_execute_address;
   void* new_write_address;
 
-  assert_true(func_info.code_size.total == offset());
+  assert_true(func_info.code_size.total == static_cast<size_t>(offset()));
 
   if (function) {
     code_cache_->PlaceGuestCode(function->address(), assembly_buffer.data(),
@@ -251,7 +251,7 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
 
   // Body.
   auto block = builder->first_block();
-  int block_count = 0;
+  [[maybe_unused]] int block_count = 0;
   while (block) {
     // Mark block labels.
     auto label = block->label_head;
@@ -262,7 +262,7 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
 
     // Process instructions.
     const Instr* instr = block->instr_head;
-    int instr_count = 0;
+    [[maybe_unused]] int instr_count = 0;
     while (instr) {
       const Instr* new_tail = instr;
       if (!SelectSequence(this, instr, &new_tail)) {
@@ -366,7 +366,7 @@ uint64_t TrapDebugPrint(void* raw_context, uint64_t address) {
 }
 
 uint64_t TrapDebugBreak(void* raw_context, uint64_t address) {
-  auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
+  [[maybe_unused]] auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
   XELOGE("tw/td forced trap hit! This should be a crash!");
   if (cvars::break_on_debugbreak) {
     xe::debugging::Break();
@@ -762,7 +762,7 @@ bool A64Emitter::ConstantFitsIn32Reg(uint64_t v) {
   if ((v & ~0x7FFFFFFF) == 0) {
     // Fits under 31 bits, so just load using normal mov.
     return true;
-  } else if ((v & ~0x7FFFFFFF) == ~0x7FFFFFFF) {
+  } else if ((v & ~0x7FFFFFFFUL) == ~0x7FFFFFFFUL) {
     // Negative number that fits in 32bits.
     return true;
   }

@@ -117,6 +117,9 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
   return X_STATUS_SUCCESS;
 #elif XE_PLATFORM_LINUX
   return X_STATUS_UNSUCCESSFUL;
+#else
+  // macOS and other platforms
+  return X_STATUS_UNSUCCESSFUL;
 #endif
 }
 
@@ -154,7 +157,7 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
   sockaddr n_sockaddr;
   socklen_t n_name_len = sizeof(sockaddr);
   uintptr_t ret = accept(native_handle_, &n_sockaddr, &n_name_len);
-  if (ret == -1) {
+  if (ret == static_cast<uintptr_t>(-1)) {
     std::memset(name, 0, *name_len);
     *name_len = 0;
     return nullptr;

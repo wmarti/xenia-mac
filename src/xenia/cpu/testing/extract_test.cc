@@ -35,7 +35,7 @@ TEST_CASE("EXTRACT_INT8", "[instr]") {
         },
         [i](PPCContext* ctx) {
           auto result = ctx->r[3];
-          REQUIRE(result == i);
+          REQUIRE(result == static_cast<uint64_t>(i));
         });
   }
 }
@@ -57,7 +57,7 @@ TEST_CASE("EXTRACT_INT8_CONSTANT", "[instr]") {
             },
             [i](PPCContext* ctx) {
               auto result = ctx->r[3];
-              REQUIRE(result == i);
+              REQUIRE(result == static_cast<uint64_t>(i));
             });
   }
 }
@@ -80,7 +80,7 @@ TEST_CASE("EXTRACT_INT16", "[instr]") {
         },
         [i](PPCContext* ctx) {
           auto result = ctx->r[3];
-          REQUIRE(result == (i | (i << 12)));
+          REQUIRE(result == static_cast<uint64_t>(i | (i << 12)));
         });
   }
 }
@@ -101,7 +101,7 @@ TEST_CASE("EXTRACT_INT16_CONSTANT", "[instr]") {
             },
             [i](PPCContext* ctx) {
               auto result = ctx->r[3];
-              REQUIRE(result == i);
+              REQUIRE(result == static_cast<uint64_t>(i));
             });
   }
 }
@@ -123,7 +123,7 @@ TEST_CASE("EXTRACT_INT32", "[instr]") {
         },
         [i](PPCContext* ctx) {
           auto result = ctx->r[3];
-          REQUIRE(result == i);
+          REQUIRE(result == static_cast<uint64_t>(i));
         });
   }
 }
@@ -144,7 +144,7 @@ TEST_CASE("EXTRACT_INT32_CONSTANT", "[instr]") {
             },
             [i](PPCContext* ctx) {
               auto result = ctx->r[3];
-              REQUIRE(result == i);
+              REQUIRE(result == static_cast<uint64_t>(i));
             });
   }
 }

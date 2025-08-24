@@ -52,7 +52,7 @@ class PPCFrontend {
 
  private:
   Processor* processor_;
-  PPCBuiltins builtins_ = {0};
+  PPCBuiltins builtins_ = {};
   TypePool<PPCTranslator, PPCFrontend*> translator_pool_;
 };
 

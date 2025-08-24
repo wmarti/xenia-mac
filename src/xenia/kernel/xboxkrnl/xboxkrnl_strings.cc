@@ -140,7 +140,7 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
   uint32_t flags = 0;
   int32_t width = 0;
   int32_t precision = -1;
-  ArgumentSize size = AS_Default;
+  [[maybe_unused]] ArgumentSize size = AS_Default;
   int32_t radix = 0;
   const char* digits = nullptr;
 
@@ -414,7 +414,7 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
             while (precision-- > 0 || value != 0) {
               auto digit = (int32_t)(value % radix);
               value /= radix;
-              assert_true(digit < strlen(digits));
+              assert_true(digit < static_cast<int32_t>(strlen(digits)));
               *--start = digits[digit];
             }
 
@@ -482,7 +482,7 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
 
             auto s = format_double(value, precision, c, flags);
             auto length = (int32_t)s.size();
-            assert_true(length < xe::countof(work8));
+            assert_true(length < static_cast<int32_t>(xe::countof(work8)));
 
             auto start = &work8[0];
             auto end = &start[length];
@@ -817,7 +817,7 @@ class WideCountFormatData : public FormatData {
     return true;
   }
 
-  const int32_t count() const { return count_; }
+  int32_t count() const { return count_; }
 
  private:
   const uint16_t* input_;

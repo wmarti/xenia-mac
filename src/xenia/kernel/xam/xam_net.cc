@@ -173,7 +173,7 @@ struct XNetStartupParams {
   uint8_t cfgQosPairWaitTimeInSeconds;
 };
 
-XNetStartupParams xnet_startup_params = {0};
+XNetStartupParams xnet_startup_params = {};
 
 dword_result_t NetDll_XNetStartup_entry(dword_t caller,
                                         pointer_t<XNetStartupParams> params) {
@@ -379,7 +379,7 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
   do {
     result = xboxkrnl::xeNtWaitForMultipleObjectsEx(
         num_events, events, wait_all, 1, alertable,
-        timeout != -1 ? &timeout_wait : nullptr);
+        timeout != static_cast<unsigned int>(-1) ? &timeout_wait : nullptr);
   } while (result == X_STATUS_ALERTED);
 
   if (XFAILED(result)) {
@@ -621,7 +621,7 @@ dword_result_t NetDll_inet_addr_entry(lpstring_t addr_ptr) {
   // https://docs.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-inet_addr#return-value
   // Based on console research it seems like x360 uses old version of inet_addr
   // In case of empty string it return 0 instead of -1
-  if (addr == -1 && !addr_ptr.value().length()) {
+  if (addr == static_cast<uint32_t>(-1) && !addr_ptr.value().length()) {
     return 0;
   }
 
@@ -835,7 +835,7 @@ struct host_set {
     this->count = guest_set->fd_count;
     for (uint32_t i = 0; i < this->count; ++i) {
       auto socket_handle = static_cast<X_HANDLE>(guest_set->fd_array[i]);
-      if (socket_handle == -1) {
+      if (socket_handle == static_cast<X_HANDLE>(-1)) {
         this->count = i;
         break;
       }
@@ -879,19 +879,19 @@ int_result_t NetDll_select_entry(int_t caller, int_t nfds,
                                  pointer_t<x_fd_set> writefds,
                                  pointer_t<x_fd_set> exceptfds,
                                  lpvoid_t timeout_ptr) {
-  host_set host_readfds = {0};
+  host_set host_readfds = {};
   fd_set native_readfds = {0};
   if (readfds) {
     host_readfds.Load(readfds);
     host_readfds.Store(&native_readfds);
   }
-  host_set host_writefds = {0};
+  host_set host_writefds = {};
   fd_set native_writefds = {0};
   if (writefds) {
     host_writefds.Load(writefds);
     host_writefds.Store(&native_writefds);
   }
-  host_set host_exceptfds = {0};
+  host_set host_exceptfds = {};
   fd_set native_exceptfds = {0};
   if (exceptfds) {
     host_exceptfds.Load(exceptfds);

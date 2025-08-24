@@ -86,7 +86,9 @@ void SyscallHandler(PPCContext* ppc_context, void* arg0, void* arg1) {
       assert_unhandled_case(syscall_number);
       XELOGE("Unhandled syscall {}!", syscall_number);
       break;
+#ifdef _MSC_VER
 #pragma warning(suppress : 4065)
+#endif
   }
 }
 

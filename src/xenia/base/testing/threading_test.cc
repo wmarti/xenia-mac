@@ -274,7 +274,6 @@ TEST_CASE("HighResolutionTimer") {
     using pair_t = std::pair<std::atomic<uint64_t>,
                              std::chrono::high_resolution_clock::time_point>;
     std::array<pair_t, timer_count> time_points{};
-    auto start = std::chrono::steady_clock::now();
     auto gen_callback = [&timer_thread, &time_points](size_t i) {
       return [&timer_thread, &time_points, i]() {
         auto& pair = time_points[i];
@@ -1121,7 +1120,7 @@ TEST_CASE("Test Thread QueueUserCallback", "[thread]") {
   order = 0;
   is_modified = -1;
   has_finished = -1;
-  thread = Thread::Create(params, [&is_modified, &has_finished, &order] {
+  thread = Thread::Create(params, [&is_modified, &order] {
     is_modified = std::atomic_fetch_add_explicit(
         &order, 1, std::memory_order::memory_order_relaxed);
     // Using Alertable so callback is registered

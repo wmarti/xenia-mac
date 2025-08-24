@@ -254,7 +254,7 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
     desired_access = FileAccess::kGenericRead | FileAccess::kFileReadData;
   }
 
-  bool created = false;
+  [[maybe_unused]] bool created = false;
   if (!entry) {
     // Remember that we are creating this new, instead of replacing.
     created = true;

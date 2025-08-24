@@ -49,7 +49,7 @@ TEST_CASE("ADD_I8", "[instr]") {
       },
       [](PPCContext* ctx) {
         auto result = static_cast<int8_t>(ctx->r[3]);
-        REQUIRE(result == -15);
+        REQUIRE(result == static_cast<int8_t>(-15));
       });
   test.Run(
       [](PPCContext* ctx) {
@@ -122,7 +122,7 @@ TEST_CASE("ADD_I16", "[instr]") {
       },
       [](PPCContext* ctx) {
         auto result = static_cast<int16_t>(ctx->r[3]);
-        REQUIRE(result == -15);
+        REQUIRE(result == static_cast<int16_t>(-15));
       });
   test.Run(
       [](PPCContext* ctx) {
@@ -195,7 +195,7 @@ TEST_CASE("ADD_I32", "[instr]") {
       },
       [](PPCContext* ctx) {
         auto result = static_cast<int32_t>(ctx->r[3]);
-        REQUIRE(result == -15);
+        REQUIRE(result == static_cast<int32_t>(-15));
       });
   test.Run(
       [](PPCContext* ctx) {
@@ -265,7 +265,7 @@ TEST_CASE("ADD_I64", "[instr]") {
       },
       [](PPCContext* ctx) {
         auto result = ctx->r[3];
-        REQUIRE(result == -15);
+        REQUIRE(result == static_cast<uint64_t>(-15));
       });
   test.Run(
       [](PPCContext* ctx) {
@@ -274,7 +274,7 @@ TEST_CASE("ADD_I64", "[instr]") {
       },
       [](PPCContext* ctx) {
         auto result = ctx->r[3];
-        REQUIRE(result == INT64_MIN);
+        REQUIRE(result == static_cast<uint64_t>(INT64_MIN));
       });
   test.Run(
       [](PPCContext* ctx) {

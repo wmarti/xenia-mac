@@ -31,7 +31,7 @@ std::unique_ptr<DiscImageEntry> DiscImageEntry::Create(
     MappedMemory* mmap) {
   auto path = xe::utf8::join_guest_paths(parent->path(), name);
   auto entry = std::make_unique<DiscImageEntry>(device, parent, path, mmap);
-  return std::move(entry);
+  return entry;
 }
 
 X_STATUS DiscImageEntry::Open(uint32_t desired_access, File** out_file) {

@@ -37,7 +37,14 @@ typedef unsigned short u_short;
 #define MICROPROFILE_WEBSERVER 0
 #define MICROPROFILE_DEBUG 0
 #define MICROPROFILE_MAX_THREADS 128
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wshorten-64-to-32"
+#endif
 #include "third_party/microprofile/microprofile.h"
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"

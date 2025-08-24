@@ -260,7 +260,7 @@ class MessageBoxDialog : public XamDialog {
   std::string title_;
   std::string description_;
   std::vector<std::string> buttons_;
-  uint32_t default_button_ = 0;
+  [[maybe_unused]] uint32_t default_button_ = 0;
   uint32_t chosen_button_ = 0;
 };
 
@@ -398,7 +398,7 @@ class KeyboardInputDialog : public XamDialog {
   std::string title_;
   std::string description_;
   std::string default_text_;
-  size_t max_length_ = 0;
+  [[maybe_unused]] size_t max_length_ = 0;
   std::vector<char> text_buffer_;
   std::string text_ = "";
   bool cancelled_ = true;

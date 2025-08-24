@@ -81,7 +81,7 @@ struct LOAD_VECTOR_SHL_I8
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
       auto sh = i.src1.constant();
-      assert_true(sh < xe::countof(lvsl_table));
+      assert_true(static_cast<size_t>(sh) < xe::countof(lvsl_table));
       e.MOV(X0, reinterpret_cast<uintptr_t>(&lvsl_table[sh]));
       e.LDR(i.dest, X0);
     } else {
@@ -119,7 +119,7 @@ struct LOAD_VECTOR_SHR_I8
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
       auto sh = i.src1.constant();
-      assert_true(sh < xe::countof(lvsr_table));
+      assert_true(static_cast<size_t>(sh) < xe::countof(lvsr_table));
       e.MOV(X0, reinterpret_cast<uintptr_t>(&lvsr_table[sh]));
       e.LDR(i.dest, X0);
     } else {
@@ -1025,12 +1025,9 @@ EMITTER_OPCODE_TABLE(OPCODE_EXTRACT, EXTRACT_I8, EXTRACT_I16, EXTRACT_I32);
 struct SPLAT_I8 : Sequence<SPLAT_I8, I<OPCODE_SPLAT, V128Op, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
-      if (i.src1.constant() <= 0xFF) {
-        e.MOVI(i.dest.reg().B16(), i.src1.constant());
-        return;
-      }
-      e.MOV(W0, i.src1.constant());
-      e.DUP(i.dest.reg().B16(), W0);
+      // int8_t is always <= 0xFF, so this is always true
+      // Keep the MOVI path for constants
+      e.MOVI(i.dest.reg().B16(), i.src1.constant());
     } else {
       e.DUP(i.dest.reg().B16(), i.src1);
     }

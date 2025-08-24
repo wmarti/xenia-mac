@@ -120,7 +120,7 @@ class XdbfWrapper {
 
  private:
   const uint8_t* data_ = nullptr;
-  size_t data_size_ = 0;
+  [[maybe_unused]] size_t data_size_ = 0;
   const uint8_t* content_offset_ = nullptr;
 
   const XbdfHeader* header_ = nullptr;

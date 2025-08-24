@@ -34,7 +34,7 @@ std::unique_ptr<StfsContainerEntry> StfsContainerEntry::Create(
   auto entry =
       std::make_unique<StfsContainerEntry>(device, parent, path, files);
 
-  return std::move(entry);
+  return entry;
 }
 
 X_STATUS StfsContainerEntry::Open(uint32_t desired_access, File** out_file) {

@@ -83,6 +83,7 @@ struct endian_store {
   endian_store() = default;
   endian_store(const T& src) { set(src); }
   endian_store(const endian_store& other) { set(other); }
+  endian_store& operator=(const endian_store& other) { set(other); return *this; }
   operator T() const { return get(); }
 
   void set(const T& src) {

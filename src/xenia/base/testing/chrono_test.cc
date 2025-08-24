@@ -69,7 +69,6 @@ TEST_CASE("WinSystemClock <-> XSystemClock", "[clock_cast]") {
   using namespace std::chrono_literals;
   using namespace xe::chrono;
   using namespace date;
-  using sys_clock = std::chrono::system_clock;
 
   SECTION("1993/12/21, clock_no_scaling = true") {
     static constexpr sys_days sys(1993_y / dec / 21);

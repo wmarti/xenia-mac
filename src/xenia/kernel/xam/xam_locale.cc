@@ -41,7 +41,9 @@ uint8_t xeXamGetOnlineCountryFromLocale(uint8_t id) {
       39,  42, 46, 44, 50,  53, 56,  71, 74,  76, 75, 82, 84, 91, 93,
       109, 31, 90, 18, 101, 35, 103, 88, 236, 99, 4,  89, 45, 1,
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : 0;
 }
 
@@ -75,7 +77,9 @@ const char16_t* xeXamGetOnlineCountryString(uint8_t id) {
       u"TM", u"TC",   u"TV", u"UG", u"VU",   u"VA", nullptr, u"VG",   u"WF",
       u"EH", u"ZM",   u"ZZ",
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : nullptr;
 }
 
@@ -94,7 +98,9 @@ const char16_t* xeXamGetCountryString(uint8_t id) {
       u"TT", u"TW", u"UA", u"US", u"UY",   u"UZ", u"VE", u"VN",   u"YE", u"ZA",
       u"ZW", u"ZZ",
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : nullptr;
 }
 
@@ -103,7 +109,9 @@ const char16_t* xeXamGetLanguageString(uint8_t id) {
       u"zz", u"en",   u"ja", u"de", u"fr", u"es", u"it", u"ko", u"zh",
       u"pt", nullptr, u"pl", u"ru", u"sv", u"tr", u"nb", u"nl", u"zh",
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : nullptr;
 }
 
@@ -115,7 +123,9 @@ const char16_t* xeXamGetLocaleString(uint8_t id) {
       u"PT", u"SG", u"SK", u"ZA", u"ES", u"SE", u"CH", u"TW", u"GB",
       u"US", u"RU", u"ZZ", u"TR", u"AR", u"SA", u"IL", u"AE",
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : nullptr;
 }
 
@@ -135,7 +145,9 @@ uint8_t xeXamGetLocaleFromOnlineCountry(uint8_t id) {
       0,  0,  0, 0, 0,  0,  0,  0,  0,  0, 0, 0, 0,  0,  0,  0,  0,  0,  0,
       0,  0,  0, 0, 0,  0,  0,  0,  38,
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : 0;
 }
 
@@ -145,7 +157,9 @@ uint8_t xeXamGetLanguageFromOnlineLanguage(uint8_t id) {
       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  1,  1,  1, 1, 14, 1,  1,  1, 1, 1,
       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  1,  1,  1, 1, 1,  1,  1,  1,
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : 0;
 }
 
@@ -159,7 +173,9 @@ const char16_t* xeXamGetOnlineLanguageString(uint8_t id) {
       u"am", u"fo", u"ka", u"kl", u"sw", u"ky", u"lb", u"mk", u"mt",
       u"mn", u"ne", u"ur", u"rw", u"wo", u"si", u"tk",
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : nullptr;
 }
 
@@ -181,7 +197,9 @@ uint8_t xeXamGetCountryFromOnlineCountry(uint8_t id) {
       0,  0,  0,  0,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
       0,  0,  0,  0,  0,   0,   0,   0,   0,   0,   0,   0,   111,
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : 0;
 }
 
@@ -194,7 +212,9 @@ uint8_t xeXamGetLocaleFromCountry(uint8_t id) {
       24, 0,  0, 0, 0,  0,  26, 0,  27, 0, 0, 0, 37, 41, 32, 28, 0,  29, 0,
       0,  0,  0, 0, 39, 0,  34, 0,  36, 0, 0, 0, 0,  0,  30, 0,  38,
   };
+#ifdef _MSC_VER
 #pragma warning(suppress : 6385)
+#endif
   return id < xe::countof(table) ? table[id] : 0;
 }
 

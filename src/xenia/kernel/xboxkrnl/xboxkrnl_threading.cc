@@ -1323,7 +1323,7 @@ pointer_result_t InterlockedPushEntrySList_entry(
   assert_not_null(entry);
 
   alignas(8) X_SLIST_HEADER old_hdr = *plist_ptr;
-  alignas(8) X_SLIST_HEADER new_hdr = {0};
+  alignas(8) X_SLIST_HEADER new_hdr = {};
   uint32_t old_head = 0;
   do {
     old_hdr = *plist_ptr;
@@ -1347,8 +1347,8 @@ pointer_result_t InterlockedPopEntrySList_entry(
   assert_not_null(plist_ptr);
 
   uint32_t popped = 0;
-  alignas(8) X_SLIST_HEADER old_hdr = {0};
-  alignas(8) X_SLIST_HEADER new_hdr = {0};
+  alignas(8) X_SLIST_HEADER old_hdr = {};
+  alignas(8) X_SLIST_HEADER new_hdr = {};
   do {
     old_hdr = *plist_ptr;
     auto next = kernel_memory()->TranslateVirtual<X_SINGLE_LIST_ENTRY*>(
@@ -1375,7 +1375,7 @@ pointer_result_t InterlockedFlushSList_entry(
   assert_not_null(plist_ptr);
 
   alignas(8) X_SLIST_HEADER old_hdr = *plist_ptr;
-  alignas(8) X_SLIST_HEADER new_hdr = {0};
+  alignas(8) X_SLIST_HEADER new_hdr = {};
   uint32_t first = 0;
   do {
     old_hdr = *plist_ptr;

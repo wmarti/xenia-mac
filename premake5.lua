@@ -39,9 +39,7 @@ if ARCH ~= "ppc64" then
 end
 
 characterset("Unicode")
-flags({
-  "FatalWarnings",        -- Treat warnings as errors.
-})
+fatalwarnings("All") -- Treat warnings as errors
 
 filter("kind:StaticLib")
   defines({
@@ -93,9 +91,7 @@ filter("configurations:Release")
   })
   optimize("Speed")
   inlining("Auto")
-  flags({
-    "LinkTimeOptimization",
-  })
+  linktimeoptimization("On")
   -- Not using floatingpoint("Fast") - NaN checks are used in some places
   -- (though rarely), overall preferable to avoid any functional differences
   -- between debug and release builds, and to have calculations involved in GPU
@@ -113,7 +109,7 @@ filter("platforms:Mac")
     "-Wall",                     -- Enable all warnings
     "-Wextra",                   -- Enable extra warnings
     "-Wno-unused-parameter",     -- Disable specific warnings if necessary
-    "-Wno-error",                -- Disable treating warnings as errors
+    "-Wno-shorten-64-to-32",    -- Disable warnings for third-party headers (oaknut)
     "-ferror-limit=0"
     -- Add other macOS-specific compiler flags as needed
   })
@@ -156,10 +152,10 @@ filter("platforms:Mac")
   -- Additional Settings
   flags({
     "NoPCH",            -- Disable Precompiled Headers if not used
-    "Symbols",          -- Include debugging symbols
   -- "OptimizeSpeed",  -- Removed to prevent conflict
     -- Add other flags as needed
   })
+  symbols("On")
 
     -- Optimization Flags per Configuration
     filter({"configurations:Debug", "toolset:clang or toolset:gcc"})
@@ -268,9 +264,7 @@ workspace("xenia")
     removefiles({
       "src/xenia/base/app_win32.manifest"
     })
-    removeflags({
-      "FatalWarnings",
-    })
+    removefatalwarnings("All")
   end
 
   include("src/xenia")

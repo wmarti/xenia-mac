@@ -648,7 +648,7 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
   if (properties_out) {
     *properties_out = properties;
   }
-  return std::move(consumer_lock);
+  return consumer_lock;
 }
 
 Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(

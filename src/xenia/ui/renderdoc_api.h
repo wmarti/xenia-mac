@@ -39,11 +39,11 @@ class RenderdocApi {
 #endif
 
  private:
-  void* library_ = nullptr;
+  [[maybe_unused]] void* library_ = nullptr;
 #if !XE_PLATFORM_MAC
   const RENDERDOC_API_1_0_0* api_1_0_0_ = nullptr;
 #else
-  const void* api_1_0_0_ = nullptr;
+  [[maybe_unused]] const void* api_1_0_0_ = nullptr;
 #endif
 };
 

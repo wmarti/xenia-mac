@@ -254,7 +254,7 @@ class XThread : public XObject, public cpu::Thread {
 
   xe::threading::WaitHandle* GetWaitHandle() override { return thread_.get(); }
 
-  CreationParams creation_params_ = {0};
+  CreationParams creation_params_ = {};
 
   std::vector<object_ref<XMutant>> pending_mutant_acquires_;
 

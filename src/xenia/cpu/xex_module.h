@@ -111,8 +111,8 @@ class XexModule : public xe::cpu::Module {
     return opt_alternate_title_ids_;
   }
 
-  const uint32_t base_address() const { return base_address_; }
-  const bool is_dev_kit() const { return is_dev_kit_; }
+  uint32_t base_address() const { return base_address_; }
+  bool is_dev_kit() const { return is_dev_kit_; }
 
   // Gets an optional header. Returns NULL if not found.
   // Special case: if key & 0xFF == 0x00, this function will return the value,

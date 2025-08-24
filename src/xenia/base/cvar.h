@@ -75,8 +75,10 @@ class CommandVar : virtual public ICommandVar {
   void SetValue(T val);
   void UpdateValue() override;
 };
+#ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4250)
+#endif
 template <class T>
 class ConfigVar : public CommandVar<T>, virtual public IConfigVar {
  public:
@@ -105,7 +107,9 @@ class ConfigVar : public CommandVar<T>, virtual public IConfigVar {
   void ResetConfigValueToDefault() override;
 };
 
+#ifdef _MSC_VER
 #pragma warning(pop)
+#endif
 template <class T>
 const std::string& CommandVar<T>::name() const {
   return name_;
@@ -170,8 +174,8 @@ CommandVar<T>::CommandVar(const char* name, T* default_value,
                           const char* description)
     : name_(name),
       default_value_(*default_value),
-      description_(description),
-      current_value_(default_value) {}
+      current_value_(default_value),
+      description_(description) {}
 
 template <class T>
 ConfigVar<T>::ConfigVar(const char* name, T* default_value,

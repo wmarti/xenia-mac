@@ -229,7 +229,7 @@ bool XmaContext::ValidFrameOffset(uint8_t* block, size_t size_bytes,
                                   size_t frame_offset_bits) {
   uint32_t packet_num =
       GetFramePacketNumber(block, size_bytes, frame_offset_bits);
-  if (packet_num == -1) {
+  if (packet_num == static_cast<uint32_t>(-1)) {
     // Invalid packet number
     return false;
   }
@@ -238,7 +238,7 @@ bool XmaContext::ValidFrameOffset(uint8_t* block, size_t size_bytes,
   size_t relative_offset_bits = frame_offset_bits % kBitsPerPacket;
 
   uint32_t first_frame_offset = xma::GetPacketFrameOffset(packet);
-  if (first_frame_offset == -1 || first_frame_offset > kBitsPerPacket) {
+  if (first_frame_offset == static_cast<uint32_t>(-1) || first_frame_offset > kBitsPerPacket) {
     // Packet only contains a partial frame, so no frames can start here.
     return false;
   }
@@ -275,7 +275,7 @@ bool XmaContext::ValidFrameOffset(uint8_t* block, size_t size_bytes,
   return false;
 }
 
-static void dump_raw(AVFrame* frame, int id) {
+[[maybe_unused]] static void dump_raw(AVFrame* frame, int id) {
   FILE* outfile = fopen(fmt::format("out{}.raw", id).c_str(), "ab");
   if (!outfile) {
     return;
@@ -350,7 +350,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
       data->input_buffer_0_packet_count * kBytesPerPacket;
   size_t input_buffer_1_size =
       data->input_buffer_1_packet_count * kBytesPerPacket;
-  size_t input_total_size = input_buffer_0_size + input_buffer_1_size;
+  [[maybe_unused]] size_t input_total_size = input_buffer_0_size + input_buffer_1_size;
 
   size_t current_input_size =
       data->current_buffer ? input_buffer_1_size : input_buffer_0_size;
@@ -382,7 +382,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   // is_dirty_ = false;  // TODO
   assert_false(data->stop_when_done);
   assert_false(data->interrupt_when_done);
-  static int total_samples = 0;
+  [[maybe_unused]] static int total_samples = 0;
   bool reuse_input_buffer = false;
   // Decode until we can't write any more data.
   while (output_remaining_bytes > 0) {
@@ -415,7 +415,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
       while (packets_skip_ > 0) {
         packets_skip_--;
         packet_idx++;
-        if (packet_idx >= current_input_packet_count) {
+        if (packet_idx >= static_cast<int>(current_input_packet_count)) {
           if (!reuse_input_buffer) {
             // Last packet. Try setup once more.
             reuse_input_buffer = TrySetupNextLoop(data, true);
@@ -483,7 +483,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
             xma::GetPacketFrameOffset(current_input_buffer +
                                       kBytesPerPacket * packet_number) +
             data->input_buffer_read_offset;
-        if (offset == -1) {
+        if (offset == static_cast<uint32_t>(-1)) {
           // No more frames.
           SwapInputBuffer(data);
           // TODO partial frames? end?
@@ -553,7 +553,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
           packets_skip_--;
           packet += kBytesPerPacket;
           packet_idx++;
-          if (packet_idx >= current_input_packet_count) {
+          if (packet_idx >= static_cast<int>(current_input_packet_count)) {
             if (!reuse_input_buffer) {
               // Last packet. Try setup once more.
               reuse_input_buffer = TrySetupNextLoop(data, true);
@@ -641,7 +641,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
         while (packets_skip_ > 0) {
           packets_skip_--;
           packet_idx++;
-          if (packet_idx >= current_input_packet_count) {
+          if (packet_idx >= static_cast<int>(current_input_packet_count)) {
             if (!reuse_input_buffer) {
               // Last packet. Try setup once more.
               reuse_input_buffer = TrySetupNextLoop(data, true);
@@ -658,7 +658,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
       }
       if (offset == 0 || frame_idx == -1) {
         // Next packet but we already skipped to it
-        if (packet_idx >= current_input_packet_count) {
+        if (packet_idx >= static_cast<int>(current_input_packet_count)) {
           // Buffer is fully used
           if (!reuse_input_buffer) {
             // Last packet. Try setup once more.
@@ -837,7 +837,7 @@ int XmaContext::PrepareDecoder(uint8_t* packet, int sample_rate,
   // Re-initialize the context with new sample rate and channels.
   uint32_t channels = is_two_channel ? 2 : 1;
   if (av_context_->sample_rate != sample_rate ||
-      av_context_->channels != channels) {
+      av_context_->channels != static_cast<int>(channels)) {
     // We have to reopen the codec so it'll realloc whatever data it needs.
     // TODO(DrChat): Find a better way.
     avcodec_close(av_context_);

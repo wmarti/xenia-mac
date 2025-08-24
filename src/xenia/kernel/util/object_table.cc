@@ -177,7 +177,7 @@ X_STATUS ObjectTable::ReleaseHandle(X_HANDLE handle) {
 }
 
 X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
-  X_STATUS result = X_STATUS_SUCCESS;
+  [[maybe_unused]] X_STATUS result = X_STATUS_SUCCESS;
 
   handle = TranslateHandle(handle);
   if (!handle) {

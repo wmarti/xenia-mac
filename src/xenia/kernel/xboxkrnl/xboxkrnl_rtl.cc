@@ -119,8 +119,8 @@ dword_result_t RtlCompareStringN_entry(lpstring_t string_1,
                                        lpstring_t string_2,
                                        dword_t string_2_len,
                                        dword_t case_insensitive) {
-  uint32_t len1 = string_1_len;
-  uint32_t len2 = string_2_len;
+  [[maybe_unused]] uint32_t len1 = string_1_len;
+  [[maybe_unused]] uint32_t len2 = string_2_len;
 
   if (string_1_len == 0xFFFF) {
     len1 = uint32_t(std::strlen(string_1));

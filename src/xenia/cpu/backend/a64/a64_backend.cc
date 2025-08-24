@@ -343,8 +343,8 @@ uint64_t A64Backend::CalculateNextHostInstruction(ThreadDebugInfo* thread_info,
   auto machine_code_ptr = reinterpret_cast<const uint8_t*>(current_pc);
   size_t remaining_machine_code_size = 64;
   uint64_t host_address = current_pc;
-  cs_insn insn = {0};
-  cs_detail all_detail = {0};
+  cs_insn insn = {};
+  cs_detail all_detail = {};
   insn.detail = &all_detail;
   cs_disasm_iter(capstone_handle_, &machine_code_ptr,
                  &remaining_machine_code_size, &host_address, &insn);

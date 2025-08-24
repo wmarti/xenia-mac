@@ -83,8 +83,8 @@ std::string upper_ascii(const std::string_view view) {
 template <bool LOWER>
 inline size_t hash_fnv1a(const std::string_view view) {
   const size_t offset_basis = 0xCBF29CE484222325ull;
-  const size_t prime = 0x00000100000001B3ull;
-  auto work = [&prime](size_t hash, uint8_t byte_of_data) {
+  constexpr size_t prime = 0x00000100000001B3ull;
+  auto work = [](size_t hash, uint8_t byte_of_data) {
     hash ^= byte_of_data;
     hash *= prime;
     return hash;

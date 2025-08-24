@@ -117,11 +117,11 @@ uint32_t KernelModule::GetProcAddressByOrdinal(uint16_t ordinal) {
 
       cpu::GuestFunction::ExternHandler handler = nullptr;
       if (export_entry->function_data.trampoline) {
-        handler = (cpu::GuestFunction::ExternHandler)
+        handler = (cpu::GuestFunction::ExternHandler)(void*)
                       export_entry->function_data.trampoline;
       } else {
         handler =
-            (cpu::GuestFunction::ExternHandler)export_entry->function_data.shim;
+            (cpu::GuestFunction::ExternHandler)(void*)export_entry->function_data.shim;
       }
 
       uint32_t guest_addr =

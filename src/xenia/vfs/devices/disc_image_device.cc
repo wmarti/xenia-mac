@@ -34,7 +34,7 @@ bool DiscImageDevice::Initialize() {
     return false;
   }
 
-  ParseState state = {0};
+  ParseState state = {};
   state.ptr = mmap_->data();
   state.size = mmap_->size();
   auto result = Verify(&state);

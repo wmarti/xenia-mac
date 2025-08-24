@@ -122,7 +122,7 @@ void A64Assembler::DumpMachineCode(
   const uint8_t* code_ptr = reinterpret_cast<uint8_t*>(machine_code);
   size_t remaining_code_size = code_size;
   uint64_t address = uint64_t(machine_code);
-  cs_insn insn = {0};
+  cs_insn insn = {};
   while (remaining_code_size &&
          cs_disasm_iter(capstone_handle_, &code_ptr, &remaining_code_size,
                         &address, &insn)) {
@@ -130,11 +130,11 @@ void A64Assembler::DumpMachineCode(
     auto code_offset =
         uint32_t(code_ptr - reinterpret_cast<uint8_t*>(machine_code));
     if (code_offset >= next_code_offset &&
-        source_map_index < source_map.size()) {
+        source_map_index < static_cast<int>(source_map.size())) {
       auto& source_map_entry = source_map[source_map_index];
       str->AppendFormat("{:08X} ", source_map_entry.guest_address);
       ++source_map_index;
-      next_code_offset = source_map_index < source_map.size()
+      next_code_offset = source_map_index < static_cast<int>(source_map.size())
                              ? source_map[source_map_index].code_offset
                              : UINT_MAX;
     } else {

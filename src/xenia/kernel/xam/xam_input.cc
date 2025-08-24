@@ -113,7 +113,7 @@ dword_result_t XamInputSetState_entry(dword_t user_index, dword_t unk,
     return X_ERROR_BAD_ARGUMENTS;
   }
 
-  uint32_t actual_user_index = user_index;
+  [[maybe_unused]] uint32_t actual_user_index = user_index;
   if ((user_index & 0xFF) == 0xFF) {
     // Always pin user to 0.
     actual_user_index = 0;

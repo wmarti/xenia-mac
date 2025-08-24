@@ -30,7 +30,14 @@
 #if XE_OPTION_PROFILING
 // Pollutes the global namespace. Yuck.
 #define MICROPROFILE_MAX_THREADS 128
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wshorten-64-to-32"
+#endif
 #include <microprofile/microprofile.h>
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 #endif  // XE_OPTION_PROFILING
 
 namespace xe {

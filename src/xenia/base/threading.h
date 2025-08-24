@@ -58,7 +58,8 @@ class Fence {
                 "Too many threads?");
 
     // keep local copy to minimize loads
-    auto signal_state = ++signal_state_;
+    signal_state_ = signal_state_ + 1;
+    auto signal_state = signal_state_;
     for (; !(signal_state & SIGMASK_); signal_state = signal_state_) {
       cond_.wait(lock);
     }

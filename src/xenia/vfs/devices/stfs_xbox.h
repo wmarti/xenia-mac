@@ -21,7 +21,7 @@ namespace vfs {
 
 // Convert FAT timestamp to 100-nanosecond intervals since January 1, 1601 (UTC)
 inline uint64_t decode_fat_timestamp(const uint32_t date, const uint32_t time) {
-  struct tm tm = {0};
+  struct tm tm = {};
   // 80 is the difference between 1980 (FAT) and 1900 (tm);
   tm.tm_year = ((0xFE00 & date) >> 9) + 80;
   tm.tm_mon = ((0x01E0 & date) >> 5) - 1;

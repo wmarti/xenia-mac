@@ -23,9 +23,20 @@ project("xenia-cpu-backend-a64")
       "4267"  -- conversion from 'size_t' to 'uint32_t'
     })
 
-    includedirs({
-      project_root.."/third_party/oaknut/include",
-    })
+    -- Add oaknut as external include to suppress warnings
+    filter("toolset:clang or toolset:gcc")
+      externalincludedirs({
+        project_root.."/third_party/oaknut/include",
+      })
+      -- Also explicitly disable the warning for third-party code
+      buildoptions({
+        "-Wno-shorten-64-to-32",
+      })
+    filter("toolset:msc")
+      includedirs({
+        project_root.."/third_party/oaknut/include",
+      })
+    filter("architecture:ARM64")
     
     -- Include only ARM64-specific files
     local_platform_files()

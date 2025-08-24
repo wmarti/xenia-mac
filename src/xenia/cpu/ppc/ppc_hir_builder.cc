@@ -54,7 +54,7 @@ void DumpAllOpcodeCounts() {
   sb.Append("Instruction translation counts:\n");
   for (size_t i = 0; i < xe::countof(opcode_translation_counts); ++i) {
     auto opcode = static_cast<PPCOpcode>(i);
-    auto& opcode_info = GetOpcodeInfo(opcode);
+    [[maybe_unused]] auto& opcode_info = GetOpcodeInfo(opcode);
     auto& disasm_info = GetOpcodeDisasmInfo(opcode);
     auto translation_count = opcode_translation_counts[i];
     if (translation_count) {

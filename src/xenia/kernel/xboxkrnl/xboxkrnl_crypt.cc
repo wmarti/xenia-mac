@@ -20,6 +20,11 @@
 #include "xenia/base/platform_win.h"  // for bcrypt.h
 #endif
 
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-pragmas"
+#endif
+
 #include "third_party/crypto/TinySHA1.hpp"
 #include "third_party/crypto/des/des.cpp"
 #include "third_party/crypto/des/des.h"
@@ -27,6 +32,10 @@
 #include "third_party/crypto/des/descbc.h"
 #include "third_party/crypto/sha256.cpp"
 #include "third_party/crypto/sha256.h"
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 extern "C" {
 #include "third_party/aes_128/aes.h"

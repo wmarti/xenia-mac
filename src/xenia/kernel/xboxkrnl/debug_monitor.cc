@@ -74,7 +74,7 @@ void KeDebugMonitorCallback(cpu::ppc::PPCContext* ppc_context,
         xe::be<uint32_t> callback_fn;
         xe::be<uint32_t> callback_arg;  // D3D device object?
       };
-      auto cbi = kernel_state->memory()->TranslateVirtual<callback_info*>(arg);
+      [[maybe_unused]] auto cbi = kernel_state->memory()->TranslateVirtual<callback_info*>(arg);
       SHIM_SET_RETURN_32(0);
       break;
     }

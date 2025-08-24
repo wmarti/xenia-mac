@@ -585,7 +585,7 @@ class XStaticAchievementEnumerator : public XEnumerator {
       return X_ERROR_NO_MORE_FILES;
     }
 
-    size_t size = count * item_size();
+    [[maybe_unused]] size_t size = count * item_size();
 
     auto details = reinterpret_cast<X_ACHIEVEMENT_DETAILS*>(buffer_data);
     size_t string_offset =
@@ -594,7 +594,8 @@ class XStaticAchievementEnumerator : public XEnumerator {
         StringBuffer{buffer_ptr + static_cast<uint32_t>(string_offset),
                      &buffer_data[string_offset],
                      count * X_ACHIEVEMENT_DETAILS::kStringBufferSize};
-    for (size_t i = 0, o = current_item_; i < count; ++i, ++current_item_) {
+    [[maybe_unused]] size_t o = current_item_;
+    for (size_t i = 0; i < count; ++i, ++current_item_) {
       const auto& item = items_[current_item_];
       details[i].id = item.id;
       details[i].label_ptr =

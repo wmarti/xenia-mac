@@ -256,7 +256,7 @@ int XexModule::ApplyPatch(XexModule* module) {
                          patch_header->delta_headers_source_size;
   }
 
-  size_t mem_size = module->xex_header_mem_.size();
+  [[maybe_unused]] size_t mem_size = module->xex_header_mem_.size();
 
   // Increase xex header buffer length if needed
   if (header_target_size > module->xex_header_mem_.size()) {
@@ -563,7 +563,7 @@ int XexModule::ReadImageUncompressed(const void* xex_addr, size_t xex_length) {
 
 int XexModule::ReadImageBasicCompressed(const void* xex_addr,
                                         size_t xex_length) {
-  const uint32_t exe_length =
+  [[maybe_unused]] const uint32_t exe_length =
       static_cast<uint32_t>(xex_length - xex_header()->header_size);
   const uint8_t* source_buffer =
       (const uint8_t*)xex_addr + xex_header()->header_size;
@@ -673,7 +673,7 @@ int XexModule::ReadImageCompressed(const void* xex_addr, size_t xex_length) {
   // Decrypt (if needed).
   bool free_input = false;
   const uint8_t* input_buffer = exe_buffer;
-  size_t input_size = exe_length;
+  [[maybe_unused]] size_t input_size = exe_length;
 
   switch (opt_file_format_info()->encryption_type) {
     case XEX_ENCRYPTION_NONE:
@@ -917,7 +917,7 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
   // Read/convert XEX1/XEX2 security info to a common format
   ReadSecurityInfo();
 
-  auto sec_header = xex_security_info();
+  [[maybe_unused]] auto sec_header = xex_security_info();
 
   // Try setting our base_address based on XEX_HEADER_IMAGE_BASE_ADDRESS, fall
   // back to xex_security_info otherwise
@@ -930,7 +930,7 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
   name_ = name;
   path_ = path;
 
-  uint8_t* data = memory()->TranslateVirtual(base_address_);
+  [[maybe_unused]] uint8_t* data = memory()->TranslateVirtual(base_address_);
 
   // Load in the XEX basefile
   // We'll try using both XEX2 keys to see if any give a valid PE
@@ -1257,8 +1257,14 @@ bool XexModule::SetupLibraryImports(const std::string_view name,
         GuestFunction::ExternHandler handler = nullptr;
         if (kernel_export) {
           if (kernel_export->function_data.trampoline) {
-            handler = (GuestFunction::ExternHandler)
-                          kernel_export->function_data.trampoline;
+            // The trampoline only takes PPCContext*, but handler expects
+            // both PPCContext* and KernelState*. This is intentional -
+            // trampolines don't need kernel state. Use void* cast to bypass
+            // the type system safely.
+            void* trampoline_ptr = reinterpret_cast<void*>(
+                kernel_export->function_data.trampoline);
+            handler = reinterpret_cast<GuestFunction::ExternHandler>(
+                trampoline_ptr);
           } else {
             handler =
                 (GuestFunction::ExternHandler)kernel_export->function_data.shim;

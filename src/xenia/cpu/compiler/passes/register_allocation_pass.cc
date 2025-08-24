@@ -111,7 +111,7 @@ bool RegisterAllocationPass::Run(HIRBuilder* builder) {
       // reuse it.
       // NOTE: these checks require that the usage list be sorted!
       bool has_preferred_reg = false;
-      RegAssignment preferred_reg = {0};
+      RegAssignment preferred_reg = {};
       if (GET_OPCODE_SIG_TYPE_SRC1(signature) == OPCODE_SIG_TYPE_V &&
           !instr->src1.value->IsConstant()) {
         if (!instr->src1_use->next) {

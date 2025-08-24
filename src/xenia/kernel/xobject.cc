@@ -36,8 +36,8 @@ XObject::XObject(Type type)
 
 XObject::XObject(KernelState* kernel_state, Type type)
     : kernel_state_(kernel_state),
-      type_(type),
       pointer_ref_count_(1),
+      type_(type),
       guest_object_ptr_(0),
       allocated_guest_object_(false) {
   handles_.reserve(10);

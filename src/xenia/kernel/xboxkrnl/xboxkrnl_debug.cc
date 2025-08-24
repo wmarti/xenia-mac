@@ -58,7 +58,7 @@ void HandleSetThreadName(pointer_t<X_EXCEPTION_RECORD> record) {
       name.begin(), name.end(), [](auto c) { return c < 32 || c > 127; }, '?');
 
   object_ref<XThread> thread;
-  if (thread_info->thread_id == -1) {
+  if (thread_info->thread_id == static_cast<unsigned int>(-1)) {
     // Current thread.
     thread = retain_object(XThread::GetCurrentThread());
   } else {
@@ -116,7 +116,7 @@ void HandleCppException(pointer_t<X_EXCEPTION_RECORD> record) {
   auto throw_info_ptr = record->exception_information[2];
   auto throw_info =
       kernel_memory()->TranslateVirtual<x_s__ThrowInfo*>(throw_info_ptr);
-  auto catchable_types =
+  [[maybe_unused]] auto catchable_types =
       kernel_memory()->TranslateVirtual<x_s__CatchableTypeArray*>(
           throw_info->catchable_type_array_ptr);
 

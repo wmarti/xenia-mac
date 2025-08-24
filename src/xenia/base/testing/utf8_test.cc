@@ -87,8 +87,8 @@ const char* kFrenchValues[kFrenchCount] = {
     u8"Fête l'haï volapük,\n"
     u8"Âne ex aéquo au whist,\n"
     u8"Ôtez ce vœu déçu.",
-    u8"Le cœur déçu mais l'âme plutôt naïve, Louÿs rêva de crapaüter en canoë "
-    u8"au delà des îles, près du mälström où brûlent les novæ.",
+    (u8"Le cœur déçu mais l'âme plutôt naïve, Louÿs rêva de crapaüter en canoë "
+    u8"au delà des îles, près du mälström où brûlent les novæ."),
 };
 #define TEST_LANGUAGE_EXAMPLES_French(func, results) \
   TEST_EXAMPLES_3(func, French, results)

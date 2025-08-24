@@ -127,7 +127,7 @@ X_STATUS XmaDecoder::Setup(kernel::KernelState* kernel_state) {
       memory()->GetPhysicalAddress(context_data_first_ptr_);
 
   // Setup XMA contexts.
-  for (int i = 0; i < kContextCount; ++i) {
+  for (uint32_t i = 0; i < kContextCount; ++i) {
     uint32_t guest_ptr = context_data_first_ptr_ + i * sizeof(XMA_CONTEXT_DATA);
     XmaContext& context = contexts_[i];
     if (context.Setup(i, memory(), guest_ptr)) {
@@ -225,7 +225,7 @@ int XmaDecoder::GetContextId(uint32_t guest_ptr) {
 
 uint32_t XmaDecoder::AllocateContext() {
   size_t index = context_bitmap_.Acquire();
-  if (index == -1) {
+  if (index == static_cast<size_t>(-1)) {
     // Out of contexts.
     return 0;
   }
@@ -357,7 +357,9 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
         }
         break;
       }
+#ifdef _MSC_VER
 #pragma warning(suppress : 4065)
+#endif
     }
   }
 }

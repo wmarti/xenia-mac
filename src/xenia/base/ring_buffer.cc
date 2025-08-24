@@ -40,7 +40,7 @@ void RingBuffer::AdvanceWrite(size_t count) {
 RingBuffer::ReadRange RingBuffer::BeginRead(size_t count) {
   count = std::min(count, capacity_);
   if (!count) {
-    return {0};
+    return {nullptr, 0, nullptr, 0};
   }
   if (read_offset_ + count < capacity_) {
     return {buffer_ + read_offset_, count, nullptr, 0};

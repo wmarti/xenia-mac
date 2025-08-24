@@ -1450,9 +1450,9 @@ void PhysicalHeap::Initialize(Memory* memory, uint8_t* membase,
     parent_heap_ = parent_heap;
     system_page_size_ = uint32_t(xe::memory::page_size());
 
-    system_page_count_ =
+    system_page_count_ = static_cast<uint32_t>(
         (size_t(heap_size_) + host_address_offset_ + (system_page_size_ - 1)) /
-        system_page_size_;
+        system_page_size_);
     system_page_flags_.resize((system_page_count_ + 63) / 64);
 }
 

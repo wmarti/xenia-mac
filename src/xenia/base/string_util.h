@@ -141,7 +141,7 @@ inline std::string to_hex_string(const vec128_t& value) {
 // Overload for uintptr_t (only define if it's a distinct type from uint32_t/uint64_t)
 // On Windows, uintptr_t is the same type as uint64_t, so this would be a duplicate
 // On Unix-like systems, uintptr_t is unsigned long, which is distinct from unsigned long long
-#if !defined(_WIN32)
+#ifndef XE_PLATFORM_WIN32
 inline std::string to_hex_string(uintptr_t value) {
     if constexpr (sizeof(uintptr_t) == sizeof(uint32_t)) {
         return to_hex_string(static_cast<uint32_t>(value));

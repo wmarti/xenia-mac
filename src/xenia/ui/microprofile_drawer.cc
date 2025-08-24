@@ -189,7 +189,7 @@ void MicroprofileDrawer::End() {
 
 ImmediateVertex* MicroprofileDrawer::BeginVertices(
     ImmediatePrimitiveType primitive_type, int count) {
-  if (vertex_count_ + count > vertices_.size() ||
+  if (vertex_count_ + count > static_cast<int>(vertices_.size()) ||
       primitive_type != current_primitive_type_) {
     Flush();
   }
@@ -337,8 +337,8 @@ void MicroprofileDrawer::DrawTextString(int x, int y, uint32_t color,
   color = 0xff000000 | ((color & 0xff) << 16) | (color & 0xff00) |
           ((color >> 16) & 0xff);
 
-  for (size_t j = 0; j < text_length; ++j) {
-    int16_t char_offset = font_description_.char_offsets[*pStr++];
+  for (int j = 0; j < text_length; ++j) {
+    int16_t char_offset = font_description_.char_offsets[static_cast<unsigned char>(*pStr++)];
     float fOffset = char_offset / 1024.0f;
     Q0(v, x, fX);
     Q0(v, y, fY);

@@ -143,6 +143,7 @@ class Param {
     int float_ordinal;
   };
 
+  Param(const Param&) = default;
   Param& operator=(const Param&) = delete;
 
   int ordinal() const { return ordinal_; }
@@ -531,6 +532,7 @@ xe::cpu::Export* RegisterExport(R (*fn)(Ps&...), const char* name,
       Param::Init init = {
           ppc_context,
           0,
+          0,  // float_ordinal
       };
       // Using braces initializer instead of make_tuple because braces
       // enforce execution order across compilers.

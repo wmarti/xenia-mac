@@ -44,7 +44,7 @@ bool ControlFlowSimplificationPass::Run(HIRBuilder* builder) {
   }
 
   // Walk backwards and merge blocks if possible.
-  bool merged_any = false;
+  [[maybe_unused]] bool merged_any = false;
   block = builder->last_block();
   while (block) {
     auto prev_block = block->prev;
