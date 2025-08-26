@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstring>
 #include <string>
+#include <type_traits>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
@@ -139,20 +140,29 @@ inline std::string to_hex_string(const vec128_t& value) {
 }
 
 // Overload for uintptr_t (only define if it's a distinct type from uint32_t/uint64_t)
-// On Windows, uintptr_t is the same type as uint64_t, so this would be a duplicate
-// On Unix-like systems, uintptr_t is unsigned long, which is distinct from unsigned long long
-#ifndef XE_PLATFORM_WIN32
-inline std::string to_hex_string(uintptr_t value) {
+// On AArch64 Linux: both uintptr_t and uint64_t are typedefs of unsigned long (same type)
+// On AArch64 macOS: uintptr_t is unsigned long, uint64_t is unsigned long long (distinct types)
+// Use SFINAE to conditionally compile only when types are actually different
+template <typename T>
+inline typename std::enable_if<
+    std::is_same<T, uintptr_t>::value &&
+    !std::is_same<uintptr_t, uint32_t>::value &&
+    !std::is_same<uintptr_t, uint64_t>::value,
+    std::string>::type
+to_hex_string(T value) {
     if constexpr (sizeof(uintptr_t) == sizeof(uint32_t)) {
-        return to_hex_string(static_cast<uint32_t>(value));
+        return fmt::format("{:08X}", value);
     } else if constexpr (sizeof(uintptr_t) == sizeof(uint64_t)) {
-        return to_hex_string(static_cast<uint64_t>(value));
+        return fmt::format("{:016X}", value);
     } else {
         static_assert(sizeof(uintptr_t) == sizeof(uint32_t) || sizeof(uintptr_t) == sizeof(uint64_t),
                       "Unsupported uintptr_t size for to_hex_string.");
     }
 }
-#endif
+
+// Sanity checks for platform assumptions
+static_assert(sizeof(uintptr_t) == sizeof(void*), "uintptr_t must match pointer width");
+static_assert(sizeof(uint64_t) == 8, "uint64_t must be 64-bit");
 
 template <typename T>
 inline T from_string(const std::string_view value, bool force_hex = false) {

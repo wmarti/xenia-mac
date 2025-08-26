@@ -66,7 +66,7 @@ filter({"platforms:Windows-*"})
     "4146",  -- Disable warning about unary minus operator applied to unsigned type
     "4267",  -- Disable warning about conversion from 'size_t' to smaller types
   })
-filter({"configurations:Checked", "platforms:Linux"})
+filter({"configurations:Checked", "platforms:Linux-*"})
   defines({
     "_GLIBCXX_DEBUG",   -- libstdc++ debug mode
   })
@@ -78,7 +78,7 @@ filter("configurations:Debug")
     "DEBUG",
     "_NO_DEBUG_HEAP=1",
   })
-filter({"configurations:Debug", "platforms:Linux"})
+filter({"configurations:Debug", "platforms:Linux-*"})
   defines({
     "_GLIBCXX_DEBUG",   -- make dbg symbols work on some distros
   })
@@ -168,15 +168,15 @@ filter("platforms:Mac")
   
 filter({})
 
-filter({"platforms:Linux", "kind:*App"})
+filter({"platforms:Linux-*", "kind:*App"})
   linkgroups("On")
 
-filter({"platforms:Linux", "language:C++", "toolset:gcc"})
+filter({"platforms:Linux-*", "language:C++", "toolset:gcc"})
   disablewarnings({
     "unused-result"
   })
 
-filter({"platforms:Linux", "toolset:gcc"})
+filter({"platforms:Linux-*", "toolset:gcc"})
   if ARCH == "ppc64" then
     buildoptions({
       "-m32",
@@ -188,11 +188,11 @@ filter({"platforms:Linux", "toolset:gcc"})
     })
   end
 
-filter({"platforms:Linux", "language:C++", "toolset:clang"})
+filter({"platforms:Linux-*", "language:C++", "toolset:clang"})
   disablewarnings({
     "deprecated-register"
   })
-filter({"platforms:Linux", "language:C++", "toolset:clang", "files:*.cc or *.cpp"})
+filter({"platforms:Linux-*", "language:C++", "toolset:clang", "files:*.cc or *.cpp"})
   buildoptions({
     "-stdlib=libstdc++",
   })
@@ -214,8 +214,12 @@ workspace("xenia")
     filter({})
   else
     if os.istarget("linux") then
-      platforms({"Linux"})
-      architecture("ARM64")
+      platforms({"Linux-ARM64", "Linux-x86_64"})
+      filter("platforms:Linux-ARM64")
+        architecture("ARM64")
+      filter("platforms:Linux-x86_64")
+        architecture("x86_64")
+      filter({})
     elseif os.istarget("macosx") then
       platforms({"Mac"})
       architecture("ARM64")  -- Explicitly set architecture

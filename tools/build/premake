@@ -180,8 +180,22 @@ def clone_premake_to_internal_storage():
 
 
 def has_bin(bin):
-  """Checks whether the given binary is present.
+  """Checks whether the given binary is present and executable on this platform.
   """
+  # Check if the binary path was provided directly (not just a name)
+  if os.path.isfile(bin):
+    exe_file = bin
+    # Try to execute it to ensure it's compatible with this platform
+    try:
+      subprocess.run([exe_file, '--version'], 
+                     stdout=subprocess.DEVNULL, 
+                     stderr=subprocess.DEVNULL,
+                     timeout=1)
+      return True
+    except (subprocess.SubprocessError, OSError, FileNotFoundError):
+      return False
+  
+  # Original PATH search logic
   for path in os.environ["PATH"].split(os.pathsep):
     if sys.platform == 'win32':
       exe_file = os.path.join(path, bin + '.exe')

@@ -911,11 +911,21 @@ class BaseBuildCommand(Command):
                 args['config']
             ] + scheme_args + pass_args, shell=False, env=dict(os.environ))
         else:
+            # Detect the architecture for Linux builds
+            import platform
+            machine = platform.machine().lower()
+            if machine in ['aarch64', 'arm64']:
+                arch_suffix = 'arm64'
+            elif machine in ['x86_64', 'amd64']:
+                arch_suffix = 'x86_64'
+            else:
+                arch_suffix = 'x86_64'  # Default to x86_64
+            
             result = subprocess.call([
                 'make',
                 '-j' if threads == 0 else '-j%d' % threads,
                 '-Cbuild/',
-                'config=%s_linux' % (args['config']),
+                'config=%s_linux-%s' % (args['config'], arch_suffix),
             ] + pass_args + args['target'], shell=False, env=dict(os.environ))
         print('')
         if result != 0:

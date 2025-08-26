@@ -13,6 +13,7 @@
 #include "xenia/base/chrono_steady_cast.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/threading_timer_queue.h"
+#include "xenia/base/logging.h"
 
 #include <pthread.h>
 #include <sched.h>
@@ -660,8 +661,15 @@ class PosixCondition<Thread> : public PosixConditionBase {
     WaitStarted();
     sched_param param{};
     param.sched_priority = new_priority;
-    if (pthread_setschedparam(thread_, SCHED_FIFO, &param) != 0)
-      assert_always();
+    // Try SCHED_FIFO first (requires elevated privileges)
+    if (pthread_setschedparam(thread_, SCHED_FIFO, &param) != 0) {
+      // Fall back to SCHED_OTHER if SCHED_FIFO fails (common on non-root)
+      param.sched_priority = 0;  // SCHED_OTHER only supports priority 0
+      if (pthread_setschedparam(thread_, SCHED_OTHER, &param) != 0) {
+        // Log warning but don't crash - thread priority is not critical
+        XELOGW("Failed to set thread priority - running with default priority");
+      }
+    }
   }
 
   void QueueUserCallback(std::function<void()> callback) {

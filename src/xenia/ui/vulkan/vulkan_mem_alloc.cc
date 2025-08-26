@@ -94,7 +94,9 @@ VmaAllocator CreateVmaAllocator(const VulkanProvider& provider,
   allocator_create_info.device = provider.device();
   allocator_create_info.pVulkanFunctions = &vma_vulkan_functions;
   allocator_create_info.instance = provider.instance();
-  allocator_create_info.vulkanApiVersion = device_info.apiVersion;
+  // VMA only supports up to Vulkan 1.3, cap the version
+  allocator_create_info.vulkanApiVersion = 
+      std::min(device_info.apiVersion, VK_API_VERSION_1_3);
   VmaAllocator allocator;
   if (vmaCreateAllocator(&allocator_create_info, &allocator) != VK_SUCCESS) {
     XELOGE("Failed to create a Vulkan Memory Allocator instance");

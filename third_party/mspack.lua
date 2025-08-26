@@ -31,6 +31,6 @@ project("mspack")
   filter("platforms:Windows-*")
     defines({
     })
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     defines({
     })

@@ -21,7 +21,7 @@ project("discord-rpc")
     "discord-rpc/src/serialization.cpp",
     "discord-rpc/src/serialization.h"
   })
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     files({
       "discord-rpc/src/connection_unix.cpp",
       "discord-rpc/src/discord_register_linux.cpp"

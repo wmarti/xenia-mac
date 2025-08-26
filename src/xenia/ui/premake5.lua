@@ -19,6 +19,15 @@ project("xenia-ui")
     -- Exports JNI functions.
     wholelib("On")
 
+  filter("platforms:Linux-*")
+    -- Use pkg-config to get GTK include paths and libraries
+    buildoptions({
+      "`pkg-config --cflags gtk+-3.0`",
+    })
+    linkoptions({
+      "`pkg-config --libs gtk+-3.0`",
+    })
+
   filter("platforms:Windows-*")
     links({
       "dxgi",

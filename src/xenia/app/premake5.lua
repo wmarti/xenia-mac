@@ -101,7 +101,14 @@ project("xenia-app")
       "xenia-hid-sdl",
     })
 
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
+    -- Use pkg-config to get GTK include paths and libraries
+    buildoptions({
+      "`pkg-config --cflags gtk+-3.0`",
+    })
+    linkoptions({
+      "`pkg-config --libs gtk+-3.0`",
+    })
     links({
       "X11",
       "xcb",

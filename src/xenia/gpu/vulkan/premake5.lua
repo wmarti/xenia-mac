@@ -73,12 +73,20 @@ project("xenia-gpu-vulkan-trace-viewer")
       "xenia-cpu-backend-a64",
     })
 
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     links({
       "X11",
       "xcb",
       "X11-xcb",
     })
+    -- Use pkg-config to get GTK include paths and libraries
+    buildoptions({
+      "`pkg-config --cflags gtk+-3.0`",
+    })
+    linkoptions({
+      "`pkg-config --libs gtk+-3.0`",
+    })
+    
 
   filter("platforms:Windows-*")
     -- Only create the .user file if it doesn't already exist.
@@ -141,11 +149,18 @@ project("xenia-gpu-vulkan-trace-dump")
       "xenia-cpu-backend-a64",
     })
 
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     links({
       "X11",
       "xcb",
       "X11-xcb",
+    })
+    -- Use pkg-config to get GTK include paths and libraries
+    buildoptions({
+      "`pkg-config --cflags gtk+-3.0`",
+    })
+    linkoptions({
+      "`pkg-config --libs gtk+-3.0`",
     })
 
   filter("platforms:Windows-*")
