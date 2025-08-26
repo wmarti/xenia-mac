@@ -166,6 +166,11 @@ def build_premake():
       env = os.environ.copy()
       env['PREMAKE_OPTS'] = arch_flag
       env['PLATFORM'] = bootstrap_platform
+      # Work around implicit function declaration errors in modern compilers
+      # by allowing implicit function declarations for the premake build
+      env['CFLAGS'] = '-Wno-error=implicit-function-declaration'
+      if 'CFLAGS' in os.environ:
+        env['CFLAGS'] = os.environ['CFLAGS'] + ' -Wno-error=implicit-function-declaration'
       
       subprocess.call([
           'make',
