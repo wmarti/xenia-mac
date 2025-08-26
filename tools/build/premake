@@ -152,18 +152,26 @@ def build_premake():
       machine = platform.machine().lower()
       if machine in ['arm64', 'aarch64']:
         bootstrap_platform = 'ARM64'
+        arch_flag = '--arch=ARM64'
       elif machine in ['x86_64', 'amd64']:
         bootstrap_platform = 'x86_64'
+        arch_flag = '--arch=x86_64'
       else:
         # Default to x86_64 for unknown architectures
         bootstrap_platform = 'x86_64'
+        arch_flag = '--arch=x86_64'
+      
+      # Pass architecture via PREMAKE_OPTS environment variable
+      # which gets used by Bootstrap.mak in the premake_bootstrap command
+      env = os.environ.copy()
+      env['PREMAKE_OPTS'] = arch_flag
+      env['PLATFORM'] = bootstrap_platform
       
       subprocess.call([
           'make',
           '-f', 'Bootstrap.mak',
-          'PLATFORM=' + bootstrap_platform,
           'linux',
-          ], shell=False)
+          ], shell=False, env=env)
   finally:
     os.chdir(cwd)
   pass
