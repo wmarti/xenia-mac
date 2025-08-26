@@ -95,12 +95,18 @@ def build_premake():
   try:
     os.chdir(premake_path)
     if sys.platform == 'darwin':
-      # NOTE: On ARM64 Macs (Apple Silicon), the Bootstrap.mak doesn't support
-      # the arm64 architecture flag directly. The bootstrap will build for the
-      # default architecture and the resulting binary will work fine.
+      # Detect the host architecture for macOS
+      import platform
+      machine = platform.machine().lower()
+      if machine in ['arm64', 'aarch64']:
+        bootstrap_platform = 'ARM64'
+      else:
+        bootstrap_platform = 'x86_64'
+      
       subprocess.call([
           'make',
           '-f', 'Bootstrap.mak',
+          'PLATFORM=' + bootstrap_platform,
           'osx',
           ], shell=False)
     elif sys.platform == 'win32':
@@ -141,9 +147,21 @@ def build_premake():
           'windows-msbuild',  # Use msbuild directly instead of devenv
           ], shell=False)
     else:
+      # Detect the host architecture for Linux builds
+      import platform
+      machine = platform.machine().lower()
+      if machine in ['arm64', 'aarch64']:
+        bootstrap_platform = 'ARM64'
+      elif machine in ['x86_64', 'amd64']:
+        bootstrap_platform = 'x86_64'
+      else:
+        # Default to x86_64 for unknown architectures
+        bootstrap_platform = 'x86_64'
+      
       subprocess.call([
           'make',
           '-f', 'Bootstrap.mak',
+          'PLATFORM=' + bootstrap_platform,
           'linux',
           ], shell=False)
   finally:
