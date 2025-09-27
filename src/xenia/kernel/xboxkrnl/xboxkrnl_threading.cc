@@ -1122,8 +1122,8 @@ DECLARE_XBOXKRNL_EXPORT3(KfAcquireSpinLock, kThreading, kImplemented, kBlocking,
 void xeKeKfReleaseSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
                            uint32_t old_irql, bool change_irql) {
   assert_true(lock->prcb_of_owner == static_cast<uint32_t>(ctx->r[13]));
-  // Unlock.
-  lock->prcb_of_owner.value = 0;
+  // Unlock with release semantics to ensure all prior writes are visible.
+  xe::atomic_store_release(0u, &lock->prcb_of_owner.value);
 
   if (change_irql) {
     // Unlock.

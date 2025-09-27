@@ -455,7 +455,7 @@ class PosixCondition<Timer> final : public PosixConditionBase {
   }
   std::weak_ptr<TimerQueueWaitItem> wait_item_;
   std::function<void()> callback_;
-  volatile bool signal_;
+  bool signal_;  // Protected by mutex_
   const bool manual_reset_;
 };
 
@@ -717,6 +717,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     }
     WaitStarted();
     {
+      std::unique_lock lock(state_mutex_);
       if (out_previous_suspend_count) {
         *out_previous_suspend_count = suspend_count_;
       }
@@ -796,8 +797,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   pthread_t thread_;
   bool signaled_;
   int exit_code_;
-  volatile State state_;
-  volatile uint32_t suspend_count_;
+  State state_;             // Protected by state_mutex_
+  uint32_t suspend_count_;  // Protected by state_mutex_
   mutable std::mutex state_mutex_;
   mutable std::mutex callback_mutex_;
   mutable std::condition_variable state_signal_;

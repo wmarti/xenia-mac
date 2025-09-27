@@ -83,8 +83,8 @@ class Fence {
   std::mutex mutex_;
   std::condition_variable cond_;
   // Use the highest bit (sign bit) as the signal flag and the rest to count
-  // waiting threads.
-  volatile state_t_ signal_state_;
+  // waiting threads. Protected by mutex_.
+  state_t_ signal_state_;
 };
 
 // Returns the total number of logical processors in the host system.

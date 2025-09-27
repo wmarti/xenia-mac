@@ -66,6 +66,14 @@ inline bool atomic_cas(int64_t old_value, int64_t new_value,
              old_value) == old_value;
 }
 
+// Atomic store with release semantics (for releasing locks)
+inline void atomic_store_release(int32_t new_value, volatile int32_t* value) {
+  _InterlockedExchange(reinterpret_cast<volatile long*>(value), new_value);
+}
+inline void atomic_store_release(uint32_t new_value, volatile uint32_t* value) {
+  _InterlockedExchange(reinterpret_cast<volatile long*>(value), new_value);
+}
+
 #elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
 
 inline int32_t atomic_inc(volatile int32_t* value) {
@@ -85,10 +93,26 @@ inline int32_t atomic_xor(volatile int32_t* value, int32_t nv) {
 }
 
 inline int32_t atomic_exchange(int32_t new_value, volatile int32_t* value) {
-  return __sync_val_compare_and_swap(value, *value, new_value);
+  int32_t old_value;
+  do {
+    old_value = *value;
+  } while (!__sync_bool_compare_and_swap(value, old_value, new_value));
+  return old_value;
 }
 inline int64_t atomic_exchange(int64_t new_value, volatile int64_t* value) {
-  return __sync_val_compare_and_swap(value, *value, new_value);
+  int64_t old_value;
+  do {
+    old_value = *value;
+  } while (!__sync_bool_compare_and_swap(value, old_value, new_value));
+  return old_value;
+}
+
+// Atomic store with release semantics (for releasing locks)
+inline void atomic_store_release(int32_t new_value, volatile int32_t* value) {
+  __atomic_store_n(value, new_value, __ATOMIC_RELEASE);
+}
+inline void atomic_store_release(uint32_t new_value, volatile uint32_t* value) {
+  __atomic_store_n(value, new_value, __ATOMIC_RELEASE);
 }
 
 inline int32_t atomic_exchange_add(int32_t amount, volatile int32_t* value) {
