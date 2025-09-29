@@ -1,0 +1,8 @@
+[
+  {"name": "crash_dump", "pattern": "CRASH DUMP", "rank": 0},
+  {"name": "fatal", "pattern": "Fatal error|F> \\d{8} ", "rank": 1},
+  {"name": "title_name", "pattern": "Title name:", "rank": 10},
+  {"name": "xex_load", "pattern": "XexGetModuleHandle|XexLoadImage|XexGetModuleSection", "rank": 20},
+  {"name": "gpu_init", "pattern": "DxbcToDxilConverter|MetalShaderConverter|GraphicsSystem::Setup", "rank": 30},
+  {"name": "apu_init", "pattern": "XmaContext:|AudioSystem", "rank": 35}
+]

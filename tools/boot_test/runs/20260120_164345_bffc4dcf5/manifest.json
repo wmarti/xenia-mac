@@ -1,0 +1,97 @@
+{
+  "games_root": "/Users/admin/Documents/X360-Games",
+  "max_depth": 6,
+  "entries": [
+    {
+      "title": "41560817",
+      "root": "/Users/admin/Documents/X360-Games/41560817",
+      "launch_path": "/Users/admin/Documents/X360-Games/41560817/00004000/F66327164FA486B27A77BBBF2C8C0267",
+      "signature": "CON",
+      "notes": ""
+    },
+    {
+      "title": "425307D5",
+      "root": "/Users/admin/Documents/X360-Games/425307D5",
+      "launch_path": "/Users/admin/Documents/X360-Games/425307D5/00004000/12AFCBD2E6C609918AEF442466420EB4",
+      "signature": "CON",
+      "notes": ""
+    },
+    {
+      "title": "454108A8",
+      "root": "/Users/admin/Documents/X360-Games/454108A8",
+      "launch_path": "/Users/admin/Documents/X360-Games/454108A8/00007000/35A86AD3E891BC1EB021A8349BC2DB6B45",
+      "signature": "LIVE",
+      "notes": ""
+    },
+    {
+      "title": "4C4107F2",
+      "root": "/Users/admin/Documents/X360-Games/4C4107F2",
+      "launch_path": "/Users/admin/Documents/X360-Games/4C4107F2/00004000/5190155022E874F046BF7A13608D32B8",
+      "signature": "CON",
+      "notes": ""
+    },
+    {
+      "title": "4D5307D5",
+      "root": "/Users/admin/Documents/X360-Games/4D5307D5",
+      "launch_path": "/Users/admin/Documents/X360-Games/4D5307D5/00007000/744FCE3629F0405DB9F751B10F20C36A4D",
+      "signature": "PIRS",
+      "notes": ""
+    },
+    {
+      "title": "4D5307E6",
+      "root": "/Users/admin/Documents/X360-Games/4D5307E6",
+      "launch_path": "/Users/admin/Documents/X360-Games/4D5307E6/00007000/5B98A58CE2D8B103DB49A0B813996BD84D",
+      "signature": "LIVE",
+      "notes": ""
+    },
+    {
+      "title": "4D53082D",
+      "root": "/Users/admin/Documents/X360-Games/4D53082D",
+      "launch_path": "/Users/admin/Documents/X360-Games/4D53082D/00007000/E5008C89367E6225A0AA982E35E19CAC4D",
+      "signature": "LIVE",
+      "notes": ""
+    },
+    {
+      "title": "4D53085B",
+      "root": "/Users/admin/Documents/X360-Games/4D53085B",
+      "launch_path": "/Users/admin/Documents/X360-Games/4D53085B/Halo Reach/96ABDAB318524620AF38B985010F33914D",
+      "signature": "LIVE",
+      "notes": ""
+    },
+    {
+      "title": "4D530877",
+      "root": "/Users/admin/Documents/X360-Games/4D530877",
+      "launch_path": "/Users/admin/Documents/X360-Games/4D530877/00004000/68CAAA620A53EA301AE2C61A2299898F",
+      "signature": "CON",
+      "notes": ""
+    },
+    {
+      "title": "4D530919",
+      "root": "/Users/admin/Documents/X360-Games/4D530919",
+      "launch_path": "/Users/admin/Documents/X360-Games/4D530919/00004000/002BBEF27B89BFD7D2E78A7B1C9D20BC",
+      "signature": "CON",
+      "notes": ""
+    },
+    {
+      "title": "575207D7",
+      "root": "/Users/admin/Documents/X360-Games/575207D7",
+      "launch_path": "/Users/admin/Documents/X360-Games/575207D7/00004000/3797C703B3B30A4F4CAAE60D191B0669",
+      "signature": "CON",
+      "notes": ""
+    },
+    {
+      "title": "Dishonored",
+      "root": "/Users/admin/Documents/X360-Games/Dishonored",
+      "launch_path": "/Users/admin/Documents/X360-Games/Dishonored/00007000/A01A0F8C4149E4419C15FB4BB752FC7442",
+      "signature": "LIVE",
+      "notes": ""
+    },
+    {
+      "title": "FFFE07DF",
+      "root": "/Users/admin/Documents/X360-Games/FFFE07DF",
+      "launch_path": "/Users/admin/Documents/X360-Games/FFFE07DF/00040000/ContentCache.pkg",
+      "signature": "CON",
+      "notes": ""
+    }
+  ]
+}

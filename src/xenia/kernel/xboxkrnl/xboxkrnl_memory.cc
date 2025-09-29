@@ -81,8 +81,8 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
     XELOGW(
         "Game is attempting to allocate devkit debug memory (base: {:08X}, "
         "size: {:08X}). Ignoring debug flag and using normal allocation.",
-        base_addr_ptr ? base_addr_ptr.value() : 0,
-        region_size_ptr ? region_size_ptr.value() : 0);
+        base_addr_ptr ? uint32_t(*base_addr_ptr) : 0,
+        region_size_ptr ? uint32_t(*region_size_ptr) : 0);
   }
 
   // This allocates memory from the kernel heap, which is initialized on startup
