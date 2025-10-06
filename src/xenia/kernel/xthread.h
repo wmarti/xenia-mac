@@ -11,6 +11,7 @@
 #define XENIA_KERNEL_XTHREAD_H_
 
 #include <atomic>
+#include <csetjmp>
 #include <string>
 
 #include "xenia/base/mutex.h"
@@ -469,6 +470,10 @@ class XThread : public XObject, public cpu::Thread {
   bool running_ = false;
 
   int32_t priority_ = 0;
+
+  // Reentry context for setjmp/longjmp based stack unwinding
+  std::jmp_buf reentry_jmp_buf_;
+  uint32_t reentry_address_ = 0;
 };
 
 class XHostThread : public XThread {

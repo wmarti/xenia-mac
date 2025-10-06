@@ -534,16 +534,6 @@ X_STATUS XThread::Terminate(int exit_code) {
   return X_STATUS_SUCCESS;
 }
 
-class reenter_exception {
- public:
-  reenter_exception(uint32_t address) : address_(address) {};
-  virtual ~reenter_exception() {};
-  uint32_t address() const { return address_; }
-
- private:
-  uint32_t address_;
-};
-
 void XThread::Execute() {
   XELOGKERNEL("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X})",
               thread_id_, handle(), thread_name_, thread_->system_id());
@@ -577,25 +567,34 @@ void XThread::Execute() {
     want_exit_code = true;
   }
 
+  // Set up reentry jump buffer for fiber-based stack switching.
+  // When Reenter() is called (e.g., by KeSetCurrentStackPointers), it will
+  // longjmp back here instead of throwing an exception through JIT code.
   uint32_t next_address;
-  try {
+  if (setjmp(reentry_jmp_buf_) != 0) {
+    // Longjmp returned here - reentry requested
+    next_address = reentry_address_;
+  } else {
+    // Initial execution
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
         thread_state_, address, args.data(), args.size()));
     next_address = 0;
-  } catch (const reenter_exception& ree) {
-    next_address = ree.address();
   }
 
+  // Handle reentry loop for fiber switching.
   // See XThread::Reenter comments.
   while (next_address != 0) {
-    try {
+    // Set up jump buffer for potential reentries during this execution
+    if (setjmp(reentry_jmp_buf_) != 0) {
+      // Nested reentry occurred
+      next_address = reentry_address_;
+    } else {
+      // Execute at the reentry address
       kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
       next_address = 0;
       if (want_exit_code) {
         exit_code = static_cast<int>(thread_state_->context()->r[3]);
       }
-    } catch (const reenter_exception& ree) {
-      next_address = ree.address();
     }
   }
 
@@ -605,11 +604,12 @@ void XThread::Execute() {
 }
 
 void XThread::Reenter(uint32_t address) {
-  // TODO(gibbed): Maybe use setjmp/longjmp on Windows?
-  // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/longjmp#remarks
-  // On Windows with /EH, setjmp/longjmp do stack unwinding.
-  // Is there a better solution than exceptions for stack unwinding?
-  throw reenter_exception(address);
+  // Use setjmp/longjmp instead of exceptions to avoid issues with unwinding
+  // through JIT-compiled code, which lacks exception handling metadata.
+  // This is called when the game switches fiber stacks (e.g., via
+  // KeSetCurrentStackPointers in games like Forza Horizon 2).
+  reentry_address_ = address;
+  std::longjmp(reentry_jmp_buf_, 1);
 }
 
 void XThread::EnterCriticalRegion() {
