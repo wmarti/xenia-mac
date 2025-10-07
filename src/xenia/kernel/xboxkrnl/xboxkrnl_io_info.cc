@@ -158,12 +158,14 @@ uint32_t GetSetFileInfoMinimumLength(uint32_t info_class) {
       return sizeof(X_FILE_POSITION_INFORMATION);
     case XFileCompletionInformation:
       return sizeof(X_FILE_COMPLETION_INFORMATION);
+    case XFileAllocationInformation:
+      return sizeof(X_FILE_ALLOCATION_INFORMATION);
+    case XFileEndOfFileInformation:
+      return sizeof(X_FILE_END_OF_FILE_INFORMATION);
     // TODO(gibbed): structures to get the size of.
     case XFileModeInformation:
     case XFileIoPriorityInformation:
       return 4;
-    case XFileAllocationInformation:
-    case XFileEndOfFileInformation:
     case XFileMountPartitionInformation:
       return 8;
     case XFileLinkInformation:
@@ -258,8 +260,12 @@ dword_result_t NtSetInformationFile_entry(
       break;
     }
     case XFileAllocationInformation: {
-      XELOGW("NtSetInformationFile ignoring alloc");
-      out_length = 8;
+      auto info = info_ptr.as<X_FILE_ALLOCATION_INFORMATION*>();
+      result = file->SetLength(info->allocation_size);
+      out_length = sizeof(*info);
+
+      // Update the files vfs::Entry information
+      file->entry()->update();
       break;
     }
     case XFileEndOfFileInformation: {

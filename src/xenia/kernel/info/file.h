@@ -101,6 +101,12 @@ struct X_FILE_END_OF_FILE_INFORMATION {
 };
 static_assert_size(X_FILE_END_OF_FILE_INFORMATION, 8);
 
+// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_allocation_information
+struct X_FILE_ALLOCATION_INFORMATION {
+  be<uint64_t> allocation_size;
+};
+static_assert_size(X_FILE_ALLOCATION_INFORMATION, 8);
+
 struct X_FILE_XCTD_COMPRESSION_INFORMATION {
   be<uint32_t> unknown;
 };
