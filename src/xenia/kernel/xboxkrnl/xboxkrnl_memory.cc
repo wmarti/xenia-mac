@@ -76,7 +76,14 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
   assert_not_null(region_size_ptr);
 
   // Set to TRUE when allocation is from devkit memory area.
-  assert_true(debug_memory == 0);
+  // We don't support separate devkit memory, so just ignore this flag.
+  if (debug_memory) {
+    XELOGW(
+        "Game is attempting to allocate devkit debug memory (base: {:08X}, "
+        "size: {:08X}). Ignoring debug flag and using normal allocation.",
+        base_addr_ptr ? base_addr_ptr.value() : 0,
+        region_size_ptr ? region_size_ptr.value() : 0);
+  }
 
   // This allocates memory from the kernel heap, which is initialized on startup
   // and shared by both the kernel implementation and user code.
@@ -84,7 +91,7 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
   // it's simple today we could extend it to do better things in the future.
 
   // Must request a size.
-  if (!base_addr_ptr || !region_size_ptr || !*region_size_ptr) {
+  if (!base_addr_ptr || !region_size_ptr || !region_size_ptr.value()) {
     return X_STATUS_INVALID_PARAMETER;
   }
   // Check allocation type.
@@ -102,9 +109,9 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
   }
 
   uint32_t page_size;
-  if (*base_addr_ptr != 0) {
+  if (base_addr_ptr.value() != 0) {
     // ignore specified page size when base address is specified.
-    auto heap = kernel_memory()->LookupHeap(*base_addr_ptr);
+    auto heap = kernel_memory()->LookupHeap(base_addr_ptr.value());
     // Edge case when title can check for XPS/MMIO range and will receive
     // nullptr.
     if (!heap) {
@@ -125,24 +132,36 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
   }
 
   // Round the base address down to the nearest page boundary.
-  uint32_t adjusted_base = *base_addr_ptr - (*base_addr_ptr % page_size);
+  uint32_t adjusted_base =
+      base_addr_ptr.value() - (base_addr_ptr.value() % page_size);
   // For some reason, some games pass in negative sizes.
-  uint32_t adjusted_size = int32_t(*region_size_ptr) < 0
+  uint32_t adjusted_size = int32_t(region_size_ptr.value()) < 0
                                ? -int32_t(region_size_ptr.value())
                                : region_size_ptr.value();
 
+  // Validate size before rounding to prevent overflow
+  // Xbox 360 has ~512MB of usable memory, so reject unreasonably large
+  // allocations
+  constexpr uint32_t kMaxAllocationSize = 512 * 1024 * 1024;  // 512MB
+  if (adjusted_size > kMaxAllocationSize) {
+    XELOGE(
+        "NtAllocateVirtualMemory: Requested size too large: {:08X} (max: "
+        "{:08X})",
+        adjusted_size, kMaxAllocationSize);
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
   uint32_t alignment = adjusted_base ? page_size : 64 * 1024;
-  uint32_t original_size = adjusted_size;  // Save size before rounding
   adjusted_size = xe::round_up(adjusted_size, alignment);
 
-  // Check for overflow after rounding (compare against the already-converted
-  // positive size, not the original which could be negative)
-  if (adjusted_size < original_size) {
+  // Check for overflow after rounding
+  if (adjusted_size < region_size_ptr.value() ||
+      adjusted_size > kMaxAllocationSize) {
     XELOGE(
         "NtAllocateVirtualMemory: Size overflow after rounding: "
         "original={:08X}, "
         "rounded={:08X}",
-        original_size, adjusted_size);
+        region_size_ptr.value(), adjusted_size);
     return X_STATUS_INVALID_PARAMETER;
   }
 
@@ -191,7 +210,6 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
   // Zero memory, if needed.
   if (address && !(alloc_type & X_MEM_NOZERO)) {
     if (alloc_type & X_MEM_COMMIT) {
-      bool made_writable = true;
       // Query the actual allocated size from the heap to ensure we don't
       // attempt to zero more memory than was actually allocated
       HeapAllocationInfo alloc_info = {};
@@ -208,20 +226,26 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
       // Use the smaller of adjusted_size and the actual allocated region size
       uint32_t size_to_zero = std::min(adjusted_size, alloc_info.region_size);
 
+      // Additional sanity check: ensure size_to_zero is reasonable
+      if (size_to_zero > kMaxAllocationSize) {
+        XELOGE(
+            "NtAllocateVirtualMemory: Refusing to zero unreasonable size: "
+            "{:08X} (address: {:08X}, adjusted_size: {:08X}, region_size: "
+            "{:08X})",
+            size_to_zero, address, adjusted_size, alloc_info.region_size);
+        heap->Release(address);
+        return X_STATUS_UNSUCCESSFUL;
+      }
+
       if (!(protect & kMemoryProtectWrite)) {
-        made_writable = heap->Protect(address, adjusted_size,
-                                      kMemoryProtectRead | kMemoryProtectWrite);
-        if (!made_writable) {
-          XELOGE("NtAllocateVirtualMemory: temp RW protect failed");
-        }
+        heap->Protect(address, size_to_zero,
+                      kMemoryProtectRead | kMemoryProtectWrite);
       }
-      if (made_writable && !was_commited) {
-        kernel_memory()->Zero(address, adjusted_size);
+      if (!was_commited) {
+        kernel_memory()->Zero(address, size_to_zero);
       }
-      if (!(protect & kMemoryProtectWrite) && made_writable) {
-        if (!heap->Protect(address, adjusted_size, protect)) {
-          XELOGE("NtAllocateVirtualMemory: restore protect failed");
-        }
+      if (!(protect & kMemoryProtectWrite)) {
+        heap->Protect(address, size_to_zero, protect);
       }
     }
   }
@@ -245,7 +269,7 @@ dword_result_t NtProtectVirtualMemory_entry(lpdword_t base_addr_ptr,
   assert_true(debug_memory == 0);
 
   // Must request a size.
-  if (!base_addr_ptr || !region_size_ptr || !*region_size_ptr) {
+  if (!base_addr_ptr || !region_size_ptr || !region_size_ptr.value()) {
     return X_STATUS_INVALID_PARAMETER;
   }
 
@@ -256,14 +280,15 @@ dword_result_t NtProtectVirtualMemory_entry(lpdword_t base_addr_ptr,
     return X_STATUS_INVALID_PAGE_PROTECTION;
   }
 
-  auto heap = kernel_memory()->LookupHeap(*base_addr_ptr);
+  auto heap = kernel_memory()->LookupHeap(base_addr_ptr.value());
   if (heap->heap_type() != HeapType::kGuestVirtual) {
     return X_STATUS_INVALID_PARAMETER;
   }
   // Adjust the base downwards to the nearest page boundary.
   uint32_t adjusted_base =
-      *base_addr_ptr - (*base_addr_ptr % heap->page_size());
-  uint32_t adjusted_size = xe::round_up(*region_size_ptr, heap->page_size());
+      base_addr_ptr.value() - (base_addr_ptr.value() % heap->page_size());
+  uint32_t adjusted_size =
+      xe::round_up(region_size_ptr.value(), heap->page_size());
   uint32_t protect = FromXdkProtectFlags(protect_bits);
 
   uint32_t tmp_old_protect = 0;
@@ -290,8 +315,8 @@ dword_result_t NtFreeVirtualMemory_entry(lpdword_t base_addr_ptr,
                                          lpdword_t region_size_ptr,
                                          dword_t free_type,
                                          dword_t debug_memory) {
-  uint32_t base_addr_value = *base_addr_ptr;
-  uint32_t region_size_value = *region_size_ptr;
+  uint32_t base_addr_value = base_addr_ptr.value();
+  uint32_t region_size_value = region_size_ptr.value();
   // X_MEM_DECOMMIT | X_MEM_RELEASE
 
   // NTSTATUS
@@ -425,7 +450,7 @@ dword_result_t NtFreeEncryptedMemory_entry(dword_t region_type,
 
   auto heap = kernel_state()->memory()->LookupHeap(0x80000000);
   const uint32_t encrypt_address =
-      heap->heap_base() + heap->page_size() * (*base_address_ptr);
+      heap->heap_base() + heap->page_size() * base_address_ptr.value();
 
   auto encrypt_heap = kernel_state()->memory()->LookupHeap(encrypt_address);
 
