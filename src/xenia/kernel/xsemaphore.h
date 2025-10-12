@@ -29,7 +29,8 @@ class XSemaphore : public XObject {
   [[nodiscard]] bool InitializeNative(void* native_ptr,
                                       X_DISPATCH_HEADER* header);
 
-  int32_t ReleaseSemaphore(int32_t release_count);
+  [[nodiscard]] bool ReleaseSemaphore(int32_t release_count,
+                                      int32_t* out_previous_count);
 
   bool Save(ByteStream* stream) override;
   static object_ref<XSemaphore> Restore(KernelState* kernel_state,

@@ -272,15 +272,16 @@ class PosixCondition<Semaphore> final : public PosixConditionBase {
   bool Signal() override { return Release(1, nullptr); }
 
   bool Release(uint32_t release_count, int* out_previous_count) {
-    if (maximum_count_ - count_ >= release_count) {
       auto lock = std::unique_lock(mutex_);
+      // Validate that releasing would not exceed the maximum count
+      if (count_ + release_count > maximum_count_) {
+        return false;
+      }
       if (out_previous_count) *out_previous_count = count_;
       count_ += release_count;
       cond_.notify_all();
       return true;
     }
-    return false;
-  }
 
  private:
   [[nodiscard]] bool signaled() const override { return count_ > 0; }

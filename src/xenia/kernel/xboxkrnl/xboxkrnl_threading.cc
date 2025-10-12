@@ -691,7 +691,10 @@ uint32_t xeKeReleaseSemaphore(X_KSEMAPHORE* semaphore_ptr, uint32_t increment,
   // TODO(benvanik): increment thread priority?
   // TODO(benvanik): wait?
 
-  return sem->ReleaseSemaphore(adjustment);
+  int32_t previous_count = 0;
+  [[maybe_unused]] bool success =
+      sem->ReleaseSemaphore(adjustment, &previous_count);
+  return static_cast<uint32_t>(previous_count);
 }
 
 dword_result_t KeReleaseSemaphore_entry(pointer_t<X_KSEMAPHORE> semaphore_ptr,
@@ -754,11 +757,12 @@ dword_result_t NtReleaseSemaphore_entry(dword_t sem_handle,
         sem->ReleaseSemaphore((int32_t)release_count, &previous_count);
     if (!success) {
       // Releasing would exceed the semaphore's maximum count
+      // Windows returns STATUS_SEMAPHORE_LIMIT_EXCEEDED (0x0000012B)
       XELOGW(
           "NtReleaseSemaphore: release_count={} would exceed maximum (current "
           "count={})",
           uint32_t(release_count), previous_count);
-      result = X_STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+      result = 0x0000012B;
     }
   } else {
     result = X_STATUS_INVALID_HANDLE;
