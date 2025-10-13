@@ -311,12 +311,13 @@ dword_result_t KeSetAffinityThread_entry(lpvoid_t thread_ptr, dword_t affinity,
     return X_STATUS_INVALID_PARAMETER;
   }
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr);
-  if (thread) {
-    if (previous_affinity_ptr) {
-      *previous_affinity_ptr = uint32_t(1) << thread->active_cpu();
-    }
-    thread->SetAffinity(affinity);
+  if (!thread) {
+    return X_STATUS_INVALID_HANDLE;
   }
+  if (previous_affinity_ptr) {
+    *previous_affinity_ptr = uint32_t(1) << thread->active_cpu();
+  }
+  thread->SetAffinity(affinity);
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(KeSetAffinityThread, kThreading, kImplemented);
@@ -426,7 +427,7 @@ DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
 
 dword_result_t NtYieldExecution_entry() {
   xe::threading::MaybeYield();
-  return 0;
+  return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT2(NtYieldExecution, kThreading, kImplemented,
                          kHighFrequency);
@@ -749,7 +750,16 @@ dword_result_t NtReleaseSemaphore_entry(dword_t sem_handle,
   auto sem =
       kernel_state()->object_table()->LookupObject<XSemaphore>(sem_handle);
   if (sem) {
-    previous_count = sem->ReleaseSemaphore((int32_t)release_count);
+    bool success =
+        sem->ReleaseSemaphore((int32_t)release_count, &previous_count);
+    if (!success) {
+      // Releasing would exceed the semaphore's maximum count
+      XELOGW(
+          "NtReleaseSemaphore: release_count={} would exceed maximum (current "
+          "count={})",
+          uint32_t(release_count), previous_count);
+      result = X_STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+    }
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
