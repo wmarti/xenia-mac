@@ -196,7 +196,7 @@ void XThread::InitializeGuestObject() {
   guest_thread->stack_base = (this->stack_base_);
   guest_thread->stack_limit = (this->stack_limit_);
   guest_thread->stack_kernel = (this->stack_base_ - 240);
-  guest_thread->tls_address = (this->tls_static_address_);
+  guest_thread->tls_address = (this->tls_dynamic_address_);
   guest_thread->thread_state = 0;
   uint32_t process_info_block_address =
       creation_params_.guest_process ? creation_params_.guest_process
