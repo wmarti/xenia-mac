@@ -1262,27 +1262,19 @@ XE_COLD
 uint32_t KernelState::CreateKeTimestampBundle() {
   auto crit = global_critical_region::Acquire();
 
-  uint32_t pKeTimeStampBundle =
-      memory_->SystemHeapAlloc(sizeof(X_TIME_STAMP_BUNDLE));
-  X_TIME_STAMP_BUNDLE* lpKeTimeStampBundle =
-      memory_->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(pKeTimeStampBundle);
+  // Check again under lock - should have been initialized during boot
+  if (ke_timestamp_bundle_ptr_) {
+    // Already initialized during InitializeKernelGuestGlobals
+    // Timer should also already be running
+    assert_not_null(timestamp_timer_);
+    return ke_timestamp_bundle_ptr_;
+  }
 
-  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->interrupt_time,
-                               Clock::QueryGuestInterruptTime());
-
-  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->system_time,
-                               Clock::QueryGuestSystemTime());
-
-  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->tick_count,
-                               Clock::QueryGuestUptimeMillis());
-
-  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->padding, 0);
-
-  ke_timestamp_bundle_ptr_ = pKeTimeStampBundle;
-  timestamp_timer_ = xe::threading::HighResolutionTimer::CreateRepeating(
-      std::chrono::milliseconds(1),
-      [this]() { this->UpdateKeTimestampBundle(); });
-  return pKeTimeStampBundle;
+  // Should never reach here - timestamp bundle should be initialized during
+  // InitializeKernelGuestGlobals()
+  assert_always(
+      "CreateKeTimestampBundle called but bundle not initialized during boot");
+  return 0;
 }
 
 bool KernelState::Restore(ByteStream* stream) {
@@ -1625,6 +1617,28 @@ void KernelState::InitializeKernelGuestGlobals() {
        kernel_guest_globals_ +
            offsetof32(KernelGuestGlobals, IoDeviceObjectType)}};
   xboxkrnl::xeKeSetEvent(&block->UsbdBootEnumerationDoneEvent, 1, 0);
+
+  // Initialize timestamp bundle early to avoid race conditions with update
+  // timer and ensure deterministic initial values at kernel boot time
+  uint32_t pKeTimeStampBundle =
+      memory_->SystemHeapAlloc(sizeof(X_TIME_STAMP_BUNDLE));
+  X_TIME_STAMP_BUNDLE* lpKeTimeStampBundle =
+      memory_->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(pKeTimeStampBundle);
+
+  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->interrupt_time,
+                               Clock::QueryGuestInterruptTime());
+  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->system_time,
+                               Clock::QueryGuestSystemTime());
+  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->tick_count,
+                               Clock::QueryGuestUptimeMillis());
+  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->padding, 0);
+
+  ke_timestamp_bundle_ptr_ = pKeTimeStampBundle;
+
+  // Start the update timer
+  timestamp_timer_ = xe::threading::HighResolutionTimer::CreateRepeating(
+      std::chrono::milliseconds(1),
+      [this]() { this->UpdateKeTimestampBundle(); });
 }
 
 void KernelState::InitializeXbdmCpuCounters() {
