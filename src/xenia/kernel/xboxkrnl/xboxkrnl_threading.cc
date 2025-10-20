@@ -450,8 +450,8 @@ void KeQuerySystemTime_entry(lpqword_t time_ptr, const ppc_context_t& ctx) {
 DECLARE_XBOXKRNL_EXPORT1(KeQuerySystemTime, kThreading, kImplemented);
 
 // https://msdn.microsoft.com/en-us/library/ms686801
-dword_result_t KeTlsAlloc_entry() {
-  uint32_t slot = kernel_state()->AllocateTLS();
+dword_result_t KeTlsAlloc_entry(const ppc_context_t& context) {
+  uint32_t slot = kernel_state()->AllocateTLS(context);
   XThread::GetCurrentThread()->SetTLSValue(slot, 0);
 
   return slot;
@@ -459,12 +459,13 @@ dword_result_t KeTlsAlloc_entry() {
 DECLARE_XBOXKRNL_EXPORT1(KeTlsAlloc, kThreading, kImplemented);
 
 // https://msdn.microsoft.com/en-us/library/ms686804
-dword_result_t KeTlsFree_entry(dword_t tls_index) {
+dword_result_t KeTlsFree_entry(dword_t tls_index,
+                               const ppc_context_t& context) {
   if (tls_index == X_TLS_OUT_OF_INDEXES) {
     return 0;
   }
 
-  kernel_state()->FreeTLS(tls_index);
+  kernel_state()->FreeTLS(context, tls_index);
   return 1;
 }
 DECLARE_XBOXKRNL_EXPORT1(KeTlsFree, kThreading, kImplemented);
