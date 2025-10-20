@@ -813,7 +813,7 @@ dword_result_t NtReleaseMutant_entry(dword_t mutant_handle,
   auto mutant =
       kernel_state()->object_table()->LookupObject<XMutant>(mutant_handle);
   if (mutant) {
-    mutant->ReleaseMutant(priority_increment, abandon, wait);
+    result = mutant->ReleaseMutant(priority_increment, abandon, wait);
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
