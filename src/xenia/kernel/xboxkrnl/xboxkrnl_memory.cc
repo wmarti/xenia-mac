@@ -131,8 +131,20 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
                                ? -int32_t(region_size_ptr.value())
                                : region_size_ptr.value();
 
-  adjusted_size =
-      xe::round_up(adjusted_size, adjusted_base ? page_size : 64 * 1024);
+  uint32_t alignment = adjusted_base ? page_size : 64 * 1024;
+  uint32_t original_size = adjusted_size;  // Save size before rounding
+  adjusted_size = xe::round_up(adjusted_size, alignment);
+
+  // Check for overflow after rounding (compare against the already-converted
+  // positive size, not the original which could be negative)
+  if (adjusted_size < original_size) {
+    XELOGE(
+        "NtAllocateVirtualMemory: Size overflow after rounding: "
+        "original={:08X}, "
+        "rounded={:08X}",
+        original_size, adjusted_size);
+    return X_STATUS_INVALID_PARAMETER;
+  }
 
   // Allocate.
   uint32_t allocation_type = 0;
@@ -180,6 +192,22 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
   if (address && !(alloc_type & X_MEM_NOZERO)) {
     if (alloc_type & X_MEM_COMMIT) {
       bool made_writable = true;
+      // Query the actual allocated size from the heap to ensure we don't
+      // attempt to zero more memory than was actually allocated
+      HeapAllocationInfo alloc_info = {};
+      if (!heap->QueryRegionInfo(address, &alloc_info)) {
+        XELOGE(
+            "NtAllocateVirtualMemory: Failed to query allocation info for "
+            "address {:08X}",
+            address);
+        // Try to release the allocation since we can't safely zero it
+        heap->Release(address);
+        return X_STATUS_UNSUCCESSFUL;
+      }
+
+      // Use the smaller of adjusted_size and the actual allocated region size
+      uint32_t size_to_zero = std::min(adjusted_size, alloc_info.region_size);
+
       if (!(protect & kMemoryProtectWrite)) {
         made_writable = heap->Protect(address, adjusted_size,
                                       kMemoryProtectRead | kMemoryProtectWrite);
