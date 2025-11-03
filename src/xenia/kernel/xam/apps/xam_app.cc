@@ -169,6 +169,12 @@ X_HRESULT XamApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
              args->unk1.get(), args->unk2.get(), args->unk3.get());
       return X_E_SUCCESS;
     }
+    case 0x0002B004: {
+      // Probably related to 0x0002B003, maybe camera/Kinect related.
+      // Seen in Forza Horizon 2.
+      XELOGD("XamUnk2B004, unimplemented");
+      return X_E_SUCCESS;
+    }
   }
   XELOGE(
       "Unimplemented XAM message app={:08X}, msg={:08X}, arg1={:08X}, "

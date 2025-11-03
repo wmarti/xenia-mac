@@ -74,6 +74,14 @@ dword_result_t XamNuiGetDeviceStatus_entry(
 }
 DECLARE_XAM_EXPORT1(XamNuiGetDeviceStatus, kNone, kStub);
 
+dword_result_t XamXStudioRequest_entry(dword_t request_type,
+                                       lpdword_t result_ptr) {
+  // Return failure to indicate XStudio/dev features not available.
+  XELOGW("XamXStudioRequest called, returning X_E_FAIL");
+  return X_E_FAIL;
+}
+DECLARE_XAM_EXPORT1(XamXStudioRequest, kNone, kStub);
+
 dword_result_t XamUserNuiGetUserIndex_entry(unknown_t unk, lpdword_t index) {
   return X_E_NO_SUCH_USER;
 }

@@ -522,6 +522,17 @@ void VdSwap_entry(
 DECLARE_XBOXKRNL_EXPORT3(VdSwap, kVideo, kImplemented, kHighFrequency,
                          kImportant);
 
+dword_result_t PsCamDeviceRequest_entry(dword_t request_type,
+                                        lpvoid_t param_ptr) {
+  // Quietly return X_E_FAIL to keep from log spamming due to
+  // lack of proper implemenation. There might be a way to signal
+  // to the game not to do this, maybe in XamXStudioRequest return
+  // value?
+  // Seen in Forza Horizon 2
+  return X_E_FAIL;
+}
+DECLARE_XBOXKRNL_EXPORT1(PsCamDeviceRequest, kVideo, kStub);
+
 void RegisterVideoExports(xe::cpu::ExportResolver* export_resolver,
                           KernelState* kernel_state) {
   auto memory = kernel_state->memory();
