@@ -658,7 +658,7 @@ bool DebugWindow::DrawRegisterTextBox(int id, uint32_t* value) {
       ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank;
   if (state_.register_input_hex) {
     input_flags |= ImGuiInputTextFlags_CharsHexadecimal |
-                   ImGuiInputTextFlags_AlwaysInsertMode |
+                   ImGuiInputTextFlags_AlwaysOverwrite |
                    ImGuiInputTextFlags_NoHorizontalScroll;
     auto src_value = xe::string_util::to_hex_string(*value);
     std::strcpy(buffer, src_value.c_str());
@@ -698,7 +698,7 @@ bool DebugWindow::DrawRegisterTextBox(int id, uint64_t* value) {
       ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank;
   if (state_.register_input_hex) {
     input_flags |= ImGuiInputTextFlags_CharsHexadecimal |
-                   ImGuiInputTextFlags_AlwaysInsertMode |
+                   ImGuiInputTextFlags_AlwaysOverwrite |
                    ImGuiInputTextFlags_NoHorizontalScroll;
     auto src_value = xe::string_util::to_hex_string(*value);
     std::strcpy(buffer, src_value.c_str());
@@ -738,7 +738,7 @@ bool DebugWindow::DrawRegisterTextBox(int id, double* value) {
       ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank;
   if (state_.register_input_hex) {
     input_flags |= ImGuiInputTextFlags_CharsHexadecimal |
-                   ImGuiInputTextFlags_AlwaysInsertMode |
+                   ImGuiInputTextFlags_AlwaysOverwrite |
                    ImGuiInputTextFlags_NoHorizontalScroll;
     auto src_value = xe::string_util::to_hex_string(*value);
     std::strcpy(buffer, src_value.c_str());
@@ -777,7 +777,7 @@ bool DebugWindow::DrawRegisterTextBoxes(int id, float* value) {
       ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank;
   if (state_.register_input_hex) {
     input_flags |= ImGuiInputTextFlags_CharsHexadecimal |
-                   ImGuiInputTextFlags_AlwaysInsertMode |
+                   ImGuiInputTextFlags_AlwaysOverwrite |
                    ImGuiInputTextFlags_NoHorizontalScroll;
   } else {
     input_flags |=
@@ -1212,7 +1212,7 @@ void DebugWindow::DrawBreakpointsPane() {
     ImGuiInputTextFlags input_flags = ImGuiInputTextFlags_CharsUppercase |
                                       ImGuiInputTextFlags_CharsNoBlank |
                                       ImGuiInputTextFlags_CharsHexadecimal |
-                                      ImGuiInputTextFlags_AlwaysInsertMode |
+                                      ImGuiInputTextFlags_AlwaysOverwrite |
                                       ImGuiInputTextFlags_NoHorizontalScroll |
                                       ImGuiInputTextFlags_EnterReturnsTrue;
     ImGui::PushItemWidth(50);
@@ -1284,60 +1284,64 @@ void DebugWindow::DrawBreakpointsPane() {
     int ci = 0;
     ImGui::Combo("##kernel_categories", &ci, its, 1, 1);
     ImGui::Dummy(ImVec2(0, 3));
-    ImGui::ListBoxHeader("##kernel_calls", 1000, 15);
-    auto& all_exports = emulator_->export_resolver()->all_exports_by_name();
-    auto call_rankings = xe::fuzzy_filter(state.kernel_call_filter, all_exports,
-                                          offsetof(cpu::Export, name));
-    bool has_any_call_filter = std::strlen(state.kernel_call_filter) > 0;
-    if (has_any_call_filter) {
-      std::sort(call_rankings.begin(), call_rankings.end(),
-                [](std::pair<size_t, int>& a, std::pair<size_t, int>& b) {
-                  if (a.second == b.second) {
-                    return a.first > b.first;
-                  } else {
-                    return a.second > b.second;
-                  }
-                });
+    if (ImGui::BeginListBox(
+            "##kernel_calls",
+            ImVec2(1000.0f, ImGui::GetTextLineHeightWithSpacing() * 15.0f))) {
+      auto& all_exports = emulator_->export_resolver()->all_exports_by_name();
+      auto call_rankings = xe::fuzzy_filter(state.kernel_call_filter,
+                                            all_exports,
+                                            offsetof(cpu::Export, name));
+      bool has_any_call_filter = std::strlen(state.kernel_call_filter) > 0;
+      if (has_any_call_filter) {
+        std::sort(call_rankings.begin(), call_rankings.end(),
+                  [](std::pair<size_t, int>& a, std::pair<size_t, int>& b) {
+                    if (a.second == b.second) {
+                      return a.first > b.first;
+                    } else {
+                      return a.second > b.second;
+                    }
+                  });
+      }
+      for (size_t i = 0; i < call_rankings.size(); ++i) {
+        if (has_any_call_filter && !call_rankings[i].second) {
+          continue;
+        }
+        auto export_entry = all_exports[call_rankings[i].first];
+        if (export_entry->type != cpu::Export::Type::kFunction ||
+            !export_entry->is_implemented()) {
+          continue;
+        }
+        // TODO(benvanik): skip unused kernel calls.
+        ImGui::PushID(export_entry);
+        // TODO(benvanik): selection, hover info (module name, ordinal, etc).
+        bool is_pre_enabled = false;
+        bool is_post_enabled = false;
+        if (ImGui::Checkbox("##pre", &is_pre_enabled)) {
+          // TODO(benvanik): add pre breakpoint (lookup thunk, add before
+          //     syscall).
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Break immediately before this export is called.");
+        }
+        ImGui::SameLine();
+        ImGui::Dummy(ImVec2(1, 0));
+        ImGui::SameLine();
+        if (ImGui::Checkbox("##post", &is_post_enabled)) {
+          // TODO(benvanik): add pre breakpoint (lookup thunk, add after
+          //     syscall).
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Break immediately after this export returns.");
+        }
+        ImGui::SameLine();
+        ImGui::Dummy(ImVec2(4, 0));
+        ImGui::SameLine();
+        ImGui::Text("%s", export_entry->name);
+        ImGui::Dummy(ImVec2(0, 1));
+        ImGui::PopID();
+      }
+      ImGui::EndListBox();
     }
-    for (size_t i = 0; i < call_rankings.size(); ++i) {
-      if (has_any_call_filter && !call_rankings[i].second) {
-        continue;
-      }
-      auto export_entry = all_exports[call_rankings[i].first];
-      if (export_entry->type != cpu::Export::Type::kFunction ||
-          !export_entry->is_implemented()) {
-        continue;
-      }
-      // TODO(benvanik): skip unused kernel calls.
-      ImGui::PushID(export_entry);
-      // TODO(benvanik): selection, hover info (module name, ordinal, etc).
-      bool is_pre_enabled = false;
-      bool is_post_enabled = false;
-      if (ImGui::Checkbox("##pre", &is_pre_enabled)) {
-        // TODO(benvanik): add pre breakpoint (lookup thunk, add before
-        //     syscall).
-      }
-      if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Break immediately before this export is called.");
-      }
-      ImGui::SameLine();
-      ImGui::Dummy(ImVec2(1, 0));
-      ImGui::SameLine();
-      if (ImGui::Checkbox("##post", &is_post_enabled)) {
-        // TODO(benvanik): add pre breakpoint (lookup thunk, add after
-        //     syscall).
-      }
-      if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Break immediately after this export returns.");
-      }
-      ImGui::SameLine();
-      ImGui::Dummy(ImVec2(4, 0));
-      ImGui::SameLine();
-      ImGui::Text("%s", export_entry->name);
-      ImGui::Dummy(ImVec2(0, 1));
-      ImGui::PopID();
-    }
-    ImGui::ListBoxFooter();
     ImGui::Dummy(ImVec2(0, 3));
     if (kernel_popup_render_count == 2) {
       ImGui::SetKeyboardFocusHere();
@@ -1382,8 +1386,8 @@ void DebugWindow::DrawBreakpointsPane() {
   ImGui::Separator();
 
   ImGui::PushItemWidth(-1);
-  if (ImGui::ListBoxHeader("##empty",
-                           ImVec2(-1, ImGui::GetContentRegionAvail().y))) {
+  if (ImGui::BeginListBox("##empty",
+                          ImVec2(-1, ImGui::GetContentRegionAvail().y))) {
     std::vector<Breakpoint*> to_delete;
     for (auto& breakpoint : state.all_breakpoints) {
       ImGui::PushID(breakpoint.get());
@@ -1420,12 +1424,12 @@ void DebugWindow::DrawBreakpointsPane() {
       }
       ImGui::PopID();
     }
-    ImGui::ListBoxFooter();
     if (!to_delete.empty()) {
       for (auto breakpoint : to_delete) {
         DeleteCodeBreakpoint(breakpoint);
       }
     }
+    ImGui::EndListBox();
   }
   ImGui::PopItemWidth();
 }

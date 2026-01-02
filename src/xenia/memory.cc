@@ -271,6 +271,12 @@ bool Memory::Initialize() {
   // Prepare physical heaps
   heaps_.physical.Initialize(this, physical_membase_, HeapType::kGuestPhysical,
                              0x00000000, 0x20000000, 4096);
+#if XE_PLATFORM_MAC
+  // 0x7F000000-0x7FFFFFFF is a virtual alias of physical memory for writeback.
+  heaps_.v7F000000.Initialize(this, virtual_membase_, HeapType::kGuestPhysical,
+                              0x7F000000, 0x01000000, 16 * 1024 * 1024,
+                              &heaps_.physical);
+#endif
   heaps_.vA0000000.Initialize(this, virtual_membase_, HeapType::kGuestPhysical,
                               0xA0000000, 0x20000000, 64 * 1024,
                               &heaps_.physical);
@@ -295,6 +301,12 @@ bool Memory::Initialize() {
       0xC0000000, 0x01000000, 32,
       kMemoryAllocationReserve | kMemoryAllocationCommit,
       kMemoryProtectRead | kMemoryProtectWrite);
+#if XE_PLATFORM_MAC
+  heaps_.v7F000000.AllocFixed(
+      0x7F000000, 0x01000000, 32,
+      kMemoryAllocationReserve | kMemoryAllocationCommit,
+      kMemoryProtectRead | kMemoryProtectWrite);
+#endif
 
   // Add handlers for MMIO.
   mmio_handler_ = cpu::MMIOHandler::Install(
@@ -424,7 +436,11 @@ const BaseHeap* Memory::LookupHeap(uint32_t address) const {
   } else if (address < 0x7F000000) {
     return &heaps_.v40000000;
   } else if (address < 0x80000000) {
+#if XE_PLATFORM_MAC
+    return &heaps_.v7F000000;
+#else
     return nullptr;
+#endif
   } else if (address < 0x90000000) {
     return &heaps_.v80000000;
   } else if (address < 0xA0000000) {
@@ -622,6 +638,11 @@ void Memory::UnregisterPhysicalMemoryInvalidationCallback(
 void Memory::EnablePhysicalMemoryAccessCallbacks(
     uint32_t physical_address, uint32_t length,
     bool enable_invalidation_notifications, bool enable_data_providers) {
+#if XE_PLATFORM_MAC
+  heaps_.v7F000000.EnableAccessCallbacks(physical_address, length,
+                                         enable_invalidation_notifications,
+                                         enable_data_providers);
+#endif
   heaps_.vA0000000.EnableAccessCallbacks(physical_address, length,
                                          enable_invalidation_notifications,
                                          enable_data_providers);

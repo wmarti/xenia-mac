@@ -183,6 +183,36 @@ delete the `XThread` object, destroying `thread_`. `Thread::Exit` then calls
 - Handle release: `src/xenia/kernel/util/object_table.cc`
 - Thread exit path: `src/xenia/base/threading_mac.cc`
 
+## Phase 4: 0x7F Writeback Alias Crash (ACTIVE)
+
+### Problem Description
+macOS app crashes with `EXC_BAD_ACCESS` on writes to the 0x7Fxxxxxx virtual
+range (GPU writeback alias), e.g. faults at host addresses like 0x37FEA1A80.
+
+### Root Cause Analysis
+- `MapViewsMac` maps 0x7F000000-0x7FFFFFFF to the physical file offset,
+  but the alias region is not backed by a heap or access callbacks.
+- `LookupHeap` returns null for 0x7Fxxxxxx, so access-fault handling assumes
+  a physical heap that doesn't exist for the alias.
+- A64 atomic exchange uses host addresses (same as x64), so the address math
+  is consistent; the alias handling is the gap.
+
+### Implementation Checklist
+- [x] Audit 0x7F alias view mapping in `src/xenia/memory.cc`.
+- [x] Confirm `AccessViolationCallback` expects a physical heap for faults.
+- [x] Confirm A64 atomic exchange uses host addresses (matches x64 backend).
+- [x] Add mac-only physical alias heap for 0x7F and commit the mapping.
+- [x] Include 0x7F alias heap in mac physical access callbacks.
+- [x] Rebuild base/cpu/ppc tests and validate runtime.
+      Logs: `scratch/logs/xenia-base-tests.log`,
+      `scratch/logs/xenia-cpu-tests.log`,
+      `scratch/logs/xenia-cpu-ppc-tests.log`.
+
+### Reference Information
+- Memory map + heaps: `src/xenia/memory.cc`, `src/xenia/memory.h`
+- A64 atomic exchange: `src/xenia/cpu/backend/a64/a64_seq_memory.cc`
+- x64 atomic exchange: `src/xenia/cpu/backend/x64/x64_seq_memory.cc`
+
 ## Context Summary (carry into next session)
 
 - Patch set prepared at `scratch/patches/canary-a64/`:
