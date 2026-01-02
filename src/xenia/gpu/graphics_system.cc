@@ -55,13 +55,13 @@ GraphicsSystem::~GraphicsSystem() = default;
 X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                                kernel::KernelState* kernel_state,
                                ui::WindowedAppContext* app_context,
-                               [[maybe_unused]] bool is_surface_required) {
+                               bool with_presentation) {
   memory_ = processor->memory();
   processor_ = processor;
   kernel_state_ = kernel_state;
   app_context_ = app_context;
 
-  if (provider_) {
+  if (with_presentation && provider_) {
     // Safe if either the UI thread call or the presenter creation fails.
     if (app_context_) {
       app_context_->CallInUIThreadSynchronous([this]() {
@@ -98,30 +98,18 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
   vsync_worker_running_ = true;
   vsync_worker_thread_ = kernel::object_ref<kernel::XHostThread>(
       new kernel::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
-        XELOGI("GPU VSync thread starting");
         uint64_t vsync_duration = cvars::vsync ? 16 : 1;
         uint64_t last_frame_time = Clock::QueryGuestTickCount();
-        int loop_count = 0;
-        while (vsync_worker_running_.load(std::memory_order_acquire)) {
-          // Avoid spamming the log in normal operation - periodic only, and at
-          // debug level.
-          if (++loop_count % 60000 == 0) {
-            XELOGD("GPU VSync thread alive, loop {}", loop_count);
-          }
+        while (vsync_worker_running_) {
           uint64_t current_time = Clock::QueryGuestTickCount();
           uint64_t elapsed = (current_time - last_frame_time) /
                              (Clock::guest_tick_frequency() / 1000);
           if (elapsed >= vsync_duration) {
-            // Check again before calling MarkVblank in case we're shutting down
-            if (vsync_worker_running_.load()) {
-              // XELOGI("GPU VSync: Marking vblank");
-              MarkVblank();
-              last_frame_time = current_time;
-            }
+            MarkVblank();
+            last_frame_time = current_time;
           }
           xe::threading::Sleep(std::chrono::milliseconds(1));
         }
-        XELOGI("GPU VSync thread exiting - vsync_worker_running_ is now false");
         return 0;
       }));
   // As we run vblank interrupts the debugger must be able to suspend us.
@@ -137,25 +125,16 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
 }
 
 void GraphicsSystem::Shutdown() {
-  // Stop VSync thread first to prevent it from accessing command_processor_
-  if (vsync_worker_thread_) {
-    XELOGI("GPU: Shutting down VSync thread");
-    XELOGI("GPU: Setting vsync_worker_running_ to false (was: {})",
-           vsync_worker_running_.load());
-    vsync_worker_running_.store(false, std::memory_order_release);
-    XELOGI("GPU: vsync_worker_running_ is now: {}",
-           vsync_worker_running_.load());
-    vsync_worker_thread_->Wait(0, 0, 0, nullptr);
-    vsync_worker_thread_.reset();
-    XELOGI("GPU: VSync thread shut down");
-  }
-
   if (command_processor_) {
-    XELOGI("GPU: Shutting down command processor");
     EndTracing();
     command_processor_->Shutdown();
     command_processor_.reset();
-    XELOGI("GPU: Command processor shut down");
+  }
+
+  if (vsync_worker_thread_) {
+    vsync_worker_running_ = false;
+    vsync_worker_thread_->Wait(0, 0, 0, nullptr);
+    vsync_worker_thread_.reset();
   }
 
   if (presenter_) {
@@ -267,11 +246,6 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
   auto thread = kernel::XThread::GetCurrentThread();
   assert_not_null(thread);
 
-  // Don't dispatch interrupts from host threads - they can't run guest code
-  if (!thread->is_guest_thread()) {
-    return;
-  }
-
   // Pick a CPU, if needed. We're going to guess 2. Because.
   if (cpu == 0xFFFFFFFF) {
     cpu = 2;
@@ -289,30 +263,13 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
 void GraphicsSystem::MarkVblank() {
   SCOPE_profile_cpu_f("gpu");
 
-  // Safety check - if we're shutting down, don't do anything
-  // Use atomic load to avoid race condition
-  if (!vsync_worker_running_.load()) {
-    // XELOGI("GPU VSync: MarkVblank called but shutting down, skipping");
-    return;
-  }
-
-  // Double-check command processor is still valid
-  if (!command_processor_) {
-    XELOGI(
-        "GPU VSync: MarkVblank called but command_processor_ is null, "
-        "skipping");
-    return;
-  }
-
   // Increment vblank counter (so the game sees us making progress).
   command_processor_->increment_counter();
 
   // TODO(benvanik): we shouldn't need to do the dispatch here, but there's
   //     something wrong and the CP will block waiting for code that
   //     needs to be run in the interrupt.
-  // XELOGI("GPU VSync: About to call DispatchInterruptCallback");
   DispatchInterruptCallback(0, 2);
-  // XELOGI("GPU VSync: DispatchInterruptCallback completed");
 }
 
 void GraphicsSystem::ClearCaches() {
