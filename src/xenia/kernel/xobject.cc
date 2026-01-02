@@ -49,19 +49,7 @@ XObject::XObject(KernelState* kernel_state, Type type)
 }
 
 XObject::~XObject() {
-  // TODO: Fix handle cleanup for threads that exit via pthread_exit
-  // The lambda cleanup in XThread::Create doesn't run when pthread_exit is called,
-  // leaving handles in the handles_ vector. This affects both Linux and macOS.
-  // assert_true(handles_.empty());
-  
-  // Workaround: Clean up any remaining handles during destruction
-  if (!handles_.empty()) {
-    XELOGW("XObject destructor: {} handles not properly cleaned up", handles_.size());
-    while (!handles_.empty()) {
-      handles_.pop_back();
-    }
-  }
-  
+  assert_true(handles_.empty());
   assert_zero(pointer_ref_count_);
 
   if (allocated_guest_object_) {
@@ -205,14 +193,9 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
 
 X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                        uint32_t alertable, uint64_t* opt_timeout) {
-  XELOGI("XObject::Wait: ENTRY - type={}, handle={:08X}, alertable={}, timeout={}",
-         static_cast<uint32_t>(type_), handle(), alertable,
-         opt_timeout ? *opt_timeout : 0);
-  
   auto wait_handle = GetWaitHandle();
   if (!wait_handle) {
     // Object doesn't support waiting.
-    XELOGI("XObject::Wait: No wait handle, returning SUCCESS");
     return X_STATUS_SUCCESS;
   }
 
@@ -220,31 +203,22 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
       opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
-  
-  XELOGI("XObject::Wait: Calling threading::Wait with timeout_ms={}",
-         timeout_ms == std::chrono::milliseconds::max() ? -1 : timeout_ms.count());
 
   auto result =
       xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
-  XELOGI("XObject::Wait: threading::Wait returned result={}", static_cast<int>(result));
-  
   switch (result) {
     case xe::threading::WaitResult::kSuccess:
-      XELOGI("XObject::Wait: SUCCESS - calling WaitCallback");
       WaitCallback();
       return X_STATUS_SUCCESS;
     case xe::threading::WaitResult::kUserCallback:
-      XELOGI("XObject::Wait: USER_CALLBACK");
       // Or X_STATUS_ALERTED?
       return X_STATUS_USER_APC;
     case xe::threading::WaitResult::kTimeout:
-      XELOGI("XObject::Wait: TIMEOUT");
       xe::threading::MaybeYield();
       return X_STATUS_TIMEOUT;
     default:
     case xe::threading::WaitResult::kAbandoned:
     case xe::threading::WaitResult::kFailed:
-      XELOGI("XObject::Wait: ABANDONED/FAILED");
       return X_STATUS_ABANDONED_WAIT_0;
   }
 }
