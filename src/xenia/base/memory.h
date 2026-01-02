@@ -55,7 +55,7 @@ void AndroidShutdown();
 #endif
 
 // Returns the native page size of the system, in bytes.
-// This should be ~4KiB.
+// This may be 4KiB, 16KiB, or another power-of-two page size.
 size_t page_size();
 
 // Returns the allocation granularity of the system, in bytes.

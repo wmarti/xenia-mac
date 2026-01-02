@@ -4,14 +4,15 @@ Guidelines for AI agents working on this codebase.
 
 ## Project Overview
 
-**Xenia** is an Xbox 360 emulator. This fork targets **ARM64 macOS** with a native Metal GPU backend.
+**Xenia** is an Xbox 360 emulator. This worktree targets **ARM64 macOS** and
+focuses on the **null GPU backend** to exercise the **A64 CPU backend** while
+keeping the UI on **Metal**.
 
 - **Origin**: Forked from [wunkolo's Xenia fork](https://github.com/Wunkolo/xenia/tree/arm64-windows) which implemented the A64 (ARM64) CPU backend
 - **A64 Backend**: Uses [Oaknut](https://github.com/merryhime/oaknut) for ARM64 assembly emission (analogous to xbyak for x64)
-- **Current Focus**: Metal GPU backend via `xenia-gpu-metal-trace-dump` target
-- **Status**: A64 backend passes all CPU tests; Metal backend is early WIP
-- **Why Metal**: MoltenVK (Vulkan-on-Metal) is NOT supported due to primitive restart issues and other Vulkan feature gaps
-- **Shader Pipeline**: DXBC → DXIL conversion uses `dxbc2dxil` from `third_party/DirectXShaderCompiler` (see `third_party/DirectXShaderCompiler/build_dxilconv_macos.sh`, or set `DXBC2DXIL_PATH`)
+- **Current Focus**: `xenia-app` with `--gpu=null` for XEX boot + A64 debugging
+- **UI Backend**: Null graphics system uses Metal UI on macOS via
+  `src/xenia/gpu/null/null_graphics_system.cc` (`MetalProvider::Create()`)
 
 ### Branch Structure
 
@@ -19,7 +20,7 @@ Guidelines for AI agents working on this codebase.
 |--------|---------|
 | `master` | wunkolo's upstream A64 backend |
 | `arm64-all` | macOS ARM64 platform fixes (64 commits on top of master) |
-| `metal-backend-clean-msc` | Current working branch for Metal GPU backend |
+| `null-app-mac` | Null GPU app bring-up for A64 debugging on macOS |
 
 ## Build Commands
 
@@ -38,9 +39,6 @@ All builds use the `xb` Python script. Output goes to `build/bin/Mac/<Config>/`.
 # Build release
 ./xb build --target=<target_name> --config=release
 
-# Build Metal shaders
-./xb buildshaders --target=metal
-
 # Format code before committing
 ./xb format
 ```
@@ -49,27 +47,25 @@ All builds use the `xb` Python script. Output goes to `build/bin/Mac/<Config>/`.
 
 | Target | Purpose |
 |--------|---------|
-| `xenia-gpu-metal-trace-dump` | **Primary focus** - GPU trace replay for Metal backend testing |
+| `xenia-app` | **Primary focus** - App binary for loading XEX and exercising A64 |
 | `xenia-base-tests` | Platform/base utility tests |
 | `xenia-cpu-tests` | HIR/CPU operation tests |
 | `xenia-cpu-ppc-tests` | PPC instruction tests (167 assembly tests) |
 | `xenia-vfs-tests` | Virtual filesystem tests |
 
-### Test Execution
+### Run / Test Execution
 
 ```bash
-# Run built test binary directly
+# Run built test binaries directly
 ./build/bin/Mac/Checked/xenia-base-tests
 ./build/bin/Mac/Checked/xenia-cpu-ppc-tests
 ./build/bin/Mac/Checked/xenia-cpu-tests
 
-# GPU trace dump (requires trace file)
-./build/bin/Mac/Checked/xenia-gpu-metal-trace-dump <trace_file>
+# Run xenia-app with the null GPU backend (Metal UI on macOS)
+./build/bin/Mac/Checked/xenia-app \
+  --config=scratch/config/null-app-mac.config.toml \
+  <path/to/game.xex>
 ```
-
-Reference traces are in `testdata/reference-gpu-traces/traces/`:
-- `title_414B07D1_frame_589.xenia_gpu_trace` (small, good for testing)
-- `title_414B07D1_frame_6543.xenia_gpu_trace` (large)
 
 ## Directory Structure
 
@@ -78,6 +74,7 @@ src/xenia/
 ├── cpu/backend/a64/      # ARM64 JIT backend (Oaknut-based)
 ├── cpu/backend/x64/      # x86_64 JIT backend (xbyak-based)
 ├── gpu/metal/            # Metal GPU backend (WIP)
+├── gpu/null/             # Null graphics backend (no rendering)
 ├── gpu/vulkan/           # Vulkan GPU backend
 ├── gpu/d3d12/            # D3D12 GPU backend (Windows)
 ├── ui/metal/             # Metal UI layer
@@ -161,7 +158,7 @@ scratch/
 
 ```bash
 # Build with log capture
-./xb build --target=xenia-gpu-metal-trace-dump 2>&1 | tee scratch/logs/build.log
+./xb build --target=xenia-app 2>&1 | tee scratch/logs/build.log
 
 # Check for errors only
 grep -E "error:" scratch/logs/build.log
@@ -180,13 +177,13 @@ tail -20 scratch/logs/test.log
 ```
 
 ```bash
-# GPU trace dump
-./build/bin/Mac/Checked/xenia-gpu-metal-trace-dump \
-    testdata/reference-gpu-traces/traces/title_414B07D1_frame_589.xenia_gpu_trace \
-    2>&1 | tee scratch/logs/trace.log
+# Run xenia-app with log capture
+./build/bin/Mac/Checked/xenia-app \
+  --config=scratch/config/null-app-mac.config.toml \
+  <path/to/game.xex> 2>&1 | tee scratch/logs/app.log
 
 # Check for crashes or errors
-grep -iE "(error|exception|crash|assert)" scratch/logs/trace.log
+grep -iE "(error|exception|crash|assert)" scratch/logs/app.log
 ```
 
 ### Code Quality Requirements

@@ -40,6 +40,7 @@ namespace memory {
 static void* libandroid_;
 // API 26+.
 static int (*android_ASharedMemory_create_)(const char* name, size_t size);
+static int (*android_ASharedMemory_setProt_)(int fd, int prot);
 
 void AndroidInitialize() {
   if (xe::GetAndroidApiLevel() >= 26) {
@@ -50,12 +51,16 @@ void AndroidInitialize() {
           reinterpret_cast<decltype(android_ASharedMemory_create_)>(
               dlsym(libandroid_, "ASharedMemory_create"));
       assert_not_null(android_ASharedMemory_create_);
+      android_ASharedMemory_setProt_ =
+          reinterpret_cast<decltype(android_ASharedMemory_setProt_)>(
+              dlsym(libandroid_, "ASharedMemory_setProt"));
     }
   }
 }
 
 void AndroidShutdown() {
   android_ASharedMemory_create_ = nullptr;
+  android_ASharedMemory_setProt_ = nullptr;
   if (libandroid_) {
     dlclose(libandroid_);
     libandroid_ = nullptr;
@@ -64,11 +69,8 @@ void AndroidShutdown() {
 #endif
 
 size_t page_size() {
-#ifdef __APPLE__
-    return static_cast<size_t>(sysconf(_SC_PAGESIZE));
-#else
-    return getpagesize();
-#endif
+  const long size = sysconf(_SC_PAGESIZE);
+  return size > 0 ? static_cast<size_t>(size) : size_t(4096);
 }
 size_t allocation_granularity() { return page_size(); }
 
@@ -90,16 +92,51 @@ uint32_t ToPosixProtectFlags(PageAccess access) {
   }
 }
 
-bool IsWritableExecutableMemorySupported() { return true; }
+bool IsWritableExecutableMemorySupported() {
+  static const bool supported = []() {
+    const size_t test_size = page_size();
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#if XE_PLATFORM_MAC && defined(__aarch64__)
+#ifdef MAP_JIT
+    // MAP_JIT is required for executable mappings on macOS ARM64.
+    flags |= MAP_JIT;
+#endif
+#endif
+    void* test_mapping = mmap(nullptr, test_size,
+                              PROT_READ | PROT_WRITE | PROT_EXEC, flags, -1, 0);
+    if (test_mapping == MAP_FAILED) {
+      return false;
+    }
+    munmap(test_mapping, test_size);
+    return true;
+  }();
+  return supported;
+}
 
 void* AllocFixed(void* base_address, size_t length,
                  AllocationType allocation_type, PageAccess access) {
   // mmap does not support reserve / commit, so ignore allocation_type.
   uint32_t prot = ToPosixProtectFlags(access);
+  if (base_address && allocation_type == AllocationType::kCommit) {
+    const size_t system_page_size = page_size();
+    uintptr_t start = reinterpret_cast<uintptr_t>(base_address);
+    uintptr_t aligned_start = start & ~(system_page_size - 1);
+    uintptr_t aligned_end =
+        xe::align(start + length, system_page_size);
+    size_t aligned_length =
+        aligned_end > aligned_start ? aligned_end - aligned_start : 0;
+    if (!aligned_length) {
+      return base_address;
+    }
+    return mprotect(reinterpret_cast<void*>(aligned_start), aligned_length,
+                    prot) == 0
+               ? base_address
+               : nullptr;
+  }
 
 #if XE_PLATFORM_MAC && defined(__aarch64__)
   // On macOS ARM64, MAP_JIT is required for executable mappings.
-  int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+  uint32_t flags = MAP_PRIVATE | MAP_ANONYMOUS;
   if (access == PageAccess::kExecuteReadWrite ||
       access == PageAccess::kExecuteReadOnly) {
     flags |= MAP_JIT;
@@ -111,29 +148,51 @@ void* AllocFixed(void* base_address, size_t length,
     aligned_addr = xe::round_up(aligned_addr, page_size());
   }
 
-  void* result = nullptr;
+  uint32_t fixed_flags = flags;
+#ifdef MAP_FIXED_NOREPLACE
   if (aligned_addr != 0) {
-    // Try fixed mapping first if a base address was requested.
-    result = mmap(reinterpret_cast<void*>(aligned_addr), length, prot,
-                  flags | MAP_FIXED, -1, 0);
-    if (result == MAP_FAILED) {
-      // Fall back to OS-chosen address if fixed fails.
-      result = mmap(nullptr, length, prot, flags, -1, 0);
-    }
-  } else {
-    // Let the OS choose the address.
-    result = mmap(nullptr, length, prot, flags, -1, 0);
+    fixed_flags |= MAP_FIXED_NOREPLACE;
   }
-
+#endif
+  void* result = mmap(aligned_addr ? reinterpret_cast<void*>(aligned_addr)
+                                   : nullptr,
+                      length, prot, aligned_addr ? fixed_flags : flags, -1, 0);
+  if (result == MAP_FAILED && aligned_addr != 0) {
+    if (errno == EINVAL) {
+      result = mmap(reinterpret_cast<void*>(aligned_addr), length, prot, flags,
+                    -1, 0);
+    }
+  }
   if (result == MAP_FAILED) {
+    return nullptr;
+  }
+  if (aligned_addr != 0 &&
+      result != reinterpret_cast<void*>(aligned_addr)) {
+    munmap(result, length);
     return nullptr;
   }
   return result;
 #else
-  // Default POSIX behavior: honor fixed base if provided.
-  void* result = mmap(base_address, length, prot,
-                      MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+  uint32_t flags = MAP_PRIVATE | MAP_ANONYMOUS;
+  uint32_t fixed_flags = flags;
+#ifdef MAP_FIXED_NOREPLACE
+  if (base_address) {
+    fixed_flags |= MAP_FIXED_NOREPLACE;
+  }
+#endif
+  void* result =
+      mmap(base_address, length, prot,
+           base_address ? fixed_flags : flags, -1, 0);
+  if (result == MAP_FAILED && base_address) {
+    if (errno == EINVAL) {
+      result = mmap(base_address, length, prot, flags, -1, 0);
+    }
+  }
   if (result == MAP_FAILED) {
+    return nullptr;
+  }
+  if (base_address && result != base_address) {
+    munmap(result, length);
     return nullptr;
   }
   return result;
@@ -165,6 +224,10 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
   if (android_ASharedMemory_create_) {
     int sharedmem_fd = android_ASharedMemory_create_(path.c_str(), length);
+    if (sharedmem_fd >= 0 && android_ASharedMemory_setProt_) {
+      android_ASharedMemory_setProt_(sharedmem_fd,
+                                     ToPosixProtectFlags(access));
+    }
     return sharedmem_fd >= 0 ? sharedmem_fd : kFileMappingHandleInvalid;
   }
 
@@ -228,22 +291,38 @@ void CloseFileMappingHandle(FileMappingHandle handle,
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
                   PageAccess access, size_t file_offset) {
   uint32_t prot = ToPosixProtectFlags(access);
-#ifdef __APPLE__
-  // File-backed mapping on Apple platforms — use MAP_SHARED to allow writes.
-  void* result = mmap(base_address, length, prot, MAP_SHARED, handle,
-                      file_offset);
-  if (result == MAP_FAILED) {
-    return nullptr;
+  uint32_t flags = MAP_SHARED;
+  uint32_t fixed_flags = flags;
+#ifdef MAP_FIXED_NOREPLACE
+  if (base_address) {
+    fixed_flags |= MAP_FIXED_NOREPLACE;
   }
-  return result;
-#else
-  void* result = mmap64(base_address, length, prot, MAP_SHARED, handle,
-                        file_offset);
-  if (result == MAP_FAILED) {
-    return nullptr;
-  }
-  return result;
 #endif
+#ifdef __APPLE__
+  void* result = mmap(base_address, length, prot,
+                      base_address ? fixed_flags : flags, handle, file_offset);
+#else
+  void* result = mmap64(base_address, length, prot,
+                        base_address ? fixed_flags : flags, handle,
+                        file_offset);
+#endif
+  if (result == MAP_FAILED && base_address) {
+    if (errno == EINVAL) {
+#ifdef __APPLE__
+      result = mmap(base_address, length, prot, flags, handle, file_offset);
+#else
+      result = mmap64(base_address, length, prot, flags, handle, file_offset);
+#endif
+    }
+  }
+  if (result == MAP_FAILED) {
+    return nullptr;
+  }
+  if (base_address && result != base_address) {
+    munmap(result, length);
+    return nullptr;
+  }
+  return result;
 }
 
 

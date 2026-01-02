@@ -95,9 +95,9 @@ bool A64Assembler::Assemble(GuestFunction* function, HIRBuilder* builder,
       reinterpret_cast<uint8_t*>(machine_code), code_size);
   // Install into indirection table.
   const uint64_t host_address = reinterpret_cast<uint64_t>(machine_code);
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
-  // On macOS ARM64, machine code might be allocated in high address space
-  // Use the 64-bit version of AddIndirection to store the full address
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, machine code might be allocated in high address space.
+  // Use the 64-bit version of AddIndirection to store the full address.
   reinterpret_cast<A64CodeCache*>(backend_->code_cache())
       ->AddIndirection64(function->address(), host_address);
 #else

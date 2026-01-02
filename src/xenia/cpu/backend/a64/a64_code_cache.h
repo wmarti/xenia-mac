@@ -27,6 +27,12 @@ namespace cpu {
 namespace backend {
 namespace a64 {
 
+#if XE_ARCH_ARM64
+#define XE_A64_INDIRECTION_64BIT 1
+#else
+#define XE_A64_INDIRECTION_64BIT 0
+#endif
+
 struct EmitFunctionInfo {
   struct _code_size {
     size_t prolog;
@@ -49,7 +55,9 @@ class A64CodeCache : public CodeCache {
 
   const std::filesystem::path& file_name() const override { return file_name_; }
   uintptr_t execute_base_address() const override {
-    return kGeneratedCodeExecuteBase;
+    return generated_code_execute_base_
+               ? reinterpret_cast<uintptr_t>(generated_code_execute_base_)
+               : kGeneratedCodeExecuteBase;
   }
   size_t total_size() const override { return kGeneratedCodeSize; }
 
@@ -59,11 +67,11 @@ class A64CodeCache : public CodeCache {
 
   bool has_indirection_table() { return indirection_table_base_ != nullptr; }
   void set_indirection_default(uint32_t default_value);
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_A64_INDIRECTION_64BIT
   void set_indirection_default_64(uint64_t default_value);
 #endif
   void AddIndirection(uint32_t guest_address, uint32_t host_address);
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_A64_INDIRECTION_64BIT
   void AddIndirection64(uint32_t guest_address, uint64_t host_address);
 #endif
 
@@ -89,22 +97,27 @@ class A64CodeCache : public CodeCache {
   uintptr_t indirection_table_base_address() const {
     return indirection_table_actual_base_;
   }
+#if XE_A64_INDIRECTION_64BIT
+  uintptr_t indirection_table_base_bias() const {
+    return indirection_table_base_bias_;
+  }
+#endif
 
  public:
   // All executable code falls within 0x80000000 to 0x9FFFFFFF, so we can
   // only map enough for lookups within that range.
   // Size of the indirection table in bytes.
-  // On macOS ARM64 we store 64-bit entries (8 bytes) per 4-byte guest slot
+  // On ARM64 platforms we store 64-bit entries (8 bytes) per 4-byte guest slot
   // for the 0x2000_0000-byte guest executable range (0x8000_0000..0xA000_0000),
   // so we need 0x4000_0000 bytes to cover the full space.
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_A64_INDIRECTION_64BIT
   static const size_t kIndirectionTableSize = 0x40000000;  // 1 GiB
 #else
   static const size_t kIndirectionTableSize =
       0x20000000 - 1;  // 512 MiB - 1 (legacy)
 #endif
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
-  // On macOS ARM64, the base address is determined dynamically at runtime
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, the base address is determined dynamically at runtime
   // based on where the OS allows us to allocate memory
   static uintptr_t kIndirectionTableBase;
 #else
@@ -154,15 +167,15 @@ class A64CodeCache : public CodeCache {
   xe::global_critical_region global_critical_region_;
 
   // Value that the indirection table will be initialized with upon commit.
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_A64_INDIRECTION_64BIT
   uint64_t indirection_default_value_ = 0xFEEDF00D;
 #else
   uint32_t indirection_default_value_ = 0xFEEDF00D;
 #endif
 
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
-  // On macOS ARM64, we use 64-bit pointers in the indirection table to handle
-  // high addresses that can't fit in 32-bit values
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, we use 64-bit pointers in the indirection table to
+  // handle high addresses that can't fit in 32-bit values.
   using indirection_entry_t = uint64_t;
   static constexpr size_t kIndirectionEntrySize = 8;
 #else
@@ -178,6 +191,9 @@ class A64CodeCache : public CodeCache {
   // Actual base address of the indirection table (may differ from
   // kIndirectionTableBase on systems where fixed address allocation fails)
   uintptr_t indirection_table_actual_base_ = 0;
+#if XE_A64_INDIRECTION_64BIT
+  uintptr_t indirection_table_base_bias_ = 0;
+#endif
   // Fixed at kGeneratedCodeExecuteBase and holding all generated code, growing
   // as needed.
   uint8_t* generated_code_execute_base_ = nullptr;

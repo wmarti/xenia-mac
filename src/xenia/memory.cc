@@ -376,12 +376,21 @@ int Memory::MapViews(uint8_t* mapping_base) {
   // side if system allocation granularity is bigger than 4 KB.
   uint64_t granularity_mask = ~uint64_t(system_allocation_granularity_ - 1);
   for (size_t n = 0; n < xe::countof(map_info); n++) {
+    uint8_t* target_address =
+        mapping_base + map_info[n].virtual_address_start;
     views_.all_views[n] = reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
-        mapping_, mapping_base + map_info[n].virtual_address_start,
+        mapping_, target_address,
         map_info[n].virtual_address_end - map_info[n].virtual_address_start + 1,
         xe::memory::PageAccess::kReadWrite,
         map_info[n].target_address & granularity_mask));
-    if (!views_.all_views[n]) {
+    if (!views_.all_views[n] || views_.all_views[n] != target_address) {
+      if (views_.all_views[n] && views_.all_views[n] != target_address) {
+        XELOGE(
+            "MapViews: Failed to map view {} at {:p} (got {:p}, offset {:X})",
+            n, static_cast<const void*>(target_address),
+            static_cast<const void*>(views_.all_views[n]),
+            map_info[n].target_address & granularity_mask);
+      }
       // Failed, so bail and try again.
       UnmapViews();
       return 1;

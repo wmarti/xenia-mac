@@ -104,22 +104,7 @@ bool PosixA64CodeCache::Initialize() {
 }
 
 void PosixA64CodeCache::CopyMachineCode(void* dest, const void* src, size_t size) {
-#ifdef XE_PLATFORM_MAC
-  // On ARM64 macOS with MAP_JIT, use pthread_jit_write_protect_np dance
-  
-  // Enable write access for this thread (disable execute)
-  pthread_jit_write_protect_np(0);
-  
-  // Copy the machine code
   std::memcpy(dest, src, size);
-  
-  // Re-enable execute access for this thread (disable write)
-  pthread_jit_write_protect_np(1);
-#else
-  // On Linux and other POSIX systems, just copy directly
-  // The memory should already be writable if allocated properly
-  std::memcpy(dest, src, size);
-#endif
 }
 
 PosixA64CodeCache::UnwindReservation
