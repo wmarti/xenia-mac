@@ -431,7 +431,10 @@ std::unique_ptr<Surface> MacWindow::CreateSurfaceImpl(
 }
 
 void MacWindow::RequestPaintImpl() {
-  assert_true(app_context().IsInUIThread());
+  if (!app_context().IsInUIThread()) {
+    app_context().CallInUIThread([this]() { RequestPaintImpl(); });
+    return;
+  }
   
   if (content_view_) {
     [content_view_ setNeedsDisplay:YES];
