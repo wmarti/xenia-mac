@@ -13,6 +13,8 @@ keeping the UI on **Metal**.
 - **Current Focus**: `xenia-app` with `--gpu=null` for XEX boot + A64 debugging
 - **UI Backend**: Null graphics system uses Metal UI on macOS via
   `src/xenia/gpu/null/null_graphics_system.cc` (`MetalProvider::Create()`)
+- **Baseline Note**: `xenia-mac` does not run `xenia-app` reliably; this
+  worktree is the functional baseline for macOS app bring-up.
 
 ### Branch Structure
 

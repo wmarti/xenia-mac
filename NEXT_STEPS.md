@@ -183,6 +183,30 @@ delete the `XThread` object, destroying `thread_`. `Thread::Exit` then calls
 - Handle release: `src/xenia/kernel/util/object_table.cc`
 - Thread exit path: `src/xenia/base/threading_mac.cc`
 
+## Phase 4: macOS MMIO SIGBUS Handling (ACTIVE)
+
+### Problem Description
+Guest MMIO accesses in the 0x7Fxxxxxx alias range crash with `EXC_BAD_ACCESS`
+on macOS instead of trapping into the MMIO handler. The crash shows a host
+address in the 0x37f... range immediately after `RtlInitializeCriticalSection`.
+
+### Root Cause Analysis
+The macOS exception handler only installs `SIGSEGV` handling. On macOS, access
+violations from `PROT_NONE`-backed MMIO regions can raise `SIGBUS`, so the
+MMIO exception handler never runs and the process aborts.
+
+### Implementation Checklist
+- [x] Install and restore `SIGBUS` alongside `SIGSEGV` in the mac exception
+      handler.
+- [ ] Rebuild `xenia-app` and confirm MMIO faults are handled (no 0x7F alias
+      crash).
+- [ ] Capture updated logs in `scratch/logs/` and validate stability.
+- [x] Rerun base/cpu/ppc tests to ensure no regressions.
+
+### Reference Information
+- mac exception handler: `src/xenia/base/exception_handler_mac.cc`
+- Memory mapping log: `scratch/logs/app.log`
+
 ## Context Summary (carry into next session)
 
 - Patch set prepared at `scratch/patches/canary-a64/`:
