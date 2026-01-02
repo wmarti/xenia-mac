@@ -56,11 +56,6 @@ DEFINE_bool(a64_resolve_function_log, false,
             "Log A64 ResolveFunction failures with module ranges.", "CPU");
 DEFINE_int32(a64_resolve_function_log_limit, 8,
              "Maximum ResolveFunction failure logs.", "CPU");
-DEFINE_bool(a64_perf_stats, false,
-            "Log A64 perf counters and code cache layout stats.", "CPU");
-DEFINE_int32(a64_perf_stats_interval, 10000,
-             "ResolveFunction hit log interval when a64_perf_stats is true.",
-             "CPU");
 
 namespace xe {
 namespace cpu {
@@ -86,8 +81,6 @@ bool ShouldLogResolveFailure() {
   const int32_t count = log_count.fetch_add(1, std::memory_order_relaxed);
   return count < limit;
 }
-
-std::atomic<uint64_t> g_resolve_function_hits{0};
 
 }  // namespace
 
@@ -758,15 +751,6 @@ void A64Emitter::UnimplementedInstr(const hir::Instr* i) {
 
 // This is used by the A64ThunkEmitter's ResolveFunctionThunk.
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
-  if (cvars::a64_perf_stats) {
-    const int32_t interval = cvars::a64_perf_stats_interval;
-    const uint64_t count =
-        g_resolve_function_hits.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (interval > 0 &&
-        (count % static_cast<uint64_t>(interval)) == 0) {
-      XELOGI("A64 ResolveFunction hits: {}", count);
-    }
-  }
   auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
   auto guest_context = thread_state->context();
 

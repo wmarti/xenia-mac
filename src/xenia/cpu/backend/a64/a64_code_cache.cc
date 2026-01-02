@@ -32,7 +32,6 @@ DEFINE_bool(a64_indirection_table_log, false,
             "Log A64 indirection table mapping and updates.", "CPU");
 DEFINE_int32(a64_indirection_table_log_limit, 32,
              "Maximum number of A64 indirection table log entries.", "CPU");
-DECLARE_bool(a64_perf_stats);
 
 namespace xe {
 namespace cpu {
@@ -270,29 +269,6 @@ bool A64CodeCache::Initialize() {
       return false;
     }
 #endif
-  }
-
-  if (cvars::a64_perf_stats) {
-#if XE_A64_INDIRECTION_64BIT
-    const uint64_t bias =
-        static_cast<uint64_t>(indirection_table_base_bias_);
-#else
-    const uint64_t bias = 0;
-#endif
-    XELOGI(
-        "A64 code cache: exec_base=0x{:016X} write_base=0x{:016X} "
-        "rwx_preferred={} indirection_base=0x{:016X} bias=0x{:016X}",
-        static_cast<uint64_t>(
-            generated_code_execute_base_
-                ? reinterpret_cast<uintptr_t>(generated_code_execute_base_)
-                : 0),
-        static_cast<uint64_t>(
-            generated_code_write_base_
-                ? reinterpret_cast<uintptr_t>(generated_code_write_base_)
-                : 0),
-        xe::memory::IsWritableExecutableMemoryPreferred(),
-        static_cast<uint64_t>(indirection_table_actual_base_),
-        bias);
   }
 
   // Preallocate the function map to a large, reasonable size.
