@@ -14,6 +14,8 @@
 #include "third_party/fmt/include/fmt/format.h"
 
 #if XE_PLATFORM_MAC
+#include <pthread.h>
+
 // Declare Objective-C runtime functions for autorelease pool management
 extern "C" {
   void* objc_autoreleasePoolPush(void);
@@ -88,6 +90,22 @@ XThread::XThread(KernelState* kernel_state, uint32_t stack_size,
   // The kernel does not take a reference. We must unregister in the dtor.
   kernel_state_->RegisterThread(this);
 }
+
+#if XE_PLATFORM_MAC
+void XThread::CleanupExitHandle(void* parameter) {
+  auto* thread = static_cast<XThread*>(parameter);
+  if (thread) {
+    thread->ReleaseHandleOnExit();
+  }
+}
+
+void XThread::ReleaseHandleOnExit() {
+  if (exit_handle_released_.exchange(true)) {
+    return;
+  }
+  ReleaseHandle();
+}
+#endif
 
 XThread::~XThread() {
   // Unregister first to prevent lookups while deleting.
@@ -392,7 +410,10 @@ X_STATUS XThread::Create() {
   
   thread_ = xe::threading::Thread::Create(params, [self_ref]() {
     auto* self = self_ref.get();
-    
+#if XE_PLATFORM_MAC
+    pthread_cleanup_push(&XThread::CleanupExitHandle, self);
+#endif
+
     // Set thread ID override. This is used by logging.
     xe::threading::set_current_thread_id(self->handle());
 
@@ -414,7 +435,12 @@ X_STATUS XThread::Create() {
     xe::Profiler::ThreadExit();
 
     // Release the self-reference to the thread.
+#if XE_PLATFORM_MAC
+    pthread_cleanup_pop(0);
+    self->ReleaseHandleOnExit();
+#else
     self->ReleaseHandle();
+#endif
   });
 
   if (!thread_) {
@@ -477,8 +503,10 @@ X_STATUS XThread::Exit(int exit_code) {
   xe::Profiler::ThreadExit();
 
   running_ = false;
+#if !XE_PLATFORM_MAC
   ReleaseHandle();
   // XELOGI("XThread::Exit: Set running_=false, released handle");
+#endif
 
   THREAD_MONITOR_EVENT(kTerminating, fmt::format("XThread::Exit calling Thread::Exit for thread {}", thread_id_));
   // XELOGI("XThread::Exit: About to call threading::Thread::Exit({})", exit_code);
@@ -488,6 +516,9 @@ X_STATUS XThread::Exit(int exit_code) {
   
   // If we got here, it's an XHostThread that skipped pthread_exit to avoid TLS cleanup hang
   // XELOGI("XThread::Exit: Thread::Exit returned for XHostThread, allowing normal return");
+#if XE_PLATFORM_MAC
+  ReleaseHandleOnExit();
+#endif
   return X_STATUS_SUCCESS;
 }
 
@@ -504,11 +535,20 @@ X_STATUS XThread::Terminate(int exit_code) {
 
   running_ = false;
   if (XThread::IsInThread(this)) {
+#if XE_PLATFORM_MAC
+    xe::threading::Thread::Exit(exit_code);
+    ReleaseHandleOnExit();
+#else
     ReleaseHandle();
     xe::threading::Thread::Exit(exit_code);
+#endif
   } else {
     thread_->Terminate(exit_code);
+#if XE_PLATFORM_MAC
+    ReleaseHandleOnExit();
+#else
     ReleaseHandle();
+#endif
   }
 
   return X_STATUS_SUCCESS;
@@ -1054,6 +1094,9 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
     params.create_suspended = true;  // Not done restoring yet.
     params.stack_size = 16_MiB;
     thread->thread_ = xe::threading::Thread::Create(params, [thread, state]() {
+#if XE_PLATFORM_MAC
+      pthread_cleanup_push(&XThread::CleanupExitHandle, thread);
+#endif
       // Set thread ID override. This is used by logging.
       xe::threading::set_current_thread_id(thread->handle());
 
@@ -1086,7 +1129,12 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       xe::Profiler::ThreadExit();
 
       // Release the self-reference to the thread.
+#if XE_PLATFORM_MAC
+      pthread_cleanup_pop(0);
+      thread->ReleaseHandleOnExit();
+#else
       thread->ReleaseHandle();
+#endif
     });
     assert_not_null(thread->thread_);
 

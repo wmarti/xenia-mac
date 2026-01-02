@@ -278,6 +278,11 @@ class XThread : public XObject, public cpu::Thread {
   xe::global_critical_region global_critical_region_;
   std::atomic<uint32_t> irql_ = {0};
   util::NativeList apc_list_;
+#if XE_PLATFORM_MAC
+  static void CleanupExitHandle(void* parameter);
+  void ReleaseHandleOnExit();
+  std::atomic<bool> exit_handle_released_{false};
+#endif
 };
 
 class XHostThread : public XThread {
