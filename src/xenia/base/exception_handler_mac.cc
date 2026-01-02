@@ -76,6 +76,19 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     case SIGSEGV: {
       Exception::AccessViolationOperation access_violation_operation =
           Exception::AccessViolationOperation::kUnknown;
+#if XE_ARCH_ARM64
+      // For a Data Abort (EC - ESR_EL1 bits 31:26 - 0b100100 from a lower
+      // Exception Level, 0b100101 without a change in the Exception Level),
+      // bit 6 is 0 for reading from a memory location, 1 for writing to a
+      // memory location.
+      const uint64_t esr = mcontext->__es.__esr;
+      if (((esr >> 26) & 0b111110) == 0b100100) {
+        access_violation_operation =
+            (esr & (UINT64_C(1) << 6))
+                ? Exception::AccessViolationOperation::kWrite
+                : Exception::AccessViolationOperation::kRead;
+      }
+#endif  // XE_ARCH_ARM64
 
       ex.InitializeAccessViolation(
           &thread_context, reinterpret_cast<uint64_t>(signal_info->si_addr),
