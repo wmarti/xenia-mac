@@ -91,11 +91,21 @@ Android/Vulkan changes.
 PPC CPU tests became dramatically slower after patch intake versus the
 baseline `xenia-mac` worktree.
 
+Now seeing an `EXC_BAD_ACCESS` in `XThread::Execute` on macOS when logging
+`thread_->system_id()`, indicating `thread_` is null during thread start.
+
 ### Root Cause Analysis
 `AllocFixed` no longer falls back to OS-chosen addresses on macOS ARM64, so
 `A64Emitter::PlaceConstData()` looped through many low fixed addresses blocked
 by PAGEZERO. That caused repeated failed `mmap` attempts per backend init and
 slowed test startup.
+
+`thread_` is likely null due to a race in the current mac threading
+implementation: `Thread::Create` sets `create_suspended=true`, but the thread
+can run `start_routine` before the creator assigns `thread_` and before
+`thread_suspend` is applied. Canary’s `threading_mac.cc` gates execution so
+start routines wait until resume, preventing `thread_`-null usage in
+`XThread::Execute`.
 
 ### Implementation Checklist
 - [x] Confirm patch set already applied (`git apply --check` fails).
@@ -107,18 +117,26 @@ slowed test startup.
       restored after warm run).
 - [x] Run base/cpu/ppc tests (logs under `scratch/logs/`).
 - [ ] Compare full PPC test runtime vs baseline (optional sanity).
+- [x] Port canary `src/xenia/base/threading_mac.cc` to fix thread-start race.
+- [ ] Rebuild base/cpu/ppc tests and rerun `xenia-app` to confirm crash fixed.
+- [ ] If needed, enable instruction tracing (see `docs/instruction_tracing.md`).
+
+Note: base/cpu/ppc tests were rerun after the threading port; all passed.
 
 ### Reference Information
 - Timing logs: `scratch/logs/time-ppc-tests-*.log`
 - Const data placement: `src/xenia/cpu/backend/a64/a64_emitter.cc`
 - MAP_JIT probe: `src/xenia/base/memory_posix.cc`
+- Threading macOS (canary):
+  `scratch/worktrees/xenia-canary-rebase/src/xenia/base/threading_mac.cc`
+- Instruction tracing: `docs/instruction_tracing.md`
 
-## Phase 2: Threading macOS Canary Intake (PLANNED)
+## Phase 2: Threading macOS Canary Intake (DONE)
 
 ### Problem Description
 The canary worktree contains a redesigned `threading_mac.cc` based on the POSIX
-implementation. We need to assess and optionally port it to fix macOS thread
-behavior issues without regressing JIT or UI stability.
+implementation. We needed to port it to fix macOS thread behavior issues
+without regressing JIT or UI stability.
 
 ### Root Cause Analysis
 - Current mac threading implementation differs from POSIX and uses Mach thread
@@ -129,17 +147,41 @@ behavior issues without regressing JIT or UI stability.
   callback handling).
 
 ### Implementation Checklist
-- [ ] Generate a patch of canary `threading_mac.cc` for review:
-  `diff -u /Users/wmarti/Documents/xenia-mac/src/xenia/base/threading_mac.cc /Users/wmarti/Documents/xenia-mac/scratch/worktrees/xenia-canary-rebase/src/xenia/base/threading_mac.cc > /Users/wmarti/Documents/xenia-mac/scratch/patches/canary-a64/0006-threading-mac-canary.patch`
-- [ ] Review `0006-threading-mac-canary.patch` for safety issues before apply
-      (signal handler install logic, suspend semantics, JIT write protection).
-- [ ] If accepted, apply to this worktree:
-  `git -C /Users/wmarti/Documents/xenia-mac/scratch/worktrees/null-app-mac apply /Users/wmarti/Documents/xenia-mac/scratch/patches/canary-a64/0006-threading-mac-canary.patch`
+- [x] Sync `threading_mac.cc` from canary (direct port; no patch file).
+- [x] Resolve the `EventInfo` override build break.
 - [ ] Rebuild `xenia-app` and rerun the same XEX to validate.
 
 ### Reference Information
 - Canary source: `scratch/worktrees/xenia-canary-rebase/src/xenia/base/threading_mac.cc`
 - Current source: `src/xenia/base/threading_mac.cc`
+
+## Phase 3: Thread Exit Lifetime Crash (ACTIVE)
+
+### Problem Description
+On macOS, `XThread::Exit` sometimes triggers `std::system_error: mutex lock
+failed: Invalid argument` inside `xe::threading::PosixCondition<Thread>::Terminate`.
+Logs show `Removed handle` for the exiting thread immediately before
+`XThread::Exit` calls `Thread::Exit`.
+
+### Root Cause Analysis
+`XThread::Exit` calls `ReleaseHandle` before `Thread::Exit`. If the thread has
+no remaining `object_ref` owners, `ReleaseHandle` removes the handle and can
+delete the `XThread` object, destroying `thread_`. `Thread::Exit` then calls
+`current_thread_->Terminate`, which locks a mutex inside the now-destroyed
+`PosixThread` object, producing `EINVAL`.
+
+### Implementation Checklist
+- [ ] Confirm handle refcount + object lifetime at `ReleaseHandle`
+      (instrument `ObjectTable::ReleaseHandle` if needed).
+- [ ] Compare `XThread::Exit` lifetime management vs canary/x64 behavior.
+- [ ] Decide on a safe lifetime strategy (delay handle release, add a self
+      retain until exit, or relocate cleanup to thread-exit callback).
+- [ ] Rebuild base/cpu/ppc tests and reproduce to validate fix.
+
+### Reference Information
+- `XThread::Exit`: `src/xenia/kernel/xthread.cc`
+- Handle release: `src/xenia/kernel/util/object_table.cc`
+- Thread exit path: `src/xenia/base/threading_mac.cc`
 
 ## Context Summary (carry into next session)
 
