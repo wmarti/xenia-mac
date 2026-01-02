@@ -947,7 +947,7 @@ class BaseBuildCommand(Command):
                 '-workspace',
                 'build/xenia.xcworkspace',
                 '-configuration',
-                args['config']
+                args['config'].capitalize()
             ] + scheme_args + pass_args, shell=False, env=dict(os.environ))
         else:
             # Detect the architecture for Linux builds
