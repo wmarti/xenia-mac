@@ -73,7 +73,11 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
   assert_not_null(region_size_ptr);
 
   // Set to TRUE when allocation is from devkit memory area.
-  assert_true(debug_memory == 0);
+  // Devkit memory isn't supported; treat as normal allocation.
+  if (debug_memory) {
+    XELOGW("NtAllocateVirtualMemory: debug_memory unsupported (0x{:X})",
+           debug_memory.value());
+  }
 
   // This allocates memory from the kernel heap, which is initialized on startup
   // and shared by both the kernel implementation and user code.
@@ -196,7 +200,11 @@ dword_result_t NtProtectVirtualMemory_entry(lpdword_t base_addr_ptr,
                                             lpdword_t old_protect,
                                             dword_t debug_memory) {
   // Set to TRUE when this memory refers to devkit memory area.
-  assert_true(debug_memory == 0);
+  // Devkit memory isn't supported; treat as normal protection change.
+  if (debug_memory) {
+    XELOGW("NtProtectVirtualMemory: debug_memory unsupported (0x{:X})",
+           debug_memory.value());
+  }
 
   // Must request a size.
   if (!base_addr_ptr || !region_size_ptr || !*region_size_ptr) {
@@ -255,7 +263,11 @@ dword_result_t NtFreeVirtualMemory_entry(lpdword_t base_addr_ptr,
   // _In_     BOOLEAN DebugMemory
 
   // Set to TRUE when freeing external devkit memory.
-  assert_true(debug_memory == 0);
+  // Devkit memory isn't supported; treat as normal free.
+  if (debug_memory) {
+    XELOGW("NtFreeVirtualMemory: debug_memory unsupported (0x{:X})",
+           debug_memory.value());
+  }
 
   if (!base_addr_value) {
     return X_STATUS_MEMORY_NOT_ALLOCATED;
