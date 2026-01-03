@@ -9,11 +9,15 @@
 
 #include "xenia/vfs/devices/host_path_device.h"
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/kernel/xfile.h"
 #include "xenia/vfs/devices/host_path_entry.h"
+
+DEFINE_bool(log_host_path_resolve, false,
+            "Log HostPathDevice::ResolvePath requests.", "VFS");
 
 namespace xe {
 namespace vfs {
@@ -56,6 +60,10 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
   // The filesystem will have stripped our prefix off already, so the path will
   // be in the form:
   // some\PATH.foo
+  if (cvars::log_host_path_resolve) {
+    XELOGI("HostPathDevice::ResolvePath mount={} path={} host_root={}",
+           mount_path_, path, host_path_.string());
+  }
   XELOGFS("HostPathDevice::ResolvePath({})", path);
   return root_entry_->ResolvePath(path);
 }
