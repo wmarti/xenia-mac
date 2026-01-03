@@ -7,15 +7,24 @@
  ******************************************************************************
  */
 
+#include <atomic>
 #include <cstring>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/xbox.h"
+
+DEFINE_bool(
+    ignore_offset_for_ranged_allocations, false,
+    "Allows to ignore 4k offset for physical allocations with provided range. "
+    "Certain titles check if result matches provided lower range.",
+    "Memory");
+DECLARE_bool(log_heap_alloc_failures);
 
 namespace xe {
 namespace kernel {
@@ -55,6 +64,97 @@ uint32_t FromXdkProtectFlags(uint32_t protect) {
     result |= kMemoryProtectWriteCombine;
   }
   return result;
+}
+
+uint32_t xeMmAllocatePhysicalMemoryEx(uint32_t flags, uint32_t region_size,
+                                      uint32_t protect_bits,
+                                      uint32_t min_addr_range,
+                                      uint32_t max_addr_range,
+                                      uint32_t alignment) {
+  // Type will usually be 0 (user request?), where 1 and 2 are sometimes made
+  // by D3D/etc.
+
+  // Check protection bits.
+  if (!(protect_bits & (X_PAGE_READONLY | X_PAGE_READWRITE))) {
+    XELOGE("MmAllocatePhysicalMemoryEx: bad protection bits");
+    return 0;
+  }
+
+  // Either may be OR'ed into protect_bits:
+  // X_PAGE_NOCACHE
+  // X_PAGE_WRITECOMBINE
+  // We could use this to detect what's likely GPU-synchronized memory
+  // and let the GPU know we're messing with it (or even allocate from
+  // the GPU). At least the D3D command buffer is X_PAGE_WRITECOMBINE.
+
+  // Calculate page size.
+  // Default            = 4KB
+  // X_MEM_LARGE_PAGES  = 64KB
+  // X_MEM_16MB_PAGES   = 16MB
+  uint32_t page_size = 4 * 1024;
+  if (protect_bits & X_MEM_LARGE_PAGES) {
+    page_size = 64 * 1024;
+  } else if (protect_bits & X_MEM_16MB_PAGES) {
+    page_size = 16 * 1024 * 1024;
+  }
+
+  // Round up the region size and alignment to the next page.
+  uint32_t adjusted_size = xe::round_up(region_size, page_size);
+  uint32_t adjusted_alignment = xe::round_up(alignment, page_size);
+
+  uint32_t allocation_type = kMemoryAllocationReserve | kMemoryAllocationCommit;
+  uint32_t protect = FromXdkProtectFlags(protect_bits);
+  bool top_down = true;
+  auto heap = static_cast<PhysicalHeap*>(
+      kernel_memory()->LookupHeapByType(true, page_size));
+  // min_addr_range/max_addr_range are bounds in physical memory, not virtual.
+  uint32_t heap_base = heap->heap_base();
+  uint32_t heap_physical_address_offset = heap->GetPhysicalAddress(heap_base);
+  // TODO(Gliniak): Games like 545108B4 compares min_addr_range with value
+  // returned. 0x1000 offset causes it to go below that minimal range and goes
+  // haywire.
+  if (min_addr_range && max_addr_range &&
+      cvars::ignore_offset_for_ranged_allocations) {
+    heap_physical_address_offset = 0;
+  }
+
+  uint32_t heap_min_addr =
+      xe::sat_sub(min_addr_range, heap_physical_address_offset);
+  uint32_t heap_max_addr =
+      xe::sat_sub(max_addr_range, heap_physical_address_offset);
+  uint32_t heap_size = heap->heap_size();
+  heap_min_addr = heap_base + std::min(heap_min_addr, heap_size - 1);
+  heap_max_addr = heap_base + std::min(heap_max_addr, heap_size - 1);
+  uint32_t base_address;
+  if (!heap->AllocRange(heap_min_addr, heap_max_addr, adjusted_size,
+                        adjusted_alignment, allocation_type, protect, top_down,
+                        &base_address)) {
+    // Failed - assume no memory available.
+    if (cvars::log_heap_alloc_failures) {
+      XELOGW(
+          "MmAllocatePhysicalMemoryEx request: flags={:08X} size={:08X} "
+          "protect={:08X} min={:08X} max={:08X} align={:08X} page={:08X} "
+          "adj_size={:08X} adj_align={:08X} heap_base={:08X} heap_size={:08X} "
+          "heap_min={:08X} heap_max={:08X} offset={:08X} ignore_offset={}",
+          flags, region_size, protect_bits, min_addr_range, max_addr_range,
+          alignment, page_size, adjusted_size, adjusted_alignment, heap_base,
+          heap_size, heap_min_addr, heap_max_addr,
+          heap_physical_address_offset,
+          cvars::ignore_offset_for_ranged_allocations);
+      static std::atomic<bool> dumped_physical_heap{false};
+      if (!dumped_physical_heap.exchange(true)) {
+        XELOGW("Dumping physical heap map due to allocation failure.");
+        kernel_state()->memory()->GetPhysicalHeap()->DumpMap();
+      }
+    }
+    XELOGW("MmAllocatePhysicalMemoryEx: Allocation failed: {:08X} Size: {:08X}",
+           base_address, adjusted_size);
+    return 0;
+  }
+  XELOGD("MmAllocatePhysicalMemoryEx = {:08X} Size: {:08X}", base_address,
+         adjusted_size);
+
+  return base_address;
 }
 
 dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
@@ -345,70 +445,17 @@ DECLARE_XBOXKRNL_EXPORT1(NtQueryVirtualMemory, kMemory, kImplemented);
 dword_result_t MmAllocatePhysicalMemoryEx_entry(
     dword_t flags, dword_t region_size, dword_t protect_bits,
     dword_t min_addr_range, dword_t max_addr_range, dword_t alignment) {
-  // Type will usually be 0 (user request?), where 1 and 2 are sometimes made
-  // by D3D/etc.
-
-  // Check protection bits.
-  if (!(protect_bits & (X_PAGE_READONLY | X_PAGE_READWRITE))) {
-    XELOGE("MmAllocatePhysicalMemoryEx: bad protection bits");
-    return 0;
-  }
-
-  // Either may be OR'ed into protect_bits:
-  // X_PAGE_NOCACHE
-  // X_PAGE_WRITECOMBINE
-  // We could use this to detect what's likely GPU-synchronized memory
-  // and let the GPU know we're messing with it (or even allocate from
-  // the GPU). At least the D3D command buffer is X_PAGE_WRITECOMBINE.
-
-  // Calculate page size.
-  // Default            = 4KB
-  // X_MEM_LARGE_PAGES  = 64KB
-  // X_MEM_16MB_PAGES   = 16MB
-  uint32_t page_size = 4 * 1024;
-  if (protect_bits & X_MEM_LARGE_PAGES) {
-    page_size = 64 * 1024;
-  } else if (protect_bits & X_MEM_16MB_PAGES) {
-    page_size = 16 * 1024 * 1024;
-  }
-
-  // Round up the region size and alignment to the next page.
-  uint32_t adjusted_size = xe::round_up(region_size, page_size);
-  uint32_t adjusted_alignment = xe::round_up(alignment, page_size);
-
-  uint32_t allocation_type = kMemoryAllocationReserve | kMemoryAllocationCommit;
-  uint32_t protect = FromXdkProtectFlags(protect_bits);
-  bool top_down = true;
-  auto heap = static_cast<PhysicalHeap*>(
-      kernel_memory()->LookupHeapByType(true, page_size));
-  // min_addr_range/max_addr_range are bounds in physical memory, not virtual.
-  uint32_t heap_base = heap->heap_base();
-  uint32_t heap_physical_address_offset = heap->GetPhysicalAddress(heap_base);
-  uint32_t heap_min_addr =
-      xe::sat_sub(min_addr_range.value(), heap_physical_address_offset);
-  uint32_t heap_max_addr =
-      xe::sat_sub(max_addr_range.value(), heap_physical_address_offset);
-  uint32_t heap_size = heap->heap_size();
-  heap_min_addr = heap_base + std::min(heap_min_addr, heap_size - 1);
-  heap_max_addr = heap_base + std::min(heap_max_addr, heap_size - 1);
-  uint32_t base_address;
-  if (!heap->AllocRange(heap_min_addr, heap_max_addr, adjusted_size,
-                        adjusted_alignment, allocation_type, protect, top_down,
-                        &base_address)) {
-    // Failed - assume no memory available.
-    return 0;
-  }
-  XELOGD("MmAllocatePhysicalMemoryEx = {:08X}", base_address);
-
-  return base_address;
+  return xeMmAllocatePhysicalMemoryEx(
+      flags.value(), region_size.value(), protect_bits.value(),
+      min_addr_range.value(), max_addr_range.value(), alignment.value());
 }
 DECLARE_XBOXKRNL_EXPORT1(MmAllocatePhysicalMemoryEx, kMemory, kImplemented);
 
 dword_result_t MmAllocatePhysicalMemory_entry(dword_t flags,
                                               dword_t region_size,
                                               dword_t protect_bits) {
-  return MmAllocatePhysicalMemoryEx_entry(flags, region_size, protect_bits, 0,
-                                          0xFFFFFFFFu, 0);
+  return xeMmAllocatePhysicalMemoryEx(flags.value(), region_size.value(),
+                                      protect_bits.value(), 0, 0xFFFFFFFFu, 0);
 }
 DECLARE_XBOXKRNL_EXPORT1(MmAllocatePhysicalMemory, kMemory, kImplemented);
 

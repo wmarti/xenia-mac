@@ -10,6 +10,7 @@
 #include "xenia/memory.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <utility>
 
@@ -36,8 +37,30 @@ DEFINE_bool(protect_on_release, false,
             "Protect released memory to prevent accesses.", "Memory");
 DEFINE_bool(scribble_heap, false,
             "Scribble 0xCD into all allocated heap memory.", "Memory");
+DEFINE_bool(log_physical_heap_faults, false,
+            "Log unhandled physical heap access violations.", "Memory");
+DEFINE_bool(log_heap_alloc_failures, false,
+            "Log heap allocation failures with details.", "Memory");
 
 namespace xe {
+namespace {
+
+const char* HeapTypeToString(HeapType type) {
+  switch (type) {
+    case HeapType::kGuestVirtual:
+      return "guest_virtual";
+    case HeapType::kGuestXex:
+      return "guest_xex";
+    case HeapType::kGuestPhysical:
+      return "guest_physical";
+    case HeapType::kHostPhysical:
+      return "host_physical";
+  }
+  return "unknown";
+}
+
+}  // namespace
+
 uint32_t get_page_count(uint32_t value, uint32_t page_size) {
   return xe::round_up(value, page_size) / page_size;
 }
@@ -111,6 +134,9 @@ Memory::~Memory() {
   heaps_.v40000000.Dispose();
   heaps_.v80000000.Dispose();
   heaps_.v90000000.Dispose();
+#if XE_PLATFORM_MAC
+  heaps_.v7F000000.Dispose();
+#endif
   heaps_.vA0000000.Dispose();
   heaps_.vC0000000.Dispose();
   heaps_.vE0000000.Dispose();
@@ -339,20 +365,13 @@ int Memory::MapViewsMac() {
   void* reserved_base =
       mmap(nullptr, total_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (reserved_base == MAP_FAILED) {
-    XELOGE("MapViewsMac: Failed to reserve {} bytes of address space",
-           total_size);
+    XELOGE("MapViewsMac: Failed to reserve {} bytes of address space: {} ({})",
+           total_size, errno, strerror(errno));
     return 1;
   }
   XELOGD("MapViewsMac: Reserved {} bytes at {:p}", total_size, reserved_base);
 
-  // Step 2: Unmap the reservation. This frees the address space but we know
-  // these addresses are available. We'll immediately remap with file views.
-  if (munmap(reserved_base, total_size) != 0) {
-    XELOGE("MapViewsMac: Failed to unmap reserved region");
-    return 1;
-  }
-
-  // Step 3: Map each file view at fixed addresses within the reserved range.
+  // Step 2: Map each file view at fixed addresses within the reserved range.
   uint8_t* mapping_base = reinterpret_cast<uint8_t*>(reserved_base);
   uint64_t granularity_mask = ~uint64_t(system_allocation_granularity_ - 1);
 
@@ -368,9 +387,13 @@ int Memory::MapViewsMac() {
 
     if (result == MAP_FAILED || result != target_address) {
       XELOGE(
-          "MapViewsMac: Failed to map view {} at {:p} (size {}, offset {:X})",
-          n, target_address, view_size, file_offset);
-      UnmapViews();
+          "MapViewsMac: Failed to map view {} at {:p} (size {}, offset {:X}): "
+          "{} ({})",
+          n, target_address, view_size, file_offset, errno, strerror(errno));
+      munmap(reserved_base, total_size);
+      for (auto& view : views_.all_views) {
+        view = nullptr;
+      }
       return 1;
     }
 
@@ -574,6 +597,9 @@ bool Memory::AccessViolationCallback(
   }
   uint32_t virtual_address = HostToGuestVirtual(host_address);
   BaseHeap* heap = LookupHeap(virtual_address);
+  if (!heap) {
+    return false;
+  }
   if (heap->heap_type() != HeapType::kGuestPhysical) {
     return false;
   }
@@ -584,8 +610,16 @@ bool Memory::AccessViolationCallback(
   // Will be rounded to physical page boundaries internally, so just pass 1 as
   // the length - guranteed not to cross page boundaries also.
   auto physical_heap = static_cast<PhysicalHeap*>(heap);
-  return physical_heap->TriggerCallbacks(std::move(global_lock_locked_once),
-                                         virtual_address, 1, is_write, false);
+  bool handled = physical_heap->TriggerCallbacks(
+      std::move(global_lock_locked_once), virtual_address, 1, is_write, false);
+  if (!handled && cvars::log_physical_heap_faults) {
+    XELOGE(
+        "Unhandled physical heap fault: guest=0x{:08X} host=0x{:016X} "
+        "heap_base=0x{:08X} heap_size=0x{:08X} write={}",
+        virtual_address, reinterpret_cast<uintptr_t>(host_address),
+        heap->heap_base(), heap->heap_size(), is_write);
+  }
+  return handled;
 }
 
 bool Memory::AccessViolationCallbackThunk(
@@ -1047,6 +1081,24 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
                           uint32_t allocation_type, uint32_t protect,
                           bool top_down, uint32_t* out_address) {
   *out_address = 0;
+  uint32_t original_low_address = low_address;
+  uint32_t original_high_address = high_address;
+  auto log_failure = [&](const char* reason) {
+    if (!cvars::log_heap_alloc_failures) {
+      return;
+    }
+    XELOGE(
+        "AllocRange failed ({}): heap={} base=0x{:08X} size=0x{:08X} "
+        "page_size=0x{:X} req=0x{:08X} align=0x{:08X} low=0x{:08X} "
+        "high=0x{:08X} top_down={}",
+        reason, HeapTypeToString(heap_type_), heap_base_, heap_size_,
+        page_size_, size, alignment, low_address, high_address, top_down);
+    if (original_low_address != low_address ||
+        original_high_address != high_address) {
+      XELOGE("AllocRange request bounds: low=0x{:08X} high=0x{:08X}",
+             original_low_address, original_high_address);
+    }
+  };
 
   alignment = xe::round_up(alignment, page_size_);
   uint32_t page_count = get_page_count(size, page_size_);
@@ -1061,6 +1113,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
 
   if (page_count > (high_page_number - low_page_number)) {
     XELOGE("BaseHeap::Alloc page count too big for requested range");
+    log_failure("page_count");
     return false;
   }
 
@@ -1150,6 +1203,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
     // Out of memory.
     XELOGE("BaseHeap::Alloc failed to find contiguous range");
     assert_always("Heap exhausted!");
+    log_failure("contiguous_range");
     return false;
   }
 
