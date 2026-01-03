@@ -22,6 +22,8 @@ namespace xboxkrnl {
 uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr);
 uint32_t xeNtClearEvent(uint32_t handle);
 
+uint32_t NtClose(uint32_t handle);
+
 uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, xe::be<uint32_t>* handles,
                                       uint32_t wait_type, uint32_t wait_mode,
                                       uint32_t alertable,

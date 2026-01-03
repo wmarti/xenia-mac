@@ -148,6 +148,20 @@ dword_result_t ObDereferenceObject_entry(dword_t native_ptr) {
 }
 DECLARE_XBOXKRNL_EXPORT1(ObDereferenceObject, kNone, kImplemented);
 
+void ObReferenceObject_entry(dword_t native_ptr) {
+  auto object = XObject::GetNativeObject<XObject>(
+      kernel_state(), kernel_memory()->TranslateVirtual(native_ptr));
+  if (object) {
+    object->RetainHandle();
+  } else {
+    if (native_ptr) {
+      XELOGW("Unregistered guest object provided to ObReferenceObject {:08X}",
+             native_ptr.value());
+    }
+  }
+}
+DECLARE_XBOXKRNL_EXPORT1(ObReferenceObject, kNone, kImplemented);
+
 dword_result_t ObCreateSymbolicLink_entry(pointer_t<X_ANSI_STRING> path_ptr,
                                           pointer_t<X_ANSI_STRING> target_ptr) {
   auto path = xe::utf8::canonicalize_guest_path(
@@ -202,8 +216,12 @@ dword_result_t NtDuplicateObject_entry(dword_t handle, lpdword_t new_handle_ptr,
 }
 DECLARE_XBOXKRNL_EXPORT1(NtDuplicateObject, kNone, kImplemented);
 
-dword_result_t NtClose_entry(dword_t handle) {
+uint32_t NtClose(uint32_t handle) {
   return kernel_state()->object_table()->ReleaseHandle(handle);
+}
+
+dword_result_t NtClose_entry(dword_t handle) {
+  return NtClose(handle);
 }
 DECLARE_XBOXKRNL_EXPORT1(NtClose, kNone, kImplemented);
 
