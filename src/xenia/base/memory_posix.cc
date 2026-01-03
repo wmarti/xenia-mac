@@ -12,6 +12,11 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if XE_PLATFORM_MAC
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach/vm_region.h>
+#endif
 #include <cstddef>
 #include <cerrno>
 
@@ -214,7 +219,54 @@ bool Protect(void* base_address, size_t length, PageAccess access,
 }
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+#if XE_PLATFORM_MAC
+  access_out = PageAccess::kNoAccess;
+
+  mach_vm_address_t address =
+      static_cast<mach_vm_address_t>(reinterpret_cast<uintptr_t>(base_address));
+  mach_vm_size_t region_size = 0;
+  vm_region_basic_info_data_64_t info;
+  mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object_name = MACH_PORT_NULL;
+
+  kern_return_t kr =
+      mach_vm_region(mach_task_self(), &address, &region_size,
+                     VM_REGION_BASIC_INFO_64,
+                     reinterpret_cast<vm_region_info_t>(&info), &info_count,
+                     &object_name);
+
+  if (object_name != MACH_PORT_NULL) {
+    mach_port_deallocate(mach_task_self(), object_name);
+  }
+
+  if (kr != KERN_SUCCESS) {
+    return false;
+  }
+
+  length = static_cast<size_t>(region_size);
+
+  const vm_prot_t prot = info.protection;
+  const bool can_read = (prot & VM_PROT_READ) != 0;
+  const bool can_write = (prot & VM_PROT_WRITE) != 0;
+  const bool can_execute = (prot & VM_PROT_EXECUTE) != 0;
+
+  if (can_write) {
+    access_out = can_execute ? PageAccess::kExecuteReadWrite
+                             : PageAccess::kReadWrite;
+  } else if (can_read) {
+    access_out = can_execute ? PageAccess::kExecuteReadOnly
+                             : PageAccess::kReadOnly;
+  } else if (can_execute) {
+    access_out = PageAccess::kExecuteReadOnly;
+  } else {
+    access_out = PageAccess::kNoAccess;
+  }
+
+  return true;
+#else
+  access_out = PageAccess::kNoAccess;
   return false;
+#endif
 }
 
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,

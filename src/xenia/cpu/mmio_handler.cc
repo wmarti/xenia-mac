@@ -435,9 +435,13 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     // clears the watch we just hit).
     // Do this under the lock so we don't introduce another race condition.
     auto lock = global_critical_region_.Acquire();
-    memory::PageAccess cur_access;
+    memory::PageAccess cur_access = memory::PageAccess::kNoAccess;
     size_t page_length = memory::page_size();
-    memory::QueryProtect(fault_host_address, page_length, cur_access);
+    if (!memory::QueryProtect(fault_host_address, page_length, cur_access)) {
+      // QueryProtect isn't implemented on all POSIX targets. Assume the page
+      // is still protected so we don't skip the callback.
+      cur_access = memory::PageAccess::kNoAccess;
+    }
     if (cur_access != memory::PageAccess::kNoAccess &&
         (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
       // Another thread has cleared this watch. Abort.
