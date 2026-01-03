@@ -255,7 +255,7 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
     return;
   }
   if (immediate_drawer_) {
-    GetIO().Fonts->TexID = ImTextureID{};
+    GetIO().Fonts->TexID = ImTextureID(0);
     font_texture_.reset();
   }
   immediate_drawer_ = new_immediate_drawer;
