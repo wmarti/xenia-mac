@@ -64,6 +64,11 @@ class SDLInputDriver final : public InputDriver {
     // the last time (ms) a down (and/or repeat) event for that button was send:
     uint32_t repeat_time;
   };
+  struct KeyboardState {
+    X_INPUT_GAMEPAD gamepad;
+    uint32_t packet_number;
+    bool is_active;
+  };
 
   void HandleEvent(const SDL_Event& event);
   void OnControllerDeviceAdded(const SDL_Event& event);
@@ -75,8 +80,19 @@ class SDLInputDriver final : public InputDriver {
   std::optional<size_t> GetControllerIndexFromInstanceID(
       SDL_JoystickID instance_id);
   ControllerState* GetControllerState(uint32_t user_index);
+  bool HasAnyControllerLocked() const;
   bool TestSDLVersion() const;
   void UpdateXCapabilities(ControllerState& state);
+  void UpdateKeyboardCapabilities(X_INPUT_CAPABILITIES* out_caps);
+  bool ReadKeyboardGamepad(X_INPUT_GAMEPAD* out_gamepad);
+  X_RESULT GetStateFromKeyboard(X_INPUT_STATE* out_state);
+  X_RESULT GetKeystrokeFromKeyboard(uint32_t user_index,
+                                    X_INPUT_KEYSTROKE* out_keystroke,
+                                    bool user_any);
+  X_RESULT GetKeystrokeFromGamepad(uint32_t user_index,
+                                   const X_INPUT_GAMEPAD& gamepad,
+                                   bool is_active,
+                                   X_INPUT_KEYSTROKE* out_keystroke);
   void QueueControllerUpdate();
 
   bool sdl_events_initialized_;
@@ -86,6 +102,10 @@ class SDLInputDriver final : public InputDriver {
   std::array<ControllerState, HID_SDL_USER_COUNT> controllers_;
   std::mutex controllers_mutex_;
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
+  KeyboardState keyboard_state_{};
+  bool logged_keyboard_fallback_ = false;
+  uint64_t keyboard_autostart_deadline_ms_ = 0;
+  bool logged_keyboard_autostart_ = false;
 };
 
 }  // namespace sdl
