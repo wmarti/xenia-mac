@@ -18,6 +18,7 @@
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/base/string.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/cpu/export_resolver.h"
 #include "xenia/cpu/ppc/ppc_context.h"
@@ -92,6 +93,11 @@ inline std::string_view TranslateAnsiString(const Memory* memory,
   return std::string_view(
       memory->TranslateVirtual<const char*>(ansi_string->pointer),
       ansi_string->length);
+}
+
+inline std::string TranslateAnsiPath(const Memory* memory,
+                                     const X_ANSI_STRING* ansi_string) {
+  return std::string(TranslateAnsiString(memory, ansi_string));
 }
 
 inline std::string_view TranslateAnsiStringAddress(const Memory* memory,

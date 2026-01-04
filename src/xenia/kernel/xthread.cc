@@ -24,6 +24,7 @@ extern "C" {
 #endif
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -43,6 +44,8 @@ DEFINE_bool(ignore_thread_priorities, true,
             "Ignores game-specified thread priorities.", "Kernel");
 DEFINE_bool(ignore_thread_affinities, true,
             "Ignores game-specified thread affinities.", "Kernel");
+DEFINE_bool(log_xthread_start, false,
+            "Log XThread start addresses/contexts (debugging).", "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -567,6 +570,22 @@ class reenter_exception {
 void XThread::Execute() {
   XELOGKERNEL("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X})",
               thread_id_, handle(), thread_name_, thread_->system_id());
+  if (cvars::log_xthread_start) {
+    XELOGI(
+        "XThread start: id=0x{:08X} handle=0x{:08X} name='{}' "
+        "start=0x{:08X} context=0x{:08X} xapi_start=0x{:08X} flags=0x{:08X}",
+        thread_id_, handle(), thread_name_, creation_params_.start_address,
+        creation_params_.start_context, creation_params_.xapi_thread_startup,
+        creation_params_.creation_flags);
+    if (auto* processor = kernel_state()->processor()) {
+      for (auto* module : processor->GetModules()) {
+        if (module && module->ContainsAddress(creation_params_.start_address)) {
+          XELOGI("  XThread start module='{}'", module->name());
+          break;
+        }
+      }
+    }
+  }
 
   // Let the kernel know we are starting.
   kernel_state()->OnThreadExecute(this);

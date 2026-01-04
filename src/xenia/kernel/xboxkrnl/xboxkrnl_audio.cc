@@ -8,6 +8,7 @@
  */
 
 #include "xenia/apu/audio_system.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
@@ -15,9 +16,21 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/xbox.h"
 
+#include <mutex>
+#include <unordered_set>
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+DEFINE_bool(log_xaudio_calls, false,
+            "Log first XAudio render driver calls (debugging).", "Kernel");
+
+namespace {
+std::mutex xaudio_log_mutex;
+std::unordered_set<uint32_t> xaudio_logged_mask;
+std::unordered_set<uint32_t> xaudio_logged_submit;
+}  // namespace
 
 dword_result_t XAudioGetSpeakerConfig_entry(lpdword_t config_ptr) {
   *config_ptr = 0x00010001;
@@ -30,6 +43,19 @@ dword_result_t XAudioGetVoiceCategoryVolumeChangeMask_entry(
   assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
 
   xe::threading::MaybeYield();
+
+  if (cvars::log_xaudio_calls) {
+    const uint32_t driver_value = driver_ptr.guest_address();
+    bool should_log = false;
+    {
+      std::lock_guard<std::mutex> lock(xaudio_log_mutex);
+      should_log = xaudio_logged_mask.insert(driver_value).second;
+    }
+    if (should_log) {
+      XELOGI("XAudioGetVoiceCategoryVolumeChangeMask: driver=0x{:08X}",
+             driver_value);
+    }
+  }
 
   // Checking these bits to see if any voice volume changed.
   // I think.
@@ -67,6 +93,12 @@ dword_result_t XAudioRegisterRenderDriverClient_entry(lpdword_t callback_ptr,
 
   assert_true(!(index & ~0x0000FFFF));
   *driver_ptr = 0x41550000 | (static_cast<uint32_t>(index) & 0x0000FFFF);
+  if (cvars::log_xaudio_calls) {
+    XELOGI(
+        "XAudioRegisterRenderDriverClient: callback=0x{:08X} arg=0x{:08X} "
+        "driver=0x{:08X}",
+        callback, callback_arg, *driver_ptr);
+  }
   return X_ERROR_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(XAudioRegisterRenderDriverClient, kAudio,
@@ -88,6 +120,18 @@ dword_result_t XAudioSubmitRenderDriverFrame_entry(lpunknown_t driver_ptr,
   assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
 
   auto audio_system = kernel_state()->emulator()->audio_system();
+  if (cvars::log_xaudio_calls) {
+    const uint32_t driver_value = driver_ptr.guest_address();
+    bool should_log = false;
+    {
+      std::lock_guard<std::mutex> lock(xaudio_log_mutex);
+      should_log = xaudio_logged_submit.insert(driver_value).second;
+    }
+    if (should_log) {
+      XELOGI("XAudioSubmitRenderDriverFrame: driver=0x{:08X}",
+             driver_value);
+    }
+  }
   audio_system->SubmitFrame(driver_ptr.guest_address() & 0x0000FFFF,
                             samples_ptr);
 

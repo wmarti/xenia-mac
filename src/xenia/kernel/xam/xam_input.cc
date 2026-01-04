@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/hid/input.h"
@@ -27,6 +28,10 @@ using xe::hid::X_INPUT_VIBRATION;
 
 constexpr uint32_t XINPUT_FLAG_GAMEPAD = 0x01;
 constexpr uint32_t XINPUT_FLAG_ANY_USER = 1 << 30;
+
+DEFINE_bool(log_xam_input_get_state, false,
+            "Log the first XamInputGetState call per user (debugging).",
+            "Kernel");
 
 void XamResetInactivity_entry() {
   // Do we need to do anything?
@@ -102,7 +107,24 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
   }
 
   auto input_system = kernel_state()->emulator()->input_system();
-  return input_system->GetState(user_index, input_state);
+  auto result = input_system->GetState(actual_user_index, input_state);
+  if (cvars::log_xam_input_get_state) {
+    static std::atomic<uint32_t> logged_mask{0};
+    const uint32_t mask = 1u << (actual_user_index & 0x1F);
+    uint32_t prev = logged_mask.load(std::memory_order_relaxed);
+    while ((prev & mask) == 0) {
+      if (logged_mask.compare_exchange_weak(
+              prev, prev | mask, std::memory_order_relaxed,
+              std::memory_order_relaxed)) {
+        XELOGI(
+            "XamInputGetState: user={} flags=0x{:08X} result=0x{:08X}",
+            actual_user_index, static_cast<uint32_t>(flags),
+            static_cast<uint32_t>(result));
+        break;
+      }
+    }
+  }
+  return result;
 }
 DECLARE_XAM_EXPORT2(XamInputGetState, kInput, kImplemented, kHighFrequency);
 
@@ -120,7 +142,7 @@ dword_result_t XamInputSetState_entry(dword_t user_index, dword_t unk,
   }
 
   auto input_system = kernel_state()->emulator()->input_system();
-  return input_system->SetState(user_index, vibration);
+  return input_system->SetState(actual_user_index, vibration);
 }
 DECLARE_XAM_EXPORT1(XamInputSetState, kInput, kImplemented);
 

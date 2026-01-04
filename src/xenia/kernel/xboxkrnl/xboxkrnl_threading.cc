@@ -8,13 +8,20 @@
  */
 
 #include <algorithm>
+#include <mutex>
+#include <unordered_set>
 #include <vector>
 
 #include "xenia/base/atomic.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
+#include "xenia/base/string_buffer.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
+#include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -27,9 +34,65 @@
 #include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
 
+DEFINE_bool(log_ke_release_pc, false,
+            "Log the guest PC/LR for the first KeReleaseSemaphore call per "
+            "guest thread (debugging).",
+            "Kernel");
+DEFINE_bool(log_ke_wait_result, false,
+            "Log the first KeWaitForSingleObject return per "
+            "(thread,handle) pair (debugging, all object types).",
+            "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+namespace {
+
+std::mutex ke_release_log_mutex;
+std::unordered_set<uint32_t> ke_release_logged_threads;
+std::mutex ke_init_log_mutex;
+std::unordered_set<uint32_t> ke_init_logged_semaphores;
+std::mutex ke_wait_log_mutex;
+std::unordered_set<uint64_t> ke_wait_logged;
+std::mutex ke_wait_result_mutex;
+std::unordered_set<uint64_t> ke_wait_result_logged;
+
+void LogGuestStackOnce(xe::cpu::ThreadState* thread_state,
+                       uint32_t max_frames) {
+  auto* context = thread_state->context();
+  auto* memory = thread_state->memory();
+  uint32_t sp = static_cast<uint32_t>(context->r[1]);
+  XELOGW("  guest stack (r1=0x{:08X})", sp);
+  for (uint32_t frame = 0; frame < max_frames && sp; ++frame) {
+    if (!memory->LookupHeap(sp)) {
+      XELOGW("    [{}] sp=0x{:08X} (unmapped)", frame, sp);
+      break;
+    }
+    auto sp_ptr = memory->TranslateVirtual<uint32_t*>(sp);
+    if (!sp_ptr) {
+      XELOGW("    [{}] sp=0x{:08X} (untranslatable)", frame, sp);
+      break;
+    }
+    uint32_t back_chain = xe::load_and_swap<uint32_t>(sp_ptr);
+    uint32_t saved_lr = xe::load_and_swap<uint32_t>(sp_ptr + 2);
+    XELOGW("    [{}] sp=0x{:08X} lr=0x{:08X} back=0x{:08X}", frame, sp,
+           saved_lr, back_chain);
+    auto functions = thread_state->processor()->FindFunctionsWithAddress(
+        saved_lr);
+    if (!functions.empty()) {
+      const auto* fn = functions.front();
+      XELOGW("         lr fn [0x{:08X},0x{:08X}) name='{}'", fn->address(),
+             fn->end_address(), fn->name());
+    }
+    if (!back_chain || back_chain <= sp) {
+      break;
+    }
+    sp = back_chain;
+  }
+}
+
+}  // namespace
 
 // r13 + 0x100: pointer to thread local state
 // Thread local state:
@@ -548,6 +611,49 @@ void KeInitializeSemaphore_entry(pointer_t<X_KSEMAPHORE> semaphore_ptr,
     assert_always();
     return;
   }
+
+  if (cvars::log_ke_release_pc) {
+    auto* thread = XThread::GetCurrentThread();
+    auto* thread_state = thread ? thread->thread_state() : nullptr;
+    auto* context = thread_state ? thread_state->context() : nullptr;
+    if (thread && context) {
+      const uint32_t guest_lr = static_cast<uint32_t>(context->lr);
+      const uint32_t sem_guest = semaphore_ptr.guest_address();
+      bool should_log = false;
+      {
+        std::lock_guard<std::mutex> lock(ke_init_log_mutex);
+        should_log = ke_init_logged_semaphores.insert(sem_guest).second;
+      }
+      if (should_log) {
+        XELOGW(
+            "KeInitializeSemaphore: thread='{}' id=0x{:08X} lr=0x{:08X} "
+            "sem=0x{:08X} count=0x{:08X} limit=0x{:08X}",
+            thread->name(), thread->thread_id(), guest_lr, sem_guest,
+            static_cast<uint32_t>(count), static_cast<uint32_t>(limit));
+        if (auto* memory = kernel_state()->memory()) {
+          uint32_t disasm_addr = guest_lr;
+          for (uint32_t i = 0; i < 6; ++i, disasm_addr += 4) {
+            if (!memory->LookupHeap(disasm_addr)) {
+              XELOGW("  init lr+0x{:02X} 0x{:08X}: (unmapped)", i * 4,
+                     disasm_addr);
+              break;
+            }
+            auto code_ptr = memory->TranslateVirtual<uint32_t*>(disasm_addr);
+            if (!code_ptr) {
+              XELOGW("  init lr+0x{:02X} 0x{:08X}: (untranslatable)", i * 4,
+                     disasm_addr);
+              break;
+            }
+            uint32_t code = xe::load_and_swap<uint32_t>(code_ptr);
+            xe::StringBuffer disasm;
+            xe::cpu::ppc::DisasmPPC(disasm_addr, code, &disasm);
+            XELOGW("  init lr+0x{:02X} 0x{:08X}: {}", i * 4, disasm_addr,
+                   disasm.to_string());
+          }
+        }
+      }
+    }
+  }
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInitializeSemaphore, kThreading, kImplemented);
 
@@ -558,6 +664,123 @@ uint32_t xeKeReleaseSemaphore(X_KSEMAPHORE* semaphore_ptr, uint32_t increment,
   if (!sem) {
     assert_always();
     return 0;
+  }
+
+  if (cvars::log_ke_release_pc) {
+    auto* thread = XThread::GetCurrentThread();
+    auto* thread_state = thread ? thread->thread_state() : nullptr;
+    auto* context = thread_state ? thread_state->context() : nullptr;
+    if (thread && context) {
+      const uint32_t thread_id = thread->thread_id();
+      bool should_log = false;
+      {
+        std::lock_guard<std::mutex> lock(ke_release_log_mutex);
+        should_log = ke_release_logged_threads.insert(thread_id).second;
+      }
+      if (should_log) {
+        const uint32_t guest_lr = static_cast<uint32_t>(context->lr);
+        uint32_t sem_guest = 0;
+        if (auto* memory = kernel_state()->memory()) {
+          sem_guest = memory->HostToGuestVirtual(semaphore_ptr);
+        }
+        XELOGW(
+            "KeReleaseSemaphore first call: thread='{}' id=0x{:08X} "
+            "lr=0x{:08X} sem={:p} guest=0x{:08X} handle=0x{:08X} name='{}' "
+            "adj=0x{:08X} wait=0x{:08X}",
+            thread->name(), thread_id, guest_lr,
+            static_cast<void*>(semaphore_ptr), sem_guest, sem->handle(),
+            sem->name(), adjustment, wait);
+        LogGuestStackOnce(thread_state, 6);
+        if (auto* memory = thread_state->memory()) {
+          uint32_t r31 = static_cast<uint32_t>(context->r[31]);
+          uint32_t r31_field = r31 + 0x12C;
+          if (r31 && memory->LookupHeap(r31_field)) {
+            auto field_ptr = memory->TranslateVirtual<uint32_t*>(r31_field);
+            if (field_ptr) {
+              uint32_t field_value = xe::load_and_swap<uint32_t>(field_ptr);
+              XELOGW("  r31=0x{:08X} [r31+0x12C]=0x{:08X}", r31, field_value);
+              if (field_value && memory->LookupHeap(field_value)) {
+                auto value_ptr = memory->TranslateVirtual<uint32_t*>(field_value);
+                if (value_ptr) {
+                  XELOGW("  [0x{:08X}] = {:08X} {:08X} {:08X} {:08X}",
+                         field_value,
+                         xe::load_and_swap<uint32_t>(value_ptr + 0),
+                         xe::load_and_swap<uint32_t>(value_ptr + 1),
+                         xe::load_and_swap<uint32_t>(value_ptr + 2),
+                         xe::load_and_swap<uint32_t>(value_ptr + 3));
+                } else {
+                  XELOGW("  [0x{:08X}] = <untranslatable>", field_value);
+                }
+              } else if (field_value) {
+                XELOGW("  [0x{:08X}] = <unmapped>", field_value);
+              }
+            } else {
+              XELOGW("  r31=0x{:08X} [r31+0x12C]=<untranslatable>", r31);
+            }
+          } else {
+            XELOGW("  r31=0x{:08X} [r31+0x12C]=<unmapped>", r31);
+          }
+        }
+        if (auto* memory = thread_state->memory()) {
+          uint32_t disasm_addr = guest_lr;
+          for (uint32_t i = 0; i < 6; ++i, disasm_addr += 4) {
+            if (!memory->LookupHeap(disasm_addr)) {
+              XELOGW("  lr+0x{:02X} 0x{:08X}: (unmapped)", i * 4, disasm_addr);
+              break;
+            }
+            auto code_ptr = memory->TranslateVirtual<uint32_t*>(disasm_addr);
+            if (!code_ptr) {
+              XELOGW("  lr+0x{:02X} 0x{:08X}: (untranslatable)", i * 4,
+                     disasm_addr);
+              break;
+            }
+            uint32_t code = xe::load_and_swap<uint32_t>(code_ptr);
+            xe::StringBuffer disasm;
+            xe::cpu::ppc::DisasmPPC(disasm_addr, code, &disasm);
+            XELOGW("  lr+0x{:02X} 0x{:08X}: {}", i * 4, disasm_addr,
+                   disasm.to_string());
+          }
+        }
+        auto* processor = thread_state->processor();
+        auto functions = processor->FindFunctionsWithAddress(guest_lr);
+        if (!functions.empty()) {
+          const auto* fn = functions.front();
+          XELOGW("  lr function [0x{:08X},0x{:08X}) name='{}'", fn->address(),
+                 fn->end_address(), fn->name());
+          if (auto* memory = kernel_state()->memory()) {
+            uint32_t addr = fn->address();
+            uint32_t end = fn->end_address();
+            if (end > addr + 0x100) {
+              end = addr + 0x100;
+            }
+            XELOGW("  lr function disasm (max 0x100 bytes):");
+            for (; addr < end; addr += 4) {
+              if (!memory->LookupHeap(addr)) {
+                XELOGW("    0x{:08X}: (unmapped)", addr);
+                break;
+              }
+              auto code_ptr = memory->TranslateVirtual<uint32_t*>(addr);
+              if (!code_ptr) {
+                XELOGW("    0x{:08X}: (untranslatable)", addr);
+                break;
+              }
+              uint32_t code = xe::load_and_swap<uint32_t>(code_ptr);
+              xe::StringBuffer disasm;
+              xe::cpu::ppc::DisasmPPC(addr, code, &disasm);
+              XELOGW("    0x{:08X}: {}", addr, disasm.to_string());
+            }
+          }
+        } else {
+          XELOGW("  lr function: unresolved");
+        }
+        for (auto* module : processor->GetModules()) {
+          if (module && module->ContainsAddress(guest_lr)) {
+            XELOGW("  lr module='{}'", module->name());
+            break;
+          }
+        }
+      }
+    }
   }
 
   // TODO(benvanik): increment thread priority?
@@ -787,8 +1010,76 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
     return X_STATUS_ABANDONED_WAIT_0;
   }
 
+  if (cvars::log_ke_release_pc &&
+      object->type() == XObject::Type::Semaphore) {
+    auto* thread = XThread::GetCurrentThread();
+    auto* thread_state = thread ? thread->thread_state() : nullptr;
+    auto* context = thread_state ? thread_state->context() : nullptr;
+    if (thread && context) {
+      uint64_t key = (uint64_t(thread->thread_id()) << 32) | object->handle();
+      bool should_log = false;
+      {
+        std::lock_guard<std::mutex> lock(ke_wait_log_mutex);
+        should_log = ke_wait_logged.insert(key).second;
+      }
+      if (should_log) {
+        const uint32_t guest_lr = static_cast<uint32_t>(context->lr);
+        XELOGW(
+            "KeWaitForSingleObject: thread='{}' id=0x{:08X} lr=0x{:08X} "
+            "handle=0x{:08X} guest=0x{:08X} name='{}' reason=0x{:08X}",
+            thread->name(), thread->thread_id(), guest_lr, object->handle(),
+            object->guest_object(), object->name(), wait_reason);
+        if (auto* memory = kernel_state()->memory()) {
+          uint32_t disasm_addr = guest_lr;
+          for (uint32_t i = 0; i < 6; ++i, disasm_addr += 4) {
+            if (!memory->LookupHeap(disasm_addr)) {
+              XELOGW("  wait lr+0x{:02X} 0x{:08X}: (unmapped)", i * 4,
+                     disasm_addr);
+              break;
+            }
+            auto code_ptr = memory->TranslateVirtual<uint32_t*>(disasm_addr);
+            if (!code_ptr) {
+              XELOGW("  wait lr+0x{:02X} 0x{:08X}: (untranslatable)", i * 4,
+                     disasm_addr);
+              break;
+            }
+            uint32_t code = xe::load_and_swap<uint32_t>(code_ptr);
+            xe::StringBuffer disasm;
+            xe::cpu::ppc::DisasmPPC(disasm_addr, code, &disasm);
+            XELOGW("  wait lr+0x{:02X} 0x{:08X}: {}", i * 4, disasm_addr,
+                   disasm.to_string());
+          }
+        }
+      }
+    }
+  }
+
   X_STATUS result =
       object->Wait(wait_reason, processor_mode, alertable, timeout_ptr);
+
+  if (cvars::log_ke_wait_result) {
+    auto* thread = XThread::GetCurrentThread();
+    auto* thread_state = thread ? thread->thread_state() : nullptr;
+    auto* context = thread_state ? thread_state->context() : nullptr;
+    if (thread && thread_state) {
+      uint64_t key = (uint64_t(thread->thread_id()) << 32) | object->handle();
+      bool should_log = false;
+      {
+        std::lock_guard<std::mutex> lock(ke_wait_result_mutex);
+        should_log = ke_wait_result_logged.insert(key).second;
+      }
+      if (should_log) {
+        const uint32_t guest_lr =
+            context ? static_cast<uint32_t>(context->lr) : 0;
+        XELOGW(
+            "KeWaitForSingleObject result: thread='{}' id=0x{:08X} lr=0x{:08X} "
+            "handle=0x{:08X} guest=0x{:08X} type={} name='{}' status=0x{:08X}",
+            thread->name(), thread->thread_id(), guest_lr, object->handle(),
+            object->guest_object(), static_cast<int>(object->type()),
+            object->name(), result);
+      }
+    }
+  }
 
   return result;
 }
@@ -817,6 +1108,30 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
     result =
         object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
+  if (cvars::log_ke_wait_result) {
+    auto* thread = XThread::GetCurrentThread();
+    auto* thread_state = thread ? thread->thread_state() : nullptr;
+    auto* context = thread_state ? thread_state->context() : nullptr;
+      if (thread && thread_state) {
+        uint64_t key = (uint64_t(thread->thread_id()) << 32) | object->handle();
+        bool should_log = false;
+        {
+          std::lock_guard<std::mutex> lock(ke_wait_result_mutex);
+          should_log = ke_wait_result_logged.insert(key).second;
+        }
+        if (should_log) {
+          const uint32_t guest_lr =
+              context ? static_cast<uint32_t>(context->lr) : 0;
+          XELOGW(
+              "NtWaitForSingleObjectEx result: thread='{}' id=0x{:08X} "
+              "lr=0x{:08X} handle=0x{:08X} guest=0x{:08X} type={} name='{}' "
+              "status=0x{:08X}",
+              thread->name(), thread->thread_id(), guest_lr, object->handle(),
+              object->guest_object(), static_cast<int>(object->type()),
+              object->name(), result);
+        }
+      }
+    }
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
