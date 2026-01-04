@@ -117,6 +117,8 @@ project("xenia-app")
   filter("platforms:Mac")
     local metal_converter_libdir =
         path.getabsolute(path.join(project_root, "third_party/metal-shader-converter/lib"))
+    local dxilconv_libdir =
+        path.getabsolute(path.join(project_root, "third_party/DirectXShaderCompiler/build_dxilconv_macos/lib"))
     -- Use the mac-specific windowed app entrypoint (avoid posix stub).
     removefiles({ "../ui/windowed_app_main_posix.cc" })
     files({ "../ui/windowed_app_main_mac.cc" })
@@ -174,6 +176,8 @@ project("xenia-app")
       "xenia-ui-metal",
       "metal-cpp",
       "metalirconverter",
+      "dxilconv",
+      "LLVMDxcSupport",
       "SDL2",
       "Metal.framework",
       "MetalKit.framework",
@@ -181,11 +185,13 @@ project("xenia-app")
     })
     libdirs({
       metal_converter_libdir,
+      dxilconv_libdir,
       "/usr/local/lib",
     })
     runpathdirs({
       "@executable_path/../Frameworks",
       metal_converter_libdir,
+      dxilconv_libdir,
       "/usr/local/lib",
     })
     linkoptions({
@@ -197,6 +203,9 @@ project("xenia-app")
       'mkdir -p "${TARGET_BUILD_DIR}/xenia.app/Contents/Frameworks"',
       'cp -f "' ..
           path.join(metal_converter_libdir, "libmetalirconverter.dylib") ..
+          '" "${TARGET_BUILD_DIR}/xenia.app/Contents/Frameworks/"',
+      'cp -f "' ..
+          path.join(dxilconv_libdir, "libdxilconv.dylib") ..
           '" "${TARGET_BUILD_DIR}/xenia.app/Contents/Frameworks/"'
     })
     files({
