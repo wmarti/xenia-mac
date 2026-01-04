@@ -7,9 +7,11 @@
  ******************************************************************************
  */
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
+#include "xenia/base/string.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/info/file.h"
 #include "xenia/kernel/kernel_state.h"
@@ -18,14 +20,39 @@
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xfile.h"
 #include "xenia/kernel/xiocompletion.h"
+#include "xenia/kernel/user_module.h"
 #include "xenia/kernel/xsymboliclink.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/vfs/device.h"
+#include "xenia/vfs/devices/disc_image_device.h"
+#include "xenia/vfs/devices/stfs_container_device.h"
 #include "xenia/xbox.h"
 
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+DEFINE_bool(log_io_dismount, false,
+            "Log IoDismountVolume* requests and device mount paths.",
+            "Kernel");
+
+namespace {
+
+bool IsDismountableDevice(const vfs::Device* device) {
+  if (!device) {
+    return false;
+  }
+  const auto& mount_path = device->mount_path();
+  if (xe::utf8::equal_case(mount_path, "\\Device\\Cdrom0") ||
+      xe::utf8::equal_case(mount_path, "\\Device\\Harddisk0\\Partition1") ||
+      xe::utf8::equal_case(mount_path, "\\Device\\Harddisk0")) {
+    return false;
+  }
+  return dynamic_cast<const vfs::DiscImageDevice*>(device) != nullptr ||
+         dynamic_cast<const vfs::StfsContainerDevice*>(device) != nullptr;
+}
+
+}  // namespace
 
 struct CreateOptions {
   // https://processhacker.sourceforge.io/doc/ntioapi_8h.html
@@ -95,6 +122,39 @@ static bool IsValidPath(const std::string_view s, bool is_pattern) {
   return true;
 }
 
+static bool IsGuestAbsolutePath(const std::string_view path) {
+  if (path.empty()) {
+    return false;
+  }
+  if (path.find(':') != std::string_view::npos) {
+    return true;
+  }
+  return xe::utf8::starts_with_case(path, "\\Device\\") ||
+         xe::utf8::starts_with_case(path, "\\??\\") ||
+         xe::utf8::starts_with_case(path, "\\GLOBAL??\\") ||
+         xe::utf8::starts_with_case(path, "\\CACHE0") ||
+         xe::utf8::starts_with_case(path, "\\CACHE1") ||
+         xe::utf8::starts_with_case(path, "\\CACHE");
+}
+
+static std::string ResolveRelativePathToExecutable(
+    const std::string_view path) {
+  auto executable = kernel_state()->GetExecutableModule();
+  if (!executable) {
+    return std::string(path);
+  }
+  auto base_path = xe::utf8::find_base_guest_path(executable->path());
+  if (base_path.empty()) {
+    return std::string(path);
+  }
+  std::string relative(path);
+  while (!relative.empty() &&
+         (relative.front() == '\\' || relative.front() == '/')) {
+    relative.erase(relative.begin());
+  }
+  return xe::utf8::join_guest_paths(base_path, relative);
+}
+
 dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
                                   pointer_t<X_OBJECT_ATTRIBUTES> object_attrs,
                                   pointer_t<X_IO_STATUS_BLOCK> io_status_block,
@@ -134,6 +194,10 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
     assert_true(root_file->type() == XObject::Type::File);
 
     root_entry = root_file->entry();
+  }
+
+  if (!root_entry && !IsGuestAbsolutePath(target_path)) {
+    target_path = ResolveRelativePathToExecutable(target_path);
   }
 
   // Attempt open (or create).
@@ -710,6 +774,110 @@ dword_result_t NtDeviceIoControlFile_entry(
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtDeviceIoControlFile, kFileSystem, kStub);
+
+dword_result_t IoDismountVolume_entry(dword_t volume_handle) {
+  if (!volume_handle) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
+  auto file =
+      kernel_state()->object_table()->LookupObject<XFile>(volume_handle);
+  if (!file) {
+    return X_STATUS_INVALID_HANDLE;
+  }
+
+  auto device = file->device();
+  if (!device) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
+  if (cvars::log_io_dismount) {
+    XELOGI("IoDismountVolume: handle=0x{:08X} device='{}' mount='{}'",
+           volume_handle, device->name(), device->mount_path());
+  }
+
+  if (!IsDismountableDevice(device)) {
+    return X_STATUS_SUCCESS;
+  }
+
+  auto file_system = kernel_state()->file_system();
+  if (!file_system->UnregisterDevice(device->mount_path())) {
+    return X_STATUS_OBJECT_NAME_NOT_FOUND;
+  }
+
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(IoDismountVolume, kFileSystem, kImplemented);
+
+dword_result_t IoDismountVolumeByFileHandle_entry(dword_t file_handle) {
+  if (!file_handle) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
+  auto file = kernel_state()->object_table()->LookupObject<XFile>(file_handle);
+  if (!file) {
+    return X_STATUS_INVALID_HANDLE;
+  }
+
+  auto device = file->device();
+  if (!device) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
+  if (cvars::log_io_dismount) {
+    XELOGI("IoDismountVolumeByFileHandle: handle=0x{:08X} device='{}' mount='{}'",
+           file_handle, device->name(), device->mount_path());
+  }
+
+  if (!IsDismountableDevice(device)) {
+    return X_STATUS_SUCCESS;
+  }
+
+  auto file_system = kernel_state()->file_system();
+  if (!file_system->UnregisterDevice(device->mount_path())) {
+    return X_STATUS_OBJECT_NAME_NOT_FOUND;
+  }
+
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(IoDismountVolumeByFileHandle, kFileSystem,
+                         kImplemented);
+
+dword_result_t IoDismountVolumeByName_entry(
+    pointer_t<X_ANSI_STRING> volume_name) {
+  if (!volume_name) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
+  auto volume_path = util::TranslateAnsiString(kernel_memory(), volume_name);
+  if (volume_path.empty()) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
+  if (cvars::log_io_dismount) {
+    XELOGI("IoDismountVolumeByName: path='{}'", volume_path);
+  }
+
+  auto file_system = kernel_state()->file_system();
+  auto normalized = xe::utf8::canonicalize_guest_path(volume_path);
+  auto entry = file_system->ResolvePath(normalized);
+  if (entry && entry->device()) {
+    if (!IsDismountableDevice(entry->device())) {
+      return X_STATUS_SUCCESS;
+    }
+    if (file_system->UnregisterDevice(entry->device()->mount_path())) {
+      file_system->UnregisterSymbolicLink(normalized);
+      return X_STATUS_SUCCESS;
+    }
+  }
+
+  if (file_system->UnregisterSymbolicLink(normalized)) {
+    return X_STATUS_SUCCESS;
+  }
+
+  return X_STATUS_OBJECT_NAME_NOT_FOUND;
+}
+DECLARE_XBOXKRNL_EXPORT1(IoDismountVolumeByName, kFileSystem, kImplemented);
 
 dword_result_t IoCreateDevice_entry(dword_t device_struct, dword_t r4,
                                     dword_t r5, dword_t r6, dword_t r7,

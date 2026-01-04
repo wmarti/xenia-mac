@@ -64,7 +64,6 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
     XELOGI("HostPathDevice::ResolvePath mount={} path={} host_root={}",
            mount_path_, path, host_path_.string());
   }
-  XELOGFS("HostPathDevice::ResolvePath({})", path);
   return root_entry_->ResolvePath(path);
 }
 

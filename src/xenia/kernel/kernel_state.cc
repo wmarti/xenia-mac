@@ -14,6 +14,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/cpu/processor.h"
@@ -27,6 +28,9 @@
 #include "xenia/kernel/xnotifylistener.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
+
+DEFINE_bool(log_module_load_failures, false,
+            "Log user module load failures with status codes.", "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -246,12 +250,63 @@ object_ref<XModule> KernelState::GetModule(const std::string_view name,
     }
   }
 
-  auto path(name);
+  for (auto user_module : user_modules_) {
+    if (user_module->Matches(name)) {
+      return retain_object(user_module.get());
+    }
+  }
 
-  // Resolve the path to an absolute path.
-  auto entry = file_system_->ResolvePath(name);
-  if (entry) {
-    path = entry->absolute_path();
+  bool looks_like_path =
+      name.find('\\') != std::string_view::npos ||
+      name.find('/') != std::string_view::npos ||
+      name.find(':') != std::string_view::npos;
+  if (!looks_like_path) {
+    return nullptr;
+  }
+
+  const auto is_guest_absolute = [](const std::string_view path) {
+    if (path.empty()) {
+      return false;
+    }
+    if (path.find(':') != std::string_view::npos) {
+      return true;
+    }
+    return xe::utf8::starts_with_case(path, "\\Device\\") ||
+           xe::utf8::starts_with_case(path, "\\??\\") ||
+           xe::utf8::starts_with_case(path, "\\GLOBAL??\\") ||
+           xe::utf8::starts_with_case(path, "\\CACHE0") ||
+           xe::utf8::starts_with_case(path, "\\CACHE1") ||
+           xe::utf8::starts_with_case(path, "\\CACHE");
+  };
+
+  auto path = std::string(name);
+  vfs::Entry* entry = nullptr;
+
+  if (!is_guest_absolute(name)) {
+    auto executable = GetExecutableModule();
+    if (executable) {
+      auto base_path = xe::utf8::find_base_guest_path(executable->path());
+      if (!base_path.empty()) {
+        auto relative = std::string(name);
+        while (!relative.empty() &&
+               (relative.front() == '\\' || relative.front() == '/')) {
+          relative.erase(relative.begin());
+        }
+        auto candidate = xe::utf8::join_guest_paths(base_path, relative);
+        entry = file_system_->ResolvePath(candidate);
+        if (entry) {
+          path = entry->absolute_path();
+        }
+      }
+    }
+  }
+
+  if (!entry) {
+    // Resolve the path to an absolute path.
+    entry = file_system_->ResolvePath(name);
+    if (entry) {
+      path = entry->absolute_path();
+    }
   }
 
   for (auto user_module : user_modules_) {
@@ -401,11 +456,66 @@ object_ref<UserModule> KernelState::LoadUserModule(
     const std::string_view raw_name, bool call_entry) {
   // Some games try to load relative to launch module, others specify full path.
   auto name = xe::utf8::find_name_from_guest_path(raw_name);
-  std::string path(raw_name);
-  if (name == raw_name) {
+  bool has_path = name != raw_name;
+  bool has_extension = name.find('.') != std::string_view::npos;
+
+  std::vector<std::string> candidate_names;
+  candidate_names.reserve(has_extension ? 1 : 3);
+  if (has_extension) {
+    candidate_names.emplace_back(raw_name);
+  } else {
+    candidate_names.emplace_back(std::string(raw_name) + ".xex");
+    candidate_names.emplace_back(std::string(raw_name) + ".dll");
+    candidate_names.emplace_back(raw_name);
+  }
+
+  std::string base_path;
+  std::string caller_base_path;
+  if (!has_path) {
     assert_not_null(executable_module_);
-    path = xe::utf8::join_guest_paths(
-        xe::utf8::find_base_guest_path(executable_module_->path()), name);
+    base_path = xe::utf8::find_base_guest_path(executable_module_->path());
+
+    if (auto* current_thread = XThread::GetCurrentThread()) {
+      if (auto* thread_state = current_thread->thread_state()) {
+        auto* context = thread_state->context();
+        uint32_t lr_guest = static_cast<uint32_t>(context->lr);
+        if (lr_guest) {
+          auto global_lock = global_critical_region_.Acquire();
+          for (auto& user_module : user_modules_) {
+            auto* xex_module = user_module->xex_module();
+            if (xex_module && xex_module->ContainsAddress(lr_guest)) {
+              caller_base_path =
+                  xe::utf8::find_base_guest_path(user_module->path());
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<std::string> candidate_paths;
+  candidate_paths.reserve(candidate_names.size() * 3);
+  auto add_candidate = [&](std::string value) {
+    for (const auto& existing : candidate_paths) {
+      if (xe::utf8::equal_case(existing, value)) {
+        return;
+      }
+    }
+    candidate_paths.emplace_back(std::move(value));
+  };
+  if (!has_path && !caller_base_path.empty()) {
+    for (const auto& candidate : candidate_names) {
+      add_candidate(xe::utf8::join_guest_paths(caller_base_path, candidate));
+    }
+  }
+  if (!has_path && !base_path.empty()) {
+    for (const auto& candidate : candidate_names) {
+      add_candidate(xe::utf8::join_guest_paths(base_path, candidate));
+    }
+  }
+  for (const auto& candidate : candidate_names) {
+    add_candidate(std::string(candidate));
   }
 
   object_ref<UserModule> module;
@@ -413,19 +523,31 @@ object_ref<UserModule> KernelState::LoadUserModule(
     auto global_lock = global_critical_region_.Acquire();
 
     // See if we've already loaded it
-    for (auto& existing_module : user_modules_) {
-      if (existing_module->path() == path) {
-        return existing_module;
+    for (const auto& candidate_path : candidate_paths) {
+      for (auto& existing_module : user_modules_) {
+        if (xe::utf8::equal_case(existing_module->path(), candidate_path)) {
+          return existing_module;
+        }
       }
     }
 
     global_lock.unlock();
 
     // Module wasn't loaded, so load it.
-    module = object_ref<UserModule>(new UserModule(this));
-    X_STATUS status = module->LoadFromFile(path);
-    if (XFAILED(status)) {
+    for (const auto& candidate_path : candidate_paths) {
+      module = object_ref<UserModule>(new UserModule(this));
+      X_STATUS status = module->LoadFromFile(candidate_path);
+      if (XSUCCEEDED(status)) {
+        break;
+      }
+      if (cvars::log_module_load_failures) {
+        XELOGW("LoadUserModule failed: path='{}' status=0x{:08X}",
+               candidate_path, status);
+      }
       object_table()->ReleaseHandle(module->handle());
+      module.reset();
+    }
+    if (!module) {
       return nullptr;
     }
 

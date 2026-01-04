@@ -296,6 +296,35 @@ X_STATUS Emulator::TerminateTitle() {
 }
 
 X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
+  std::error_code ec;
+  if (std::filesystem::is_directory(path, ec) && !ec) {
+    auto default_xex = path / "default.xex";
+    if (std::filesystem::exists(default_xex, ec) && !ec) {
+      auto mount_path = "\\Device\\Cdrom0";
+
+      auto device =
+          std::make_unique<vfs::HostPathDevice>(mount_path, path, true);
+      if (!device->Initialize()) {
+        XELOGE("Unable to scan host path");
+        return X_STATUS_NO_SUCH_FILE;
+      }
+      if (!file_system_->RegisterDevice(std::move(device))) {
+        XELOGE("Unable to register host path");
+        return X_STATUS_NO_SUCH_FILE;
+      }
+
+      file_system_->UnregisterSymbolicLink("game:");
+      file_system_->UnregisterSymbolicLink("d:");
+      file_system_->RegisterSymbolicLink("game:", mount_path);
+      file_system_->RegisterSymbolicLink("d:", mount_path);
+
+      auto module_path(FindLaunchModule());
+      return CompleteLaunch(path, module_path);
+    }
+
+    return LaunchStfsContainer(path);
+  }
+
   // Launch based on file type.
   // This is a silly guess based on file extension.
   if (!path.has_extension()) {
@@ -336,6 +365,8 @@ X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
   }
 
   // Create symlinks to the device.
+  file_system_->UnregisterSymbolicLink("game:");
+  file_system_->UnregisterSymbolicLink("d:");
   file_system_->RegisterSymbolicLink("game:", mount_path);
   file_system_->RegisterSymbolicLink("d:", mount_path);
 
@@ -362,6 +393,8 @@ X_STATUS Emulator::LaunchDiscImage(const std::filesystem::path& path) {
   }
 
   // Create symlinks to the device.
+  file_system_->UnregisterSymbolicLink("game:");
+  file_system_->UnregisterSymbolicLink("d:");
   file_system_->RegisterSymbolicLink("game:", mount_path);
   file_system_->RegisterSymbolicLink("d:", mount_path);
 
@@ -385,6 +418,8 @@ X_STATUS Emulator::LaunchStfsContainer(const std::filesystem::path& path) {
     return X_STATUS_NO_SUCH_FILE;
   }
 
+  file_system_->UnregisterSymbolicLink("game:");
+  file_system_->UnregisterSymbolicLink("d:");
   file_system_->RegisterSymbolicLink("game:", mount_path);
   file_system_->RegisterSymbolicLink("d:", mount_path);
 

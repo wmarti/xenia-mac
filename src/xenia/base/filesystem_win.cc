@@ -264,5 +264,9 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
   return result;
 }
 
+bool SetAttributes(const std::filesystem::path& path, uint64_t attributes) {
+  return SetFileAttributes(path.c_str(), static_cast<DWORD>(attributes));
+}
+
 }  // namespace filesystem
 }  // namespace xe

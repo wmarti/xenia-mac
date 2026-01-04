@@ -9,6 +9,8 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <fstream>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -532,8 +534,56 @@ void EmulatorApp::EmulatorThread() {
   }
 
   if (cvars::mount_cache) {
+    const auto& cache_root = emulator_->cache_root();
+    auto cache0_root = cache_root / "cache0";
+    auto cache1_root = cache_root / "cache1";
+    auto cache_root_device = cache_root;
+
+    auto ensure_cache_maps =
+        [](const std::filesystem::path& cache_root_path,
+           std::initializer_list<std::string_view> extra_dirs) {
+          std::error_code ec;
+          std::filesystem::create_directories(cache_root_path, ec);
+          if (ec) {
+            XELOGW("Failed to create cache root {}: {}", cache_root_path.string(),
+                   ec.message());
+          }
+          for (uint32_t i = 0; i < 16; ++i) {
+            ec.clear();
+            auto map_dir = cache_root_path / fmt::format("cache{:03}.map", i);
+            if (std::filesystem::exists(map_dir, ec) && !ec &&
+                !std::filesystem::is_directory(map_dir, ec)) {
+              std::filesystem::remove(map_dir, ec);
+              if (ec) {
+                XELOGW("Failed to remove cache map file {}: {}",
+                       map_dir.string(), ec.message());
+                continue;
+              }
+            }
+            ec.clear();
+            std::filesystem::create_directories(map_dir, ec);
+            if (ec) {
+              XELOGW("Failed to create cache map {}: {}", map_dir.string(),
+                     ec.message());
+            }
+          }
+          for (const auto& dir_name : extra_dirs) {
+            ec.clear();
+            auto dir_path = cache_root_path / std::filesystem::path(dir_name);
+            std::filesystem::create_directories(dir_path, ec);
+            if (ec) {
+              XELOGW("Failed to create cache dir {}: {}", dir_path.string(),
+                     ec.message());
+            }
+          }
+        };
+
+    ensure_cache_maps(cache0_root, {"crash_report", "maps"});
+    ensure_cache_maps(cache1_root, {"crash_report", "savegames"});
+
     auto cache0_device =
-        std::make_unique<xe::vfs::HostPathDevice>("\\CACHE0", "cache0", false);
+        std::make_unique<xe::vfs::HostPathDevice>("\\CACHE0", cache0_root,
+                                                  false);
     if (!cache0_device->Initialize()) {
       XELOGE("Unable to scan cache0 path");
     } else {
@@ -541,11 +591,16 @@ void EmulatorApp::EmulatorThread() {
         XELOGE("Unable to register cache0 path");
       } else {
         emulator_->file_system()->RegisterSymbolicLink("cache0:", "\\CACHE0");
+        emulator_->file_system()->RegisterSymbolicLink("\\Device\\cache0",
+                                                       "\\CACHE0");
+        emulator_->file_system()->RegisterSymbolicLink(
+            "\\Device\\Harddisk0\\Cache0", "\\CACHE0");
       }
     }
 
     auto cache1_device =
-        std::make_unique<xe::vfs::HostPathDevice>("\\CACHE1", "cache1", false);
+        std::make_unique<xe::vfs::HostPathDevice>("\\CACHE1", cache1_root,
+                                                  false);
     if (!cache1_device->Initialize()) {
       XELOGE("Unable to scan cache1 path");
     } else {
@@ -553,6 +608,10 @@ void EmulatorApp::EmulatorThread() {
         XELOGE("Unable to register cache1 path");
       } else {
         emulator_->file_system()->RegisterSymbolicLink("cache1:", "\\CACHE1");
+        emulator_->file_system()->RegisterSymbolicLink("\\Device\\cache1",
+                                                       "\\CACHE1");
+        emulator_->file_system()->RegisterSymbolicLink(
+            "\\Device\\Harddisk0\\Cache1", "\\CACHE1");
       }
     }
 
@@ -560,8 +619,8 @@ void EmulatorApp::EmulatorThread() {
     // NOTE: this must be registered _after_ the cache0/cache1 devices, due to
     // substring/start_with logic inside VirtualFileSystem::ResolvePath, else
     // accesses to those devices will go here instead
-    auto cache_device =
-        std::make_unique<xe::vfs::HostPathDevice>("\\CACHE", "cache", false);
+    auto cache_device = std::make_unique<xe::vfs::HostPathDevice>(
+        "\\CACHE", cache_root_device, false);
     if (!cache_device->Initialize()) {
       XELOGE("Unable to scan cache path");
     } else {
@@ -569,6 +628,10 @@ void EmulatorApp::EmulatorThread() {
         XELOGE("Unable to register cache path");
       } else {
         emulator_->file_system()->RegisterSymbolicLink("cache:", "\\CACHE");
+        emulator_->file_system()->RegisterSymbolicLink("\\Device\\cache",
+                                                       "\\CACHE");
+        emulator_->file_system()->RegisterSymbolicLink(
+            "\\Device\\Harddisk0\\Cache", "\\CACHE");
       }
     }
   }

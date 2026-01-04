@@ -10,6 +10,7 @@
 #ifndef XENIA_KERNEL_XFILE_H_
 #define XENIA_KERNEL_XFILE_H_
 
+#include <filesystem>
 #include <string>
 
 #include "xenia/kernel/xevent.h"
@@ -22,6 +23,49 @@
 
 namespace xe {
 namespace kernel {
+
+static bool IsValidPath(const std::string_view s, bool is_pattern) {
+  bool got_asterisk = false;
+  for (const auto& c : s) {
+    if (c <= 31 || c >= 127) {
+      return false;
+    }
+    if (got_asterisk) {
+      // * must be followed by a . (*.)
+      if (c != '.') {
+        return false;
+      }
+      got_asterisk = false;
+    }
+    switch (c) {
+      case '"':
+      case '+':
+      case ',':
+      case '<':
+      case '>':
+      case '|': {
+        return false;
+      }
+      case '*': {
+        if (!is_pattern) {
+          return false;
+        }
+        got_asterisk = true;
+        break;
+      }
+      case '?': {
+        if (!is_pattern) {
+          return false;
+        }
+        break;
+      }
+      default: {
+        break;
+      }
+    }
+  }
+  return true;
+}
 
 // https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_io_status_block
 struct X_IO_STATUS_BLOCK {
@@ -110,6 +154,7 @@ class XFile : public XObject {
                  uint32_t apc_context);
 
   X_STATUS SetLength(size_t length);
+  X_STATUS Rename(const std::filesystem::path file_path);
 
   void RegisterIOCompletionPort(uint32_t key, object_ref<XIOCompletion> port);
   void RemoveIOCompletionPort(uint32_t key);

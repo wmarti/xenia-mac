@@ -25,7 +25,8 @@ Entry::Entry(Device* device, Entry* parent, const std::string_view path)
       allocation_size_(0),
       create_timestamp_(0),
       access_timestamp_(0),
-      write_timestamp_(0) {
+      write_timestamp_(0),
+      delete_on_close_(false) {
   assert_not_null(device);
   absolute_path_ = xe::utf8::join_guest_paths(device->mount_path(), path);
   name_ = xe::utf8::find_name_from_guest_path(path);
@@ -131,6 +132,28 @@ bool Entry::Delete() {
 
 void Entry::Touch() {
   // TODO(benvanik): update timestamps.
+}
+
+void Entry::Rename(const std::filesystem::path file_path) {
+  std::vector<std::string_view> splitted_path =
+      xe::utf8::split_path(xe::path_to_utf8(file_path));
+
+  if (splitted_path.empty()) {
+    return;
+  }
+
+  // Strip root so we're left with the guest path relative to the device mount.
+  splitted_path.erase(splitted_path.begin());
+
+  const std::string guest_path_without_root =
+      xe::utf8::join_guest_paths(splitted_path);
+
+  RenameEntryInternal(guest_path_without_root);
+
+  absolute_path_ = xe::utf8::join_guest_paths(device_->mount_path(),
+                                              guest_path_without_root);
+  path_ = guest_path_without_root;
+  name_ = xe::path_to_utf8(file_path.filename());
 }
 
 }  // namespace vfs

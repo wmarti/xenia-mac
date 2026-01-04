@@ -40,10 +40,34 @@ XModule::~XModule() {
 }
 
 bool XModule::Matches(const std::string_view name) const {
-  return xe::utf8::equal_case(xe::utf8::find_name_from_guest_path(path()),
-                              name) ||
+  if (name.empty()) {
+    return false;
+  }
+
+  auto module_path = path();
+  auto module_name = xe::utf8::find_name_from_guest_path(module_path);
+  auto requested_name = xe::utf8::find_name_from_guest_path(name);
+
+  auto strip_extension = [](const std::string_view value) {
+    auto dot = value.find_last_of('.');
+    if (dot == std::string_view::npos) {
+      return value;
+    }
+    return value.substr(0, dot);
+  };
+
+  auto module_base = strip_extension(module_name);
+  auto requested_base = strip_extension(requested_name);
+
+  return xe::utf8::equal_case(module_name, name) ||
+         xe::utf8::equal_case(module_name, requested_name) ||
+         xe::utf8::equal_case(module_base, name) ||
+         xe::utf8::equal_case(module_base, requested_name) ||
+         xe::utf8::equal_case(module_base, requested_base) ||
          xe::utf8::equal_case(this->name(), name) ||
-         xe::utf8::equal_case(path(), name);
+         xe::utf8::equal_case(this->name(), requested_name) ||
+         xe::utf8::equal_case(this->name(), requested_base) ||
+         xe::utf8::equal_case(module_path, name);
 }  // namespace kernel
 
 void XModule::OnLoad() { kernel_state_->RegisterModule(this); }

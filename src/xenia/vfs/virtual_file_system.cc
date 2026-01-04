@@ -9,12 +9,54 @@
 
 #include "xenia/vfs/virtual_file_system.h"
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/kernel/xfile.h"
 
 namespace xe {
 namespace vfs {
+
+DEFINE_bool(log_cache_open_failures, false,
+            "Log cache0:/cache1:/cache: open failures in VFS.", "VFS");
+DEFINE_bool(log_cache_resolve_failures, false,
+            "Log cache0/cache1/cache ResolvePath misses in VFS.", "VFS");
+DEFINE_bool(enable_relative_path_fallback, false,
+            "Fallback to game:\\ for relative guest paths.", "VFS");
+DEFINE_bool(enable_cache_path_remap, false,
+            "Remap \\Device\\Harddisk0\\Cache* to \\CACHE*.", "VFS");
+
+namespace {
+
+bool IsGuestAbsolutePath(const std::string_view path) {
+  if (path.empty()) {
+    return false;
+  }
+  if (path.find(':') != std::string_view::npos) {
+    return true;
+  }
+  return xe::utf8::starts_with_case(path, "\\Device\\") ||
+         xe::utf8::starts_with_case(path, "\\??\\") ||
+         xe::utf8::starts_with_case(path, "\\GLOBAL??\\") ||
+         xe::utf8::starts_with_case(path, "\\CACHE0") ||
+         xe::utf8::starts_with_case(path, "\\CACHE1") ||
+         xe::utf8::starts_with_case(path, "\\CACHE");
+}
+
+std::string MakeGameRelativePath(const std::string_view path) {
+  if (path.empty()) {
+    return std::string();
+  }
+  if (xe::utf8::starts_with_case(path, "game:")) {
+    return std::string(path);
+  }
+  if (path.front() == '\\' || path.front() == '/') {
+    return std::string("game:") + std::string(path);
+  }
+  return std::string("game:\\") + std::string(path);
+}
+
+}  // namespace
 
 VirtualFileSystem::VirtualFileSystem() {}
 
@@ -82,6 +124,12 @@ bool VirtualFileSystem::ResolveSymbolicLink(const std::string_view path,
                                             std::string& result) {
   result = path;
   bool was_resolved = false;
+  const bool log_cache_symlink =
+      cvars::log_cache_resolve_failures &&
+      xe::utf8::starts_with_case(result, "\\Device\\Harddisk0\\Cache");
+  if (log_cache_symlink) {
+    XELOGW("ResolveSymbolicLink cache: input={}", result);
+  }
   while (true) {
     auto it =
         std::find_if(symlinks_.cbegin(), symlinks_.cend(), [&](const auto& s) {
@@ -95,6 +143,13 @@ bool VirtualFileSystem::ResolveSymbolicLink(const std::string_view path,
     auto relative_path = result.substr((*it).first.size());
     result = target_path + relative_path;
     was_resolved = true;
+    if (log_cache_symlink) {
+      XELOGW("ResolveSymbolicLink cache: matched {} => {} (relative={})",
+             (*it).first, target_path, relative_path);
+    }
+  }
+  if (log_cache_symlink && was_resolved) {
+    XELOGW("ResolveSymbolicLink cache: output={}", result);
   }
   return was_resolved;
 }
@@ -111,23 +166,52 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
     normalized_path = resolved_path;
   }
 
-  // Find the device.
-  auto it =
-      std::find_if(devices_.cbegin(), devices_.cend(), [&](const auto& d) {
-        return xe::utf8::starts_with(normalized_path, d->mount_path());
-      });
-  if (it == devices_.cend()) {
-    // Supress logging the error for ShaderDumpxe:\CompareBackEnds as this is
-    // not an actual problem nor something we care about.
-    if (path != "ShaderDumpxe:\\CompareBackEnds") {
-      XELOGE("ResolvePath({}) failed - device not found", path);
+  const auto resolve_with_candidate =
+      [&](const std::string& candidate) -> Entry* {
+    auto it = std::find_if(
+        devices_.cbegin(), devices_.cend(), [&](const auto& d) {
+          return xe::utf8::starts_with(candidate, d->mount_path());
+        });
+    if (it == devices_.cend()) {
+      return nullptr;
     }
-    return nullptr;
+    const auto& device = *it;
+    auto relative_path = candidate.substr(device->mount_path().size());
+    auto entry = device->ResolvePath(relative_path);
+    if (!entry && cvars::log_cache_resolve_failures) {
+      const auto& mount_path = device->mount_path();
+      if (xe::utf8::equal_case(mount_path, "\\CACHE0") ||
+          xe::utf8::equal_case(mount_path, "\\CACHE1") ||
+          xe::utf8::equal_case(mount_path, "\\CACHE")) {
+        XELOGW("Cache ResolvePath miss: path={} rel={}", candidate,
+               relative_path);
+      }
+    }
+    return entry;
+  };
+
+  if (auto entry = resolve_with_candidate(normalized_path)) {
+    return entry;
   }
 
-  const auto& device = *it;
-  auto relative_path = normalized_path.substr(device->mount_path().size());
-  return device->ResolvePath(relative_path);
+  if (cvars::enable_relative_path_fallback &&
+      !IsGuestAbsolutePath(normalized_path)) {
+    auto fallback_path = MakeGameRelativePath(normalized_path);
+    std::string resolved_fallback;
+    if (ResolveSymbolicLink(fallback_path, resolved_fallback)) {
+      fallback_path = resolved_fallback;
+    }
+    if (auto entry = resolve_with_candidate(fallback_path)) {
+      return entry;
+    }
+  }
+
+  // Supress logging the error for ShaderDumpxe:\CompareBackEnds as this is
+  // not an actual problem nor something we care about.
+  if (path != "ShaderDumpxe:\\CompareBackEnds") {
+    XELOGE("ResolvePath({}) failed - device not found", path);
+  }
+  return nullptr;
 }
 
 Entry* VirtualFileSystem::CreatePath(const std::string_view path,
@@ -192,12 +276,52 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
     desired_access |= FileAccess::kFileReadData | FileAccess::kFileWriteData;
   }
 
+  std::string resolved_path(path);
+  const auto has_device = [&](const std::string_view mount_path) {
+    return std::any_of(devices_.cbegin(), devices_.cend(),
+                       [&](const auto& device) {
+                         return xe::utf8::equal_case(device->mount_path(),
+                                                     mount_path);
+                       });
+  };
+
+  const auto remap_harddisk_cache =
+      [&](const std::string_view prefix,
+          const std::string_view target_mount) -> bool {
+    if (!xe::utf8::starts_with_case(resolved_path, prefix)) {
+      return false;
+    }
+    if (!has_device(target_mount)) {
+      return false;
+    }
+    const auto suffix = resolved_path.substr(prefix.size());
+    resolved_path = std::string(target_mount) + suffix;
+    return true;
+  };
+
+  if (cvars::enable_cache_path_remap) {
+    remap_harddisk_cache("\\Device\\Harddisk0\\Cache0", "\\CACHE0");
+    remap_harddisk_cache("\\Device\\Harddisk0\\Cache1", "\\CACHE1");
+    remap_harddisk_cache("\\Device\\Harddisk0\\Cache", "\\CACHE");
+    if (root_entry && root_entry->device() &&
+        xe::utf8::equal_case(root_entry->device()->mount_path(),
+                             "\\Device\\Harddisk0")) {
+      if (xe::utf8::starts_with_case(resolved_path, "\\Cache0") ||
+          xe::utf8::starts_with_case(resolved_path, "\\Cache1") ||
+          xe::utf8::starts_with_case(resolved_path, "\\Cache")) {
+        // Some titles pass absolute cache paths with a Harddisk0 root handle.
+        // Route those to the cache devices instead of resolving via NullDevice.
+        root_entry = nullptr;
+      }
+    }
+  }
+
   // Lookup host device/parent path.
   // If no device or parent, fail.
   Entry* parent_entry = nullptr;
   Entry* entry = nullptr;
 
-  auto base_path = xe::utf8::find_base_guest_path(path);
+  auto base_path = xe::utf8::find_base_guest_path(resolved_path);
   if (!base_path.empty()) {
     parent_entry = !root_entry ? ResolvePath(base_path)
                                : root_entry->ResolvePath(base_path);
@@ -206,10 +330,11 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
       return X_STATUS_NO_SUCH_FILE;
     }
 
-    auto file_name = xe::utf8::find_name_from_guest_path(path);
+    auto file_name = xe::utf8::find_name_from_guest_path(resolved_path);
     entry = parent_entry->GetChild(file_name);
   } else {
-    entry = !root_entry ? ResolvePath(path) : root_entry->GetChild(path);
+    entry =
+        !root_entry ? ResolvePath(resolved_path) : root_entry->GetChild(path);
   }
 
   if (entry) {
@@ -219,11 +344,27 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
   }
 
   // Check if exists (if we need it to), or that it doesn't (if it shouldn't).
+  const auto is_cache_path = [](const std::string_view p) {
+    return xe::utf8::starts_with_case(p, "cache0:") ||
+           xe::utf8::starts_with_case(p, "cache1:") ||
+           xe::utf8::starts_with_case(p, "cache:") ||
+           xe::utf8::starts_with_case(p, "\\\\CACHE0") ||
+           xe::utf8::starts_with_case(p, "\\\\CACHE1") ||
+           xe::utf8::starts_with_case(p, "\\\\CACHE");
+  };
+
   switch (creation_disposition) {
     case FileDisposition::kOpen:
     case FileDisposition::kOverwrite:
       // Must exist.
       if (!entry) {
+        if (cvars::log_cache_open_failures && is_cache_path(path)) {
+          XELOGW(
+              "Cache OpenFile miss: path={} disp={} access={:08X} is_dir={} "
+              "is_non_dir={}",
+              path, static_cast<uint32_t>(creation_disposition), desired_access,
+              is_directory, is_non_directory);
+        }
         *out_action = FileAction::kDoesNotExist;
         return X_STATUS_NO_SUCH_FILE;
       }
@@ -302,6 +443,13 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
   // Open.
   auto result = entry->Open(desired_access, out_file);
   if (XFAILED(result)) {
+    if (cvars::log_cache_open_failures && is_cache_path(path)) {
+      XELOGW(
+          "Cache OpenFile failed: path={} disp={} access={:08X} is_dir={} "
+          "is_non_dir={} status={:08X}",
+          path, static_cast<uint32_t>(creation_disposition), desired_access,
+          is_directory, is_non_directory, result);
+    }
     *out_action = FileAction::kDoesNotExist;
   }
   return result;

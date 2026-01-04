@@ -10,6 +10,7 @@
 #ifndef XENIA_VFS_ENTRY_H_
 #define XENIA_VFS_ENTRY_H_
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -93,6 +94,15 @@ class Entry {
   uint64_t create_timestamp() const { return create_timestamp_; }
   uint64_t access_timestamp() const { return access_timestamp_; }
   uint64_t write_timestamp() const { return write_timestamp_; }
+  bool delete_on_close() const { return delete_on_close_; }
+
+  virtual bool SetAttributes(uint64_t attributes) { return false; }
+  virtual bool SetCreateTimestamp(uint64_t timestamp) { return false; }
+  virtual bool SetAccessTimestamp(uint64_t timestamp) { return false; }
+  virtual bool SetWriteTimestamp(uint64_t timestamp) { return false; }
+  void SetForDeletion(bool delete_on_close) {
+    delete_on_close_ = delete_on_close;
+  }
 
   bool is_read_only() const;
 
@@ -111,6 +121,7 @@ class Entry {
   bool Delete();
   void Touch();
 
+  void Rename(const std::filesystem::path file_path);
   // If successful, out_file points to a new file. When finished, call
   // file->Destroy()
   virtual X_STATUS Open(uint32_t desired_access, File** out_file) = 0;
@@ -131,6 +142,7 @@ class Entry {
     return nullptr;
   }
   virtual bool DeleteEntryInternal(Entry* entry) { return false; }
+  virtual void RenameEntryInternal(const std::filesystem::path file_path) {}
 
   xe::global_critical_region global_critical_region_;
   Device* device_;
@@ -144,6 +156,7 @@ class Entry {
   uint64_t create_timestamp_;
   uint64_t access_timestamp_;
   uint64_t write_timestamp_;
+  bool delete_on_close_;
   std::vector<std::unique_ptr<Entry>> children_;
 };
 

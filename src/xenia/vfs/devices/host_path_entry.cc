@@ -9,16 +9,20 @@
 
 #include "xenia/vfs/devices/host_path_entry.h"
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string.h"
 #include "xenia/vfs/device.h"
+#include "xenia/vfs/devices/host_path_device.h"
 #include "xenia/vfs/devices/host_path_file.h"
 
 namespace xe {
 namespace vfs {
+
+DECLARE_bool(log_cache_open_failures);
 
 HostPathEntry::HostPathEntry(Device* device, Entry* parent,
                              const std::string_view path,
@@ -60,8 +64,27 @@ X_STATUS HostPathEntry::Open(uint32_t desired_access, File** out_file) {
   auto file_handle =
       xe::filesystem::FileHandle::OpenExisting(host_path_, desired_access);
   if (!file_handle) {
-    // TODO(benvanik): pick correct response.
-    return X_STATUS_NO_SUCH_FILE;
+    if (attributes_ & kFileAttributeDirectory) {
+      // Some titles open cache directories with write access flags. Fall back
+      // to read access so directory handles can be created on POSIX.
+      file_handle = xe::filesystem::FileHandle::OpenExisting(
+          host_path_, FileAccess::kGenericRead);
+    }
+    if (!file_handle) {
+      const auto& mount_path = device_->mount_path();
+      if (cvars::log_cache_open_failures &&
+          (xe::utf8::equal_case(mount_path, "\\CACHE0") ||
+           xe::utf8::equal_case(mount_path, "\\CACHE1") ||
+           xe::utf8::equal_case(mount_path, "\\CACHE"))) {
+        XELOGW(
+            "Cache HostPathEntry::Open failed: mount={} path={} host_path={} "
+            "is_dir={} access={:08X}",
+            mount_path, path(), xe::path_to_utf8(host_path_),
+            (attributes_ & kFileAttributeDirectory) != 0, desired_access);
+      }
+      // TODO(benvanik): pick correct response.
+      return X_STATUS_NO_SUCH_FILE;
+    }
   }
   *out_file = new HostPathFile(desired_access, this, std::move(file_handle));
   return X_STATUS_SUCCESS;
@@ -103,10 +126,31 @@ bool HostPathEntry::DeleteEntryInternal(Entry* entry) {
     auto removed = std::filesystem::remove_all(full_path, ec);
     return removed >= 1 && removed != static_cast<std::uintmax_t>(-1);
   } else {
-    // Delete file.
-    return !std::filesystem::is_directory(full_path) &&
-           std::filesystem::remove(full_path, ec);
+    // Skip directories, they were handled above.
+    if (std::filesystem::is_directory(full_path)) {
+      return false;
+    }
+
+    if (std::filesystem::exists(full_path)) {
+      const auto result = std::filesystem::remove(full_path, ec);
+      if (ec) {
+        XELOGE("{}: Cannot remove file entry. File: {} Error: {}", __func__,
+               full_path.string(), ec.message());
+        return false;
+      }
+      return result;
+    }
+    return true;
   }
+}
+
+void HostPathEntry::RenameEntryInternal(const std::filesystem::path file_path) {
+  const std::string new_host_path = xe::utf8::join_paths(
+      xe::path_to_utf8(static_cast<HostPathDevice*>(device_)->host_path()),
+      xe::path_to_utf8(file_path));
+
+  std::filesystem::rename(host_path_, new_host_path);
+  host_path_ = new_host_path;
 }
 
 void HostPathEntry::update() {
@@ -119,6 +163,48 @@ void HostPathEntry::update() {
     allocation_size_ =
         xe::round_up(file_info.total_size, device()->bytes_per_sector());
   }
+}
+
+bool HostPathEntry::SetAttributes(uint64_t attributes) {
+  if (device_->is_read_only()) {
+    return false;
+  }
+  return xe::filesystem::SetAttributes(host_path_, attributes);
+}
+
+bool HostPathEntry::SetCreateTimestamp(uint64_t timestamp) {
+  if (device_->is_read_only()) {
+    XELOGW(
+        "{} - Tried to change read-only creation timestamp for file: {} to: {}",
+        __func__, name_, timestamp);
+    return false;
+  }
+  XELOGI("{} - Tried to change creation timestamp for file: {} to: {}",
+         __func__, name_, timestamp);
+  return true;
+}
+
+bool HostPathEntry::SetAccessTimestamp(uint64_t timestamp) {
+  if (device_->is_read_only()) {
+    XELOGW(
+        "{} - Tried to change read-only access timestamp for file: {} to: {}",
+        __func__, name_, timestamp);
+    return false;
+  }
+  XELOGI("{} - Tried to change access timestamp for file: {} to: {}",
+         __func__, name_, timestamp);
+  return true;
+}
+
+bool HostPathEntry::SetWriteTimestamp(uint64_t timestamp) {
+  if (device_->is_read_only()) {
+    XELOGW("{} - Tried to change read-only write timestamp for file: {} to: {}",
+           __func__, name_, timestamp);
+    return false;
+  }
+  XELOGI("{} - Tried to change write timestamp for file: {} to: {}",
+         __func__, name_, timestamp);
+  return true;
 }
 
 }  // namespace vfs

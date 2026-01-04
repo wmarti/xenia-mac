@@ -123,6 +123,7 @@ struct FileInfo {
 };
 bool GetInfo(const std::filesystem::path& path, FileInfo* out_info);
 std::vector<FileInfo> ListFiles(const std::filesystem::path& path);
+bool SetAttributes(const std::filesystem::path& path, uint64_t attributes);
 
 #if XE_PLATFORM_ANDROID
 void AndroidInitialize();
