@@ -529,7 +529,6 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
     GuestOutputPaintFlow guest_output_flow = GetGuestOutputPaintFlow(
         guest_output_properties, drawable_width, drawable_height,
         drawable_width, drawable_height, guest_output_paint_config);
-
     if (guest_output_flow.effect_count &&
         EnsureGuestOutputPaintResources(
             uint32_t(drawable.texture.pixelFormat))) {
@@ -565,6 +564,10 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
         int32_t output_offset[2];
         float output_size_inv[2];
       } constants = {};
+      struct GuestOutputPaintConstantsFragment {
+        int32_t output_offset[2];
+        float output_size_inv[2];
+      } fragment_constants = {};
 
       float x_to_ndc = 2.0f / float(drawable_width);
       float y_to_ndc = 2.0f / float(drawable_height);
@@ -579,6 +582,14 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
       constants.output_offset[1] = bilinear_constants.output_offset[1];
       constants.output_size_inv[0] = bilinear_constants.output_size_inv[0];
       constants.output_size_inv[1] = bilinear_constants.output_size_inv[1];
+      fragment_constants.output_offset[0] =
+          bilinear_constants.output_offset[0];
+      fragment_constants.output_offset[1] =
+          bilinear_constants.output_offset[1];
+      fragment_constants.output_size_inv[0] =
+          bilinear_constants.output_size_inv[0];
+      fragment_constants.output_size_inv[1] =
+          bilinear_constants.output_size_inv[1];
 
       MTLViewport viewport;
       viewport.originX = 0.0;
@@ -602,8 +613,8 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
       [render_encoder setVertexBytes:&constants
                               length:sizeof(constants)
                              atIndex:0];
-      [render_encoder setFragmentBytes:&constants
-                                length:sizeof(constants)
+      [render_encoder setFragmentBytes:&fragment_constants
+                                length:sizeof(fragment_constants)
                                atIndex:0];
       [render_encoder setFragmentTexture:guest_output_texture atIndex:0];
       if (guest_output_sampler_) {
@@ -673,11 +684,141 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
   
   // End rendering
   [render_encoder endEncoding];
-  
+
+  if (want_paint_probe && guest_output_texture) {
+    id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device_;
+    paint_probe_format = guest_output_texture.pixelFormat;
+    paint_probe_width = static_cast<uint32_t>(guest_output_texture.width);
+    paint_probe_height = static_cast<uint32_t>(guest_output_texture.height);
+    if (mtl_device && paint_probe_width && paint_probe_height) {
+      paint_probe_buffer =
+          [mtl_device newBufferWithLength:8
+                                  options:MTLResourceStorageModeShared];
+      if (paint_probe_buffer) {
+        id<MTLBlitCommandEncoder> probe_blit =
+            [command_buffer blitCommandEncoder];
+        if (probe_blit) {
+          uint32_t mid_x = std::min<uint32_t>(paint_probe_width / 2,
+                                              paint_probe_width - 1);
+          uint32_t mid_y = std::min<uint32_t>(paint_probe_height / 2,
+                                              paint_probe_height - 1);
+          [probe_blit copyFromTexture:guest_output_texture
+                          sourceSlice:0
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(0, 0, 0)
+                           sourceSize:MTLSizeMake(1, 1, 1)
+                              toBuffer:paint_probe_buffer
+                     destinationOffset:0
+                destinationBytesPerRow:4
+              destinationBytesPerImage:4];
+          [probe_blit copyFromTexture:guest_output_texture
+                          sourceSlice:0
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(mid_x, mid_y, 0)
+                           sourceSize:MTLSizeMake(1, 1, 1)
+                              toBuffer:paint_probe_buffer
+                     destinationOffset:4
+                destinationBytesPerRow:4
+              destinationBytesPerImage:4];
+          [probe_blit endEncoding];
+          paint_probe_active = true;
+        } else {
+          XELOGW("Metal Paint probe: failed to create blit encoder");
+        }
+      } else {
+        XELOGW("Metal Paint probe: failed to allocate probe buffer");
+      }
+    }
+  }
+
   // Present the drawable
   [command_buffer presentDrawable:drawable];
   [command_buffer commit];
-  
+
+  if (paint_probe_active && paint_probe_buffer) {
+    [command_buffer waitUntilCompleted];
+    const uint8_t* bytes =
+        reinterpret_cast<const uint8_t*>([paint_probe_buffer contents]);
+    if (bytes) {
+      uint32_t packed_tl = uint32_t(bytes[0]) |
+                           (uint32_t(bytes[1]) << 8) |
+                           (uint32_t(bytes[2]) << 16) |
+                           (uint32_t(bytes[3]) << 24);
+      uint32_t packed_mid = uint32_t(bytes[4]) |
+                            (uint32_t(bytes[5]) << 8) |
+                            (uint32_t(bytes[6]) << 16) |
+                            (uint32_t(bytes[7]) << 24);
+      const bool is_rgba8 =
+          paint_probe_format == MTLPixelFormatRGBA8Unorm ||
+          paint_probe_format == MTLPixelFormatRGBA8Unorm_sRGB;
+      const bool is_bgra8 =
+          paint_probe_format == MTLPixelFormatBGRA8Unorm ||
+          paint_probe_format == MTLPixelFormatBGRA8Unorm_sRGB;
+      bool is_rgb10a2 = paint_probe_format == MTLPixelFormatRGB10A2Unorm;
+      bool is_bgr10a2 = false;
+#ifdef MTLPixelFormatRGB10A2Unorm_sRGB
+      if (paint_probe_format == MTLPixelFormatRGB10A2Unorm_sRGB) {
+        is_rgb10a2 = true;
+      }
+#endif
+#ifdef MTLPixelFormatBGR10A2Unorm
+      if (paint_probe_format == MTLPixelFormatBGR10A2Unorm) {
+        is_bgr10a2 = true;
+      }
+#endif
+#ifdef MTLPixelFormatBGR10A2Unorm_sRGB
+      if (paint_probe_format == MTLPixelFormatBGR10A2Unorm_sRGB) {
+        is_bgr10a2 = true;
+      }
+#endif
+      static uint64_t paint_probe_frame = 0;
+      ++paint_probe_frame;
+      auto log_rgba8 = [&](const char* pos, uint32_t packed, bool swap_rb) {
+        uint8_t r = packed & 0xFFu;
+        uint8_t g = (packed >> 8) & 0xFFu;
+        uint8_t b = (packed >> 16) & 0xFFu;
+        uint8_t a = (packed >> 24) & 0xFFu;
+        if (swap_rb) {
+          std::swap(r, b);
+        }
+        XELOGI(
+            "Metal Paint probe: frame={} {} fmt={} rgba8={:02X} {:02X} "
+            "{:02X} {:02X}",
+            paint_probe_frame, pos, int(paint_probe_format), r, g, b, a);
+      };
+      auto log_rgb10 = [&](const char* pos, uint32_t packed, bool swap_rb) {
+        uint32_t r = packed & 0x3FFu;
+        uint32_t g = (packed >> 10) & 0x3FFu;
+        uint32_t b = (packed >> 20) & 0x3FFu;
+        uint32_t a = (packed >> 30) & 0x3u;
+        if (swap_rb) {
+          std::swap(r, b);
+        }
+        auto to_8bpc = [](uint32_t value) -> uint8_t {
+          return static_cast<uint8_t>((value * 255u + 511u) / 1023u);
+        };
+        XELOGI(
+            "Metal Paint probe: frame={} {} fmt={} rgba8={:02X} {:02X} "
+            "{:02X} a2={}",
+            paint_probe_frame, pos, int(paint_probe_format), to_8bpc(r),
+            to_8bpc(g), to_8bpc(b), a);
+      };
+      if (is_rgba8 || is_bgra8) {
+        log_rgba8("tl", packed_tl, is_bgra8);
+        log_rgba8("mid", packed_mid, is_bgra8);
+      } else if (is_rgb10a2 || is_bgr10a2) {
+        log_rgb10("tl", packed_tl, is_bgr10a2);
+        log_rgb10("mid", packed_mid, is_bgr10a2);
+      } else {
+        XELOGI(
+            "Metal Paint probe: frame={} fmt={} packed_tl=0x{:08X} "
+            "packed_mid=0x{:08X}",
+            paint_probe_frame, int(paint_probe_format), packed_tl,
+            packed_mid);
+      }
+    }
+  }
+
   // XELOGI("Metal PaintAndPresentImpl: Frame presented successfully");
   return PaintResult::kPresented;
 }
