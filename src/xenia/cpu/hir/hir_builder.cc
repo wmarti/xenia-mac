@@ -14,6 +14,7 @@
 #include <cstring>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/hir/block.h"

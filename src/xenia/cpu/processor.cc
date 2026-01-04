@@ -21,6 +21,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/string_buffer.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/cpu_flags.h"
@@ -28,10 +29,15 @@
 #include "xenia/cpu/module.h"
 #include "xenia/cpu/ppc/ppc_decode_data.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/stack_walker.h"
 #include "xenia/cpu/thread.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/cpu/xex_module.h"
+
+#include <cstdlib>
+#include <mutex>
+#include <unordered_set>
 
 // TODO(benvanik): based on compiler support
 #ifdef XE_ARCH_AMD64
@@ -52,6 +58,137 @@ DEFINE_path(trace_function_data_path, "", "File to write trace data to.",
             "CPU");
 DEFINE_bool(break_on_start, false, "Break into the debugger on startup.",
             "CPU");
+DEFINE_string(log_guest_pc_once, "",
+              "Comma/space-separated guest PCs to dump PPC disasm once "
+              "(hex). Example: 0x826C6C28,0x827E0BF0",
+              "CPU");
+
+namespace {
+
+struct GuestPcLogState {
+  std::mutex mutex;
+  bool parsed = false;
+  std::unordered_set<uint32_t> targets;
+  std::unordered_set<uint32_t> logged;
+};
+
+GuestPcLogState g_guest_pc_log_state;
+
+void ParseGuestPcLogTargets() {
+  auto& state = g_guest_pc_log_state;
+  if (state.parsed) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.parsed) {
+    return;
+  }
+  std::string input = cvars::log_guest_pc_once;
+  std::string token;
+  auto flush_token = [&]() {
+    if (token.empty()) {
+      return;
+    }
+    char* end = nullptr;
+    uint32_t value =
+        static_cast<uint32_t>(std::strtoul(token.c_str(), &end, 0));
+    if (end != token.c_str()) {
+      state.targets.insert(value);
+    }
+    token.clear();
+  };
+  for (char ch : input) {
+    if (ch == ',' || ch == ';' || ch == ' ' || ch == '\t' || ch == '\n') {
+      flush_token();
+    } else {
+      token.push_back(ch);
+    }
+  }
+  flush_token();
+  state.parsed = true;
+}
+
+bool ShouldLogGuestPcOnce(uint32_t address) {
+  ParseGuestPcLogTargets();
+  auto& state = g_guest_pc_log_state;
+  if (state.targets.empty()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.targets.find(address) == state.targets.end()) {
+    return false;
+  }
+  if (!state.logged.insert(address).second) {
+    return false;
+  }
+  return true;
+}
+
+void LogGuestPcOnce(xe::cpu::Processor* processor,
+                    xe::cpu::ThreadState* thread_state, uint32_t address) {
+  if (!ShouldLogGuestPcOnce(address)) {
+    return;
+  }
+  auto* memory = processor->memory();
+  auto* context = thread_state ? thread_state->context() : nullptr;
+
+  const xe::cpu::Function* fn = nullptr;
+  auto functions = processor->FindFunctionsWithAddress(address);
+  if (!functions.empty()) {
+    fn = functions.front();
+  }
+
+  if (fn && fn->module()) {
+    XELOGI(
+        "Guest PC hit: 0x{:08X} thread_id={} module='{}' function='{}' "
+        "[0x{:08X},0x{:08X})",
+        address, thread_state ? thread_state->thread_id() : 0,
+        fn->module()->name(), fn->name(), fn->address(), fn->end_address());
+  } else {
+    XELOGI("Guest PC hit: 0x{:08X} thread_id={}", address,
+           thread_state ? thread_state->thread_id() : 0);
+  }
+
+  if (context) {
+    XELOGI(
+        "  lr=0x{:08X} ctr=0x{:08X} r1=0x{:08X} r3=0x{:08X} r4=0x{:08X} "
+        "r5=0x{:08X} r6=0x{:08X} r7=0x{:08X}",
+        static_cast<uint32_t>(context->lr),
+        static_cast<uint32_t>(context->ctr),
+        static_cast<uint32_t>(context->r[1]),
+        static_cast<uint32_t>(context->r[3]),
+        static_cast<uint32_t>(context->r[4]),
+        static_cast<uint32_t>(context->r[5]),
+        static_cast<uint32_t>(context->r[6]),
+        static_cast<uint32_t>(context->r[7]));
+  }
+
+  constexpr uint32_t kBefore = 6;
+  constexpr uint32_t kAfter = 6;
+  uint32_t before = std::min<uint32_t>(kBefore, address / 4);
+  uint32_t start = address - before * 4;
+  uint32_t count = before + kAfter + 1;
+
+  XELOGI("  PPC disasm around 0x{:08X}:", address);
+  for (uint32_t i = 0; i < count; ++i) {
+    uint32_t instr_addr = start + (i * 4);
+    auto* heap = memory->LookupHeap(instr_addr);
+    if (!heap ||
+        heap->QueryRangeAccess(instr_addr, instr_addr) ==
+            xe::memory::PageAccess::kNoAccess) {
+      XELOGI("  {:08X} ????????   <no access>", instr_addr);
+      continue;
+    }
+    uint32_t code = xe::load_and_swap<uint32_t>(
+        memory->TranslateVirtual(instr_addr));
+    xe::StringBuffer disasm;
+    xe::cpu::ppc::DisasmPPC(instr_addr, code, &disasm);
+    XELOGI("  {:08X} {:08X}   {}", instr_addr, code,
+           disasm.to_string_view());
+  }
+}
+
+}  // namespace
 
 namespace xe {
 namespace kernel {
@@ -338,6 +475,8 @@ bool Processor::Execute(ThreadState* thread_state, uint32_t address) {
     XELOGCPU("Execute({:08X}): failed to find function", address);
     return false;
   }
+
+  LogGuestPcOnce(this, thread_state, address);
 
   auto context = thread_state->context();
 
