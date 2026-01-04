@@ -12,6 +12,7 @@
 #include <cstring>
 #include <memory>
 
+#include "xenia/base/logging.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/registers.h"
