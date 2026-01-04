@@ -14,16 +14,21 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/cpu/processor.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/xbox.h"
 
-DEFINE_bool(
-    ignore_offset_for_ranged_allocations, false,
-    "Allows to ignore 4k offset for physical allocations with provided range. "
-    "Certain titles check if result matches provided lower range.",
-    "Memory");
+#if XE_PLATFORM_MAC || XE_PLATFORM_LINUX
+#include <execinfo.h>
+#endif
+
+DEFINE_bool(log_physical_alloc_stack, false,
+            "Log a short host stack for small physical 4KB allocations before "
+            "large exact-fit probes (debugging).",
+            "Memory");
 DECLARE_bool(log_heap_alloc_failures);
 
 namespace xe {
@@ -71,6 +76,8 @@ uint32_t xeMmAllocatePhysicalMemoryEx(uint32_t flags, uint32_t region_size,
                                       uint32_t min_addr_range,
                                       uint32_t max_addr_range,
                                       uint32_t alignment) {
+  static std::atomic<int> logged_small_allocs{0};
+
   // Type will usually be 0 (user request?), where 1 and 2 are sometimes made
   // by D3D/etc.
 
@@ -110,14 +117,6 @@ uint32_t xeMmAllocatePhysicalMemoryEx(uint32_t flags, uint32_t region_size,
   // min_addr_range/max_addr_range are bounds in physical memory, not virtual.
   uint32_t heap_base = heap->heap_base();
   uint32_t heap_physical_address_offset = heap->GetPhysicalAddress(heap_base);
-  // TODO(Gliniak): Games like 545108B4 compares min_addr_range with value
-  // returned. 0x1000 offset causes it to go below that minimal range and goes
-  // haywire.
-  if (min_addr_range && max_addr_range &&
-      cvars::ignore_offset_for_ranged_allocations) {
-    heap_physical_address_offset = 0;
-  }
-
   uint32_t heap_min_addr =
       xe::sat_sub(min_addr_range, heap_physical_address_offset);
   uint32_t heap_max_addr =
@@ -125,7 +124,67 @@ uint32_t xeMmAllocatePhysicalMemoryEx(uint32_t flags, uint32_t region_size,
   uint32_t heap_size = heap->heap_size();
   heap_min_addr = heap_base + std::min(heap_min_addr, heap_size - 1);
   heap_max_addr = heap_base + std::min(heap_max_addr, heap_size - 1);
+
   uint32_t base_address;
+  if (cvars::log_physical_alloc_stack && heap_base == 0xE0000000 &&
+      adjusted_size <= 0x20000 &&
+      logged_small_allocs.fetch_add(1) < 16) {
+    void* frames[32];
+#if XE_PLATFORM_MAC || XE_PLATFORM_LINUX
+    int frame_count = backtrace(frames, int(xe::countof(frames)));
+#else
+    int frame_count = 0;
+#endif
+    XELOGW(
+        "Physical 4KB alloc trace: flags=0x{:08X} size=0x{:08X} "
+        "protect=0x{:08X} min=0x{:08X} max=0x{:08X} align=0x{:08X} "
+        "page=0x{:08X}",
+        flags, adjusted_size, protect_bits, min_addr_range, max_addr_range,
+        alignment, page_size);
+    if (auto* cur_thread = XThread::GetCurrentThread()) {
+      if (auto* thread_state = cur_thread->thread_state()) {
+        auto* context = thread_state->context();
+        uint32_t lr_guest = static_cast<uint32_t>(context->lr);
+        XELOGW("  guest thread='{}' id=0x{:08X}", cur_thread->name(),
+               cur_thread->thread_id());
+        XELOGW("  guest LR=0x{:08X} thread_id={}", lr_guest,
+               thread_state->thread_id());
+        auto* processor = thread_state->processor();
+        auto functions = processor->FindFunctionsWithAddress(lr_guest);
+        if (!functions.empty()) {
+          const auto* fn = functions.front();
+          XELOGW("  guest LR function [0x{:08X},0x{:08X}) name='{}'",
+                 fn->address(), fn->end_address(), fn->name());
+        } else {
+          XELOGW("  guest LR function: unresolved");
+        }
+        for (auto* module : processor->GetModules()) {
+          if (module && module->ContainsAddress(lr_guest)) {
+            XELOGW("  guest LR module='{}'", module->name());
+            break;
+          }
+        }
+      }
+    }
+#if XE_PLATFORM_MAC || XE_PLATFORM_LINUX
+    char** symbols = backtrace_symbols(frames, frame_count);
+    if (symbols) {
+      for (int i = 0; i < frame_count; ++i) {
+        XELOGW("  [{}] {}", i, symbols[i]);
+      }
+      free(symbols);
+    } else {
+      for (int i = 0; i < frame_count; ++i) {
+        XELOGW("  [{}] {}", i, frames[i]);
+      }
+    }
+#else
+    for (int i = 0; i < frame_count; ++i) {
+      XELOGW("  [{}] {}", i, frames[i]);
+    }
+#endif
+  }
+
   if (!heap->AllocRange(heap_min_addr, heap_max_addr, adjusted_size,
                         adjusted_alignment, allocation_type, protect, top_down,
                         &base_address)) {
@@ -135,12 +194,11 @@ uint32_t xeMmAllocatePhysicalMemoryEx(uint32_t flags, uint32_t region_size,
           "MmAllocatePhysicalMemoryEx request: flags={:08X} size={:08X} "
           "protect={:08X} min={:08X} max={:08X} align={:08X} page={:08X} "
           "adj_size={:08X} adj_align={:08X} heap_base={:08X} heap_size={:08X} "
-          "heap_min={:08X} heap_max={:08X} offset={:08X} ignore_offset={}",
+          "heap_min={:08X} heap_max={:08X} offset={:08X}",
           flags, region_size, protect_bits, min_addr_range, max_addr_range,
           alignment, page_size, adjusted_size, adjusted_alignment, heap_base,
           heap_size, heap_min_addr, heap_max_addr,
-          heap_physical_address_offset,
-          cvars::ignore_offset_for_ranged_allocations);
+          heap_physical_address_offset);
       static std::atomic<bool> dumped_physical_heap{false};
       if (!dumped_physical_heap.exchange(true)) {
         XELOGW("Dumping physical heap map due to allocation failure.");
@@ -151,8 +209,20 @@ uint32_t xeMmAllocatePhysicalMemoryEx(uint32_t flags, uint32_t region_size,
            base_address, adjusted_size);
     return 0;
   }
-  XELOGD("MmAllocatePhysicalMemoryEx = {:08X} Size: {:08X}", base_address,
-         adjusted_size);
+  if (cvars::log_heap_alloc_failures) {
+    XELOGW(
+        "MmAllocatePhysicalMemoryEx success: flags={:08X} size={:08X} "
+        "protect={:08X} min={:08X} max={:08X} align={:08X} page={:08X} "
+        "adj_size={:08X} adj_align={:08X} heap_base={:08X} heap_size={:08X} "
+        "heap_min={:08X} heap_max={:08X} offset={:08X} base={:08X}",
+        flags, region_size, protect_bits, min_addr_range, max_addr_range,
+        alignment, page_size, adjusted_size, adjusted_alignment, heap_base,
+        heap_size, heap_min_addr, heap_max_addr, heap_physical_address_offset,
+        base_address);
+  } else {
+    XELOGD("MmAllocatePhysicalMemoryEx = {:08X} Size: {:08X}", base_address,
+           adjusted_size);
+  }
 
   return base_address;
 }
@@ -173,11 +243,8 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
   assert_not_null(region_size_ptr);
 
   // Set to TRUE when allocation is from devkit memory area.
-  // Devkit memory isn't supported; treat as normal allocation.
-  if (debug_memory) {
-    XELOGW("NtAllocateVirtualMemory: debug_memory unsupported (0x{:X})",
-           debug_memory.value());
-  }
+  // Set to TRUE when allocation is from devkit memory area.
+  assert_true(debug_memory == 0);
 
   // This allocates memory from the kernel heap, which is initialized on startup
   // and shared by both the kernel implementation and user code.
@@ -300,11 +367,8 @@ dword_result_t NtProtectVirtualMemory_entry(lpdword_t base_addr_ptr,
                                             lpdword_t old_protect,
                                             dword_t debug_memory) {
   // Set to TRUE when this memory refers to devkit memory area.
-  // Devkit memory isn't supported; treat as normal protection change.
-  if (debug_memory) {
-    XELOGW("NtProtectVirtualMemory: debug_memory unsupported (0x{:X})",
-           debug_memory.value());
-  }
+  // Set to TRUE when this memory refers to devkit memory area.
+  assert_true(debug_memory == 0);
 
   // Must request a size.
   if (!base_addr_ptr || !region_size_ptr || !*region_size_ptr) {
@@ -363,11 +427,8 @@ dword_result_t NtFreeVirtualMemory_entry(lpdword_t base_addr_ptr,
   // _In_     BOOLEAN DebugMemory
 
   // Set to TRUE when freeing external devkit memory.
-  // Devkit memory isn't supported; treat as normal free.
-  if (debug_memory) {
-    XELOGW("NtFreeVirtualMemory: debug_memory unsupported (0x{:X})",
-           debug_memory.value());
-  }
+  // Set to TRUE when freeing external devkit memory.
+  assert_true(debug_memory == 0);
 
   if (!base_addr_value) {
     return X_STATUS_MEMORY_NOT_ALLOCATED;

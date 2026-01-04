@@ -17,7 +17,6 @@
 #include <utility>
 #include <vector>
 
-#include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
 #include "xenia/cpu/mmio_handler.h"
@@ -280,20 +279,20 @@ class PhysicalHeap : public BaseHeap {
   std::vector<SystemPageFlagsBlock> system_page_flags_;
 };
 
-/// Models the entire guest memory system on the console.
-/// This exposes interfaces to both virtual and physical memory and a TLB and
-/// page table for allocation, mapping, and protection.
-///
-/// The memory is backed by a memory mapped file and is placed at a stable
-/// fixed address in the host address space (like 0x100000000). This allows
-/// efficient guest<->host address translations as well as easy sharing of the
-/// memory across various subsystems.
-///
-/// The guest memory address space is split into several ranges that have varying
-/// properties such as page sizes, caching strategies, protections, and
-/// overlap with other ranges. Each range is represented by a BaseHeap of either
-/// VirtualHeap or PhysicalHeap depending on type. Heaps model the page tables
-/// and can handle reservation and committing of requested pages.
+// Models the entire guest memory system on the console.
+// This exposes interfaces to both virtual and physical memory and a TLB and
+// page table for allocation, mapping, and protection.
+//
+// The memory is backed by a memory mapped file and is placed at a stable
+// fixed address in the host address space (like 0x100000000). This allows
+// efficient guest<->host address translations as well as easy sharing of the
+// memory across various subsystems.
+//
+// The guest memory address space is split into several ranges that have varying
+// properties such as page sizes, caching strategies, protections, and
+// overlap with other ranges. Each range is represented by a BaseHeap of either
+// VirtualHeap or PhysicalHeap depending on type. Heaps model the page tables
+// and can handle reservation and committing of requested pages.
 class Memory {
  public:
   Memory();
@@ -317,17 +316,15 @@ class Memory {
   // Translates a guest virtual address to a host address that can be accessed
   // as a normal pointer.
   // Note that the contents at the specified host address are big-endian.
-
-    template <typename T = uint8_t*>
-    inline T TranslateVirtual(uint32_t guest_address) const {
-        uint8_t* host_address = virtual_membase_ + guest_address;
-        const auto heap = LookupHeap(guest_address);
-        if (heap) {
-            host_address += heap->host_address_offset();
-        }
-        return reinterpret_cast<T>(host_address);
+  template <typename T = uint8_t*>
+  inline T TranslateVirtual(uint32_t guest_address) const {
+    uint8_t* host_address = virtual_membase_ + guest_address;
+    const auto heap = LookupHeap(guest_address);
+    if (heap) {
+      host_address += heap->host_address_offset();
     }
-
+    return reinterpret_cast<T>(host_address);
+  }
 
   // Base address of physical memory in the host address space.
   // This is often something like 0x200000000.
@@ -410,6 +407,12 @@ class Memory {
   // notification handler must invalidate the all the data stored in the touched
   // pages.
   //
+  // Because large ranges (like whole framebuffers) may be written to and
+  // exceptions are expensive, it's better to unprotect multiple pages as a
+  // result of a write access violation, so the shortest common range returned
+  // by all the invalidation callbacks (clamped to a sane range and also not to
+  // touch pages with provider callbacks) is unprotected.
+  //
   // - Data providers:
   //
   // TODO(Triang3l): Implement data providers - more complicated because they
@@ -473,14 +476,13 @@ class Memory {
   void DumpMap();
 
   bool Save(ByteStream* stream);
-  bool Restore(ByteStream* stream);
+ bool Restore(ByteStream* stream);
 
  private:
 #if XE_PLATFORM_MAC
   int MapViewsMac();
-#else
-  int MapViews(uint8_t* mapping_base);
 #endif
+  int MapViews(uint8_t* mapping_base);
   void UnmapViews();
 
   static uint32_t HostToGuestVirtualThunk(const void* context,
@@ -526,7 +528,6 @@ class Memory {
     VirtualHeap v90000000;
 
     VirtualHeap physical;
-    PhysicalHeap v7F000000;
     PhysicalHeap vA0000000;
     PhysicalHeap vC0000000;
     PhysicalHeap vE0000000;
