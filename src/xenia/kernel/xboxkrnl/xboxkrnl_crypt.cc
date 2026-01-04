@@ -9,6 +9,7 @@
 
 #include <algorithm>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/kernel/kernel_state.h"
@@ -628,6 +629,51 @@ dword_result_t XeKeysHmacSha_entry(dword_t key_num, lpvoid_t inp_1,
   return X_STATUS_UNSUCCESSFUL;
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysHmacSha, kNone, kImplemented);
+
+DEFINE_bool(xekeys_console_sign_hmac, true,
+            "Use a deterministic HMAC-SHA1 signature for "
+            "XeKeysConsolePrivateKeySign. Disable to return NOT_IMPLEMENTED "
+            "and zero the output (canary behavior).",
+            "Kernel");
+
+// NOTE: Real console private keys are not available. Use a deterministic
+// emulator key to provide stable signatures for games expecting a result.
+static const uint8_t xe_console_signing_key[16] = {
+    0x5A, 0x58, 0x4E, 0x49, 0x41, 0x2D, 0x45, 0x4D,
+    0x55, 0x4C, 0x41, 0x54, 0x4F, 0x52, 0x2D, 0x00};
+
+dword_result_t XeKeysConsolePrivateKeySign_entry(
+    lpvoid_t in_ptr, lpvoid_t out_ptr, dword_t unused_1, dword_t unused_2,
+    dword_t unused_3, dword_t unused_4, lpvoid_t in_ptr_dup,
+    dword_t in_size) {
+  if (!in_ptr || !out_ptr) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
+  uint32_t size = in_size ? in_size.value() : 0x14;
+  if (size == 0 || size > 0x1000) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
+  if (!cvars::xekeys_console_sign_hmac) {
+    std::memset(out_ptr, 0, size);
+    return X_STATUS_NOT_IMPLEMENTED;
+  }
+
+  // Some titles pass the input pointer twice (r3 and r9). Prefer r3 unless
+  // r9 differs and appears more plausible (non-null).
+  const shim::PointerParam& input_ptr =
+      (in_ptr_dup &&
+       in_ptr_dup.guest_address() != in_ptr.guest_address())
+          ? in_ptr_dup
+          : in_ptr;
+
+  XeCryptHmacSha_entry((void*)xe_console_signing_key,
+                       static_cast<uint32_t>(sizeof(xe_console_signing_key)),
+                       input_ptr, size, nullptr, 0, nullptr, 0, out_ptr, size);
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(XeKeysConsolePrivateKeySign, kNone, kImplemented);
 
 static const uint8_t xe_key_obfuscation_key[16] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
