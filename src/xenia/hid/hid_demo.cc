@@ -45,8 +45,13 @@
 #include "xenia/hid/xinput/xinput_hid.h"
 #endif  // XE_PLATFORM_WIN32
 
+#if XE_PLATFORM_MAC
+DEFINE_string(hid, "sdl",
+              "Input system. Use: [any, nop, sdl, winkey, xinput]", "General");
+#else
 DEFINE_string(hid, "any", "Input system. Use: [any, nop, sdl, winkey, xinput]",
               "General");
+#endif  // XE_PLATFORM_MAC
 
 #define MAX_USERS 4
 #define ROW_HEIGHT_GENERAL 60

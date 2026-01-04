@@ -71,8 +71,13 @@
 DEFINE_string(apu, "any", "Audio system. Use: [any, nop, sdl, xaudio2]", "APU");
 DEFINE_string(gpu, "any", "Graphics system. Use: [any, d3d12, vulkan, null]",
               "GPU");
+#if XE_PLATFORM_MAC
+DEFINE_string(hid, "sdl",
+              "Input system. Use: [any, nop, sdl, winkey, xinput]", "HID");
+#else
 DEFINE_string(hid, "any", "Input system. Use: [any, nop, sdl, winkey, xinput]",
               "HID");
+#endif  // XE_PLATFORM_MAC
 
 DEFINE_path(
     storage_root, "",
