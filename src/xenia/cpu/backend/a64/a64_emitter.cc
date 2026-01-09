@@ -84,6 +84,30 @@ bool ShouldLogResolveFailure() {
   return count < limit;
 }
 
+void AdjustStackPointer(A64Emitter& emitter, size_t stack_size, bool add) {
+  if (!stack_size) {
+    return;
+  }
+  const uint64_t size_u64 = static_cast<uint64_t>(stack_size);
+  const bool imm_valid =
+      size_u64 <= 0xFFF ||
+      ((size_u64 & 0xFFF) == 0 && (size_u64 >> 12) <= 0xFFF);
+  if (imm_valid) {
+    if (add) {
+      emitter.ADD(SP, SP, size_u64);
+    } else {
+      emitter.SUB(SP, SP, size_u64);
+    }
+    return;
+  }
+  emitter.MOV(X15, size_u64);
+  if (add) {
+    emitter.ADD(SP, SP, X15);
+  } else {
+    emitter.SUB(SP, SP, X15);
+  }
+}
+
 }  // namespace
 
 static const size_t kStashOffset = 32;
@@ -235,7 +259,7 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
   STP(X29, X30, SP, PRE_INDEXED, -16);
   MOV(X29, SP);
 
-  SUB(SP, SP, (uint32_t)stack_size);
+  AdjustStackPointer(*this, stack_size, false);
 
   code_offsets.prolog_stack_alloc = offset();
   code_offsets.body = offset();
@@ -319,7 +343,7 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
 
   code_offsets.epilog = offset();
 
-  ADD(SP, SP, (uint32_t)stack_size);
+  AdjustStackPointer(*this, stack_size, true);
 
   MOV(SP, X29);
   LDP(X29, X30, SP, POST_INDEXED, 16);
@@ -949,7 +973,7 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // Pass the callers return address over.
     LDR(X0, SP, StackLayout::GUEST_RET_ADDR);
 
-    ADD(SP, SP, static_cast<uint32_t>(stack_size()));
+    AdjustStackPointer(*this, stack_size(), true);
 
     MOV(SP, X29);
     LDP(X29, X30, SP, POST_INDEXED, 16);
@@ -1012,7 +1036,7 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
     // Pass the callers return address over.
     LDR(X0, SP, StackLayout::GUEST_RET_ADDR);
 
-    ADD(SP, SP, static_cast<uint32_t>(stack_size()));
+    AdjustStackPointer(*this, stack_size(), true);
 
     MOV(SP, X29);
     LDP(X29, X30, SP, POST_INDEXED, 16);
