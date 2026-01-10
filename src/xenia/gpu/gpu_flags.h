@@ -38,6 +38,21 @@ DECLARE_bool(metal_log_copy_dest_register_writes);
 DECLARE_bool(metal_force_full_scissor_on_swap_resolve);
 DECLARE_bool(metal_log_edram_dump_color_samples);
 
+// Enable extremely verbose Metal backend logging (may significantly impact performance).
+DECLARE_bool(metal_verbose_logging);
+
+DECLARE_bool(metal_shader_disk_cache);
+DECLARE_bool(metal_pipeline_binary_archive);
+DECLARE_bool(metal_pipeline_disk_cache);
+DECLARE_int32(metal_draw_ring_count);
+DECLARE_bool(metal_use_heaps);
+DECLARE_bool(metal_shared_memory_zero_copy);
+DECLARE_int32(metal_heap_min_bytes);
+DECLARE_bool(metal_log_cache_stats);
+DECLARE_int32(metal_log_cache_stats_interval_seconds);
+DECLARE_bool(metal_texture_cache_use_private);
+DECLARE_bool(metal_texture_upload_via_blit);
+
 DECLARE_int32(query_occlusion_fake_sample_count);
 
 #endif  // XENIA_GPU_GPU_FLAGS_H_
