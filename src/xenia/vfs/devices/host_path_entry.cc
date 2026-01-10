@@ -126,8 +126,7 @@ void HostPathEntry::RenameEntryInternal(
     const std::vector<std::string_view>& path_parts) {
   const std::string relative_path = xe::utf8::join_paths(path_parts);
   const std::string new_host_path_ = xe::utf8::join_paths(
-      xe::path_to_utf8(static_cast<HostPathDevice*>(device_)->host_path()),
-      relative_path);
+      xe::path_to_utf8(((HostPathDevice*)device_)->host_path()), relative_path);
 
   std::error_code ec;
   std::filesystem::rename(host_path_, new_host_path_, ec);
