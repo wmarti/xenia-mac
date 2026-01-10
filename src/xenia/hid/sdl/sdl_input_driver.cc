@@ -107,6 +107,10 @@ SDLInputDriver::SDLInputDriver(xe::ui::Window* window, size_t window_z_order)
 }
 
 SDLInputDriver::~SDLInputDriver() {
+  if (input_listener_added_ && window()) {
+    window()->RemoveInputListener(this);
+    input_listener_added_ = false;
+  }
   // Make sure the CallInUIThread is executed before destroying the references.
   if (sdl_pumpevents_queued_) {
     window()->app_context().CallInUIThreadSynchronous([this]() {
@@ -200,6 +204,10 @@ X_STATUS SDLInputDriver::Setup() {
       }
     }
   });
+  if (sdl_events_initialized_ && !input_listener_added_) {
+    window()->AddInputListener(this, window_z_order());
+    input_listener_added_ = true;
+  }
   return (sdl_events_initialized_ && sdl_gamecontroller_initialized_)
              ? X_STATUS_SUCCESS
              : X_STATUS_UNSUCCESSFUL;
@@ -737,91 +745,88 @@ void SDLInputDriver::UpdateKeyboardCapabilities(X_INPUT_CAPABILITIES* out_caps) 
   out_caps->vibration.right_motor_speed = 0;
 }
 
+void SDLInputDriver::UpdateKeyboardKeyState(xe::ui::VirtualKey key,
+                                            bool is_down) {
+  uint16_t key_value = static_cast<uint16_t>(key);
+  if (key_value >= keyboard_key_state_.size()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(keyboard_mutex_);
+  keyboard_key_state_[key_value] = is_down ? 1 : 0;
+}
+
 bool SDLInputDriver::ReadKeyboardGamepad(X_INPUT_GAMEPAD* out_gamepad) {
   if (!out_gamepad) {
     return false;
   }
 
-  std::array<uint8_t, SDL_NUM_SCANCODES> keys{};
-  auto read_state = [&]() {
-    SDL_PumpEvents();
-    int key_count = 0;
-    const uint8_t* state = SDL_GetKeyboardState(&key_count);
-    if (!state || key_count <= 0) {
-      return;
-    }
-    int copy_count = key_count < SDL_NUM_SCANCODES ? key_count
-                                                   : SDL_NUM_SCANCODES;
-    for (int i = 0; i < copy_count; ++i) {
-      keys[i] = state[i];
-    }
-  };
-
-  if (window()->app_context().IsInUIThread()) {
-    read_state();
-  } else {
-    window()->app_context().CallInUIThreadSynchronous(read_state);
+  std::array<uint8_t, 256> keys{};
+  {
+    std::lock_guard<std::mutex> lock(keyboard_mutex_);
+    keys = keyboard_key_state_;
   }
 
-  auto key_down = [&](SDL_Scancode scancode) -> bool {
-    return scancode < keys.size() && keys[scancode] != 0;
+  auto key_down = [&](xe::ui::VirtualKey key) -> bool {
+    uint16_t key_value = static_cast<uint16_t>(key);
+    return key_value < keys.size() && keys[key_value] != 0;
   };
 
   X_INPUT_GAMEPAD gamepad = {};
   uint16_t buttons = 0;
   // D-pad (arrows)
-  if (key_down(SDL_SCANCODE_UP)) {
+  if (key_down(xe::ui::VirtualKey::kUp)) {
     buttons |= X_INPUT_GAMEPAD_DPAD_UP;
   }
-  if (key_down(SDL_SCANCODE_DOWN)) {
+  if (key_down(xe::ui::VirtualKey::kDown)) {
     buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
   }
-  if (key_down(SDL_SCANCODE_LEFT)) {
+  if (key_down(xe::ui::VirtualKey::kLeft)) {
     buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
   }
-  if (key_down(SDL_SCANCODE_RIGHT)) {
+  if (key_down(xe::ui::VirtualKey::kRight)) {
     buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
   }
 
   // Start/Back
-  if (key_down(SDL_SCANCODE_RETURN) || key_down(SDL_SCANCODE_KP_ENTER)) {
+  if (key_down(xe::ui::VirtualKey::kReturn)) {
     buttons |= X_INPUT_GAMEPAD_START;
   }
-  if (key_down(SDL_SCANCODE_BACKSPACE) || key_down(SDL_SCANCODE_ESCAPE)) {
+  if (key_down(xe::ui::VirtualKey::kBack) ||
+      key_down(xe::ui::VirtualKey::kEscape)) {
     buttons |= X_INPUT_GAMEPAD_BACK;
   }
 
   // Face buttons
-  if (key_down(SDL_SCANCODE_SPACE)) {
+  if (key_down(xe::ui::VirtualKey::kSpace)) {
     buttons |= X_INPUT_GAMEPAD_A;
   }
-  if (key_down(SDL_SCANCODE_LCTRL) || key_down(SDL_SCANCODE_RCTRL)) {
+  if (key_down(xe::ui::VirtualKey::kControl)) {
     buttons |= X_INPUT_GAMEPAD_B;
   }
-  if (key_down(SDL_SCANCODE_LALT) || key_down(SDL_SCANCODE_RALT)) {
+  if (key_down(xe::ui::VirtualKey::kMenu)) {
     buttons |= X_INPUT_GAMEPAD_X;
   }
-  if (key_down(SDL_SCANCODE_LSHIFT) || key_down(SDL_SCANCODE_RSHIFT)) {
+  if (key_down(xe::ui::VirtualKey::kShift)) {
     buttons |= X_INPUT_GAMEPAD_Y;
   }
 
   // Shoulders
-  if (key_down(SDL_SCANCODE_Q)) {
+  if (key_down(xe::ui::VirtualKey::kQ)) {
     buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
   }
-  if (key_down(SDL_SCANCODE_E)) {
+  if (key_down(xe::ui::VirtualKey::kE)) {
     buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
   }
 
   // Triggers
-  gamepad.left_trigger = key_down(SDL_SCANCODE_Z) ? 0xFF : 0;
-  gamepad.right_trigger = key_down(SDL_SCANCODE_C) ? 0xFF : 0;
+  gamepad.left_trigger = key_down(xe::ui::VirtualKey::kZ) ? 0xFF : 0;
+  gamepad.right_trigger = key_down(xe::ui::VirtualKey::kC) ? 0xFF : 0;
 
   // Thumb presses
-  if (key_down(SDL_SCANCODE_F)) {
+  if (key_down(xe::ui::VirtualKey::kF)) {
     buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
   }
-  if (key_down(SDL_SCANCODE_G)) {
+  if (key_down(xe::ui::VirtualKey::kG)) {
     buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
   }
 
@@ -834,19 +839,27 @@ bool SDLInputDriver::ReadKeyboardGamepad(X_INPUT_GAMEPAD* out_gamepad) {
   };
 
   // Left stick (WASD)
-  gamepad.thumb_lx = axis_value(key_down(SDL_SCANCODE_A),
-                                key_down(SDL_SCANCODE_D));
-  gamepad.thumb_ly = axis_value(key_down(SDL_SCANCODE_S),
-                                key_down(SDL_SCANCODE_W));
+  gamepad.thumb_lx = axis_value(key_down(xe::ui::VirtualKey::kA),
+                                key_down(xe::ui::VirtualKey::kD));
+  gamepad.thumb_ly = axis_value(key_down(xe::ui::VirtualKey::kS),
+                                key_down(xe::ui::VirtualKey::kW));
   // Right stick (IJKL)
-  gamepad.thumb_rx = axis_value(key_down(SDL_SCANCODE_J),
-                                key_down(SDL_SCANCODE_L));
-  gamepad.thumb_ry = axis_value(key_down(SDL_SCANCODE_K),
-                                key_down(SDL_SCANCODE_I));
+  gamepad.thumb_rx = axis_value(key_down(xe::ui::VirtualKey::kJ),
+                                key_down(xe::ui::VirtualKey::kL));
+  gamepad.thumb_ry = axis_value(key_down(xe::ui::VirtualKey::kK),
+                                key_down(xe::ui::VirtualKey::kI));
 
   gamepad.buttons = buttons;
   *out_gamepad = gamepad;
   return true;
+}
+
+void SDLInputDriver::OnKeyDown(xe::ui::KeyEvent& e) {
+  UpdateKeyboardKeyState(e.virtual_key(), true);
+}
+
+void SDLInputDriver::OnKeyUp(xe::ui::KeyEvent& e) {
+  UpdateKeyboardKeyState(e.virtual_key(), false);
 }
 
 X_RESULT SDLInputDriver::GetStateFromKeyboard(X_INPUT_STATE* out_state) {

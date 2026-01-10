@@ -17,6 +17,7 @@
 
 #include "SDL.h"
 #include "xenia/hid/input_driver.h"
+#include "xenia/ui/window_listener.h"
 
 #define HID_SDL_USER_COUNT 4
 #define HID_SDL_THUMB_THRES 0x4E00
@@ -28,7 +29,8 @@ namespace xe {
 namespace hid {
 namespace sdl {
 
-class SDLInputDriver final : public InputDriver {
+class SDLInputDriver final : public InputDriver,
+                             public xe::ui::WindowInputListener {
  public:
   explicit SDLInputDriver(xe::ui::Window* window, size_t window_z_order);
   ~SDLInputDriver() override;
@@ -41,6 +43,9 @@ class SDLInputDriver final : public InputDriver {
   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) override;
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                         X_INPUT_KEYSTROKE* out_keystroke) override;
+
+  void OnKeyDown(xe::ui::KeyEvent& e) override;
+  void OnKeyUp(xe::ui::KeyEvent& e) override;
 
  private:
   struct ControllerState {
@@ -84,6 +89,7 @@ class SDLInputDriver final : public InputDriver {
   bool TestSDLVersion() const;
   void UpdateXCapabilities(ControllerState& state);
   void UpdateKeyboardCapabilities(X_INPUT_CAPABILITIES* out_caps);
+  void UpdateKeyboardKeyState(xe::ui::VirtualKey key, bool is_down);
   bool ReadKeyboardGamepad(X_INPUT_GAMEPAD* out_gamepad);
   X_RESULT GetStateFromKeyboard(X_INPUT_STATE* out_state);
   X_RESULT GetKeystrokeFromKeyboard(uint32_t user_index,
@@ -102,7 +108,10 @@ class SDLInputDriver final : public InputDriver {
   std::array<ControllerState, HID_SDL_USER_COUNT> controllers_;
   std::mutex controllers_mutex_;
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
+  std::array<uint8_t, 256> keyboard_key_state_{};
+  std::mutex keyboard_mutex_;
   KeyboardState keyboard_state_{};
+  bool input_listener_added_ = false;
   bool logged_keyboard_fallback_ = false;
   uint64_t keyboard_autostart_deadline_ms_ = 0;
   bool logged_keyboard_autostart_ = false;
