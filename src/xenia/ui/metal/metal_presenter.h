@@ -153,6 +153,15 @@ class MetalPresenter : public Presenter {
       nullptr;  // id<MTLRenderPipelineState>
   id guest_output_sampler_ = nullptr;  // id<MTLSamplerState>
   uint32_t guest_output_pipeline_format_ = 0;
+
+  id metalfx_scaler_ = nullptr;  // id<MTLFXSpatialScaler>
+  id metalfx_output_texture_ = nullptr;  // id<MTLTexture>
+  uint32_t metalfx_input_width_ = 0;
+  uint32_t metalfx_input_height_ = 0;
+  uint32_t metalfx_output_width_ = 0;
+  uint32_t metalfx_output_height_ = 0;
+  uint32_t metalfx_color_format_ = 0;
+  uint32_t metalfx_color_processing_mode_ = 0;
   float surface_scale_ = 1.0f;
   uint32_t surface_width_in_points_ = 0;
   uint32_t surface_height_in_points_ = 0;

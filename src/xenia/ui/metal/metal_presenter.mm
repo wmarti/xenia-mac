@@ -31,6 +31,12 @@
 #import <dispatch/dispatch.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#if __has_include(<MetalFX/MetalFX.h>)
+#import <MetalFX/MetalFX.h>
+#define XE_METALFX_AVAILABLE 1
+#else
+#define XE_METALFX_AVAILABLE 0
+#endif
 #import <QuartzCore/CAMetalLayer.h>
 
 DEFINE_bool(metal_presenter_wait_for_copy, false,
@@ -48,6 +54,11 @@ DEFINE_int32(metal_presenter_gamma_debug, 0,
              "GPU");
 DEFINE_bool(metal_presenter_log_gamma_ramp, false,
             "Log a few entries from the gamma ramp upload (debug).", "GPU");
+DEFINE_bool(metal_presenter_use_metalfx, true,
+            "Use MetalFX spatial scaling when upscaling guest output.",
+            "GPU");
+DEFINE_int32(metal_presenter_metalfx_color_processing, 0,
+             "MetalFX color processing mode: 0=perceptual, 1=linear.", "GPU");
 
 namespace xe {
 namespace ui {
@@ -133,6 +144,18 @@ void MetalPresenter::Shutdown() {
     guest_output_sampler_ = nullptr;
   }
   guest_output_pipeline_format_ = 0;
+  if (metalfx_scaler_) {
+    metalfx_scaler_ = nullptr;
+  }
+  if (metalfx_output_texture_) {
+    metalfx_output_texture_ = nullptr;
+  }
+  metalfx_input_width_ = 0;
+  metalfx_input_height_ = 0;
+  metalfx_output_width_ = 0;
+  metalfx_output_height_ = 0;
+  metalfx_color_format_ = 0;
+  metalfx_color_processing_mode_ = 0;
   surface_scale_ = 1.0f;
   surface_width_in_points_ = 0;
   surface_height_in_points_ = 0;
@@ -484,26 +507,14 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
     XELOGW("Metal PaintAndPresentImpl failed to get drawable");
     return PaintResult::kNotPresented;
   }
+  id<MTLTexture> drawable_texture = drawable.texture;
+  if (!drawable_texture) {
+    XELOGW("Metal PaintAndPresentImpl failed to get drawable texture");
+    return PaintResult::kNotPresented;
+  }
   
   // Create command buffer
   id<MTLCommandBuffer> command_buffer = [command_queue_ commandBuffer];
-  
-  // Create render pass descriptor
-  MTLRenderPassDescriptor* render_pass_desc =
-      [MTLRenderPassDescriptor renderPassDescriptor];
-  render_pass_desc.colorAttachments[0].texture = drawable.texture;
-  render_pass_desc.colorAttachments[0].loadAction = MTLLoadActionClear;
-  render_pass_desc.colorAttachments[0].storeAction = MTLStoreActionStore;
-  render_pass_desc.colorAttachments[0].clearColor =
-      MTLClearColorMake(0.0, 0.0, 0.0, 1.0);  // Black background
-
-  // Create render command encoder
-  id<MTLRenderCommandEncoder> render_encoder =
-      [command_buffer renderCommandEncoderWithDescriptor:render_pass_desc];
-  if (!render_encoder) {
-    XELOGW("Metal PaintAndPresentImpl failed to create render encoder");
-    return PaintResult::kNotPresented;
-  }
 
   // Draw the guest output to the drawable (bilinear/dither only for now).
   uint32_t guest_output_mailbox_index = UINT32_MAX;
@@ -521,17 +532,35 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
     }
   }
 
+  uint32_t drawable_width =
+      static_cast<uint32_t>(drawable_texture.width);
+  uint32_t drawable_height =
+      static_cast<uint32_t>(drawable_texture.height);
+
+  struct GuestOutputPaintConstants {
+    float rect_offset[2];
+    float rect_size[2];
+    int32_t output_offset[2];
+    float output_size_inv[2];
+  };
+  struct GuestOutputPaintConstantsFragment {
+    int32_t output_offset[2];
+    float output_size_inv[2];
+  };
+
+  GuestOutputPaintConstants constants = {};
+  GuestOutputPaintConstantsFragment fragment_constants = {};
+  bool draw_guest_output = false;
+  bool use_dither = false;
+  id<MTLTexture> paint_texture = nil;
+
   if (guest_output_texture) {
-    uint32_t drawable_width =
-        static_cast<uint32_t>(drawable.texture.width);
-    uint32_t drawable_height =
-        static_cast<uint32_t>(drawable.texture.height);
     GuestOutputPaintFlow guest_output_flow = GetGuestOutputPaintFlow(
         guest_output_properties, drawable_width, drawable_height,
         drawable_width, drawable_height, guest_output_paint_config);
     if (guest_output_flow.effect_count &&
         EnsureGuestOutputPaintResources(
-            uint32_t(drawable.texture.pixelFormat))) {
+            uint32_t(drawable_texture.pixelFormat))) {
       size_t effect_index = guest_output_flow.effect_count - 1;
       GuestOutputPaintEffect effect =
           guest_output_flow.effects[effect_index];
@@ -558,17 +587,6 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
       const std::pair<uint32_t, uint32_t>& output_size =
           guest_output_flow.effect_output_sizes[effect_index];
 
-      struct GuestOutputPaintConstants {
-        float rect_offset[2];
-        float rect_size[2];
-        int32_t output_offset[2];
-        float output_size_inv[2];
-      } constants = {};
-      struct GuestOutputPaintConstantsFragment {
-        int32_t output_offset[2];
-        float output_size_inv[2];
-      } fragment_constants = {};
-
       float x_to_ndc = 2.0f / float(drawable_width);
       float y_to_ndc = 2.0f / float(drawable_height);
       constants.rect_offset[0] = -1.0f + float(output_x) * x_to_ndc;
@@ -591,40 +609,145 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
       fragment_constants.output_size_inv[1] =
           bilinear_constants.output_size_inv[1];
 
-      MTLViewport viewport;
-      viewport.originX = 0.0;
-      viewport.originY = 0.0;
-      viewport.width = double(drawable_width);
-      viewport.height = double(drawable_height);
-      viewport.znear = 0.0;
-      viewport.zfar = 1.0;
-      [render_encoder setViewport:viewport];
-
-      MTLScissorRect scissor;
-      scissor.x = 0;
-      scissor.y = 0;
-      scissor.width = drawable_width;
-      scissor.height = drawable_height;
-      [render_encoder setScissorRect:scissor];
-
-      [render_encoder setRenderPipelineState:
-          use_dither ? guest_output_pipeline_bilinear_dither_
-                     : guest_output_pipeline_bilinear_];
-      [render_encoder setVertexBytes:&constants
-                              length:sizeof(constants)
-                             atIndex:0];
-      [render_encoder setFragmentBytes:&fragment_constants
-                                length:sizeof(fragment_constants)
-                               atIndex:0];
-      [render_encoder setFragmentTexture:guest_output_texture atIndex:0];
-      if (guest_output_sampler_) {
-        [render_encoder setFragmentSamplerState:guest_output_sampler_
-                                        atIndex:0];
+      paint_texture = guest_output_texture;
+#if XE_METALFX_AVAILABLE
+      if (::cvars::metal_presenter_use_metalfx) {
+        if (@available(macOS 13.0, *)) {
+          id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device_;
+          if (mtl_device &&
+              [MTLFXSpatialScalerDescriptor supportsDevice:mtl_device]) {
+            uint32_t input_width = guest_output_properties.frontbuffer_width;
+            uint32_t input_height = guest_output_properties.frontbuffer_height;
+            if (output_size.first > input_width ||
+                output_size.second > input_height) {
+              MTLPixelFormat color_format = guest_output_texture.pixelFormat;
+              int color_processing_mode =
+                  cvars::metal_presenter_metalfx_color_processing;
+              if (color_processing_mode < 0) {
+                color_processing_mode = 0;
+              } else if (color_processing_mode > 1) {
+                color_processing_mode = 1;
+              }
+              bool recreate =
+                  !metalfx_scaler_ || !metalfx_output_texture_ ||
+                  metalfx_input_width_ != input_width ||
+                  metalfx_input_height_ != input_height ||
+                  metalfx_output_width_ != output_size.first ||
+                  metalfx_output_height_ != output_size.second ||
+                  metalfx_color_format_ != uint32_t(color_format) ||
+                  metalfx_color_processing_mode_ !=
+                      uint32_t(color_processing_mode);
+              if (recreate) {
+                metalfx_scaler_ = nullptr;
+                metalfx_output_texture_ = nullptr;
+                metalfx_input_width_ = input_width;
+                metalfx_input_height_ = input_height;
+                metalfx_output_width_ = output_size.first;
+                metalfx_output_height_ = output_size.second;
+                metalfx_color_format_ = uint32_t(color_format);
+                metalfx_color_processing_mode_ =
+                    uint32_t(color_processing_mode);
+                MTLFXSpatialScalerDescriptor* desc =
+                    [MTLFXSpatialScalerDescriptor new];
+                desc.inputWidth = input_width;
+                desc.inputHeight = input_height;
+                desc.outputWidth = output_size.first;
+                desc.outputHeight = output_size.second;
+                desc.colorTextureFormat = color_format;
+                desc.outputTextureFormat = color_format;
+                desc.colorProcessingMode =
+                    color_processing_mode == 1
+                        ? MTLFXSpatialScalerColorProcessingModeLinear
+                        : MTLFXSpatialScalerColorProcessingModePerceptual;
+                id<MTLFXSpatialScaler> scaler =
+                    [desc newSpatialScalerWithDevice:mtl_device];
+                [desc release];
+                if (scaler) {
+                  metalfx_scaler_ = scaler;
+                  MTLTextureDescriptor* output_desc =
+                      [MTLTextureDescriptor
+                          texture2DDescriptorWithPixelFormat:color_format
+                                                       width:output_size.first
+                                                      height:output_size.second
+                                                   mipmapped:NO];
+                  output_desc.usage = MTLTextureUsageRenderTarget |
+                                      MTLTextureUsageShaderRead |
+                                      MTLTextureUsageShaderWrite;
+                  output_desc.storageMode = MTLStorageModePrivate;
+                  metalfx_output_texture_ =
+                      [mtl_device newTextureWithDescriptor:output_desc];
+                }
+              }
+              if (metalfx_scaler_ && metalfx_output_texture_) {
+                id<MTLFXSpatialScaler> scaler =
+                    (id<MTLFXSpatialScaler>)metalfx_scaler_;
+                scaler.colorTexture = guest_output_texture;
+                scaler.outputTexture = metalfx_output_texture_;
+                scaler.inputContentWidth = input_width;
+                scaler.inputContentHeight = input_height;
+                [scaler encodeToCommandBuffer:command_buffer];
+                paint_texture = metalfx_output_texture_;
+              }
+            }
+          }
+        }
       }
-      [render_encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
-                         vertexStart:0
-                         vertexCount:4];
+#endif
+      draw_guest_output = true;
     }
+  }
+
+  // Create render pass descriptor
+  MTLRenderPassDescriptor* render_pass_desc =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  render_pass_desc.colorAttachments[0].texture = drawable_texture;
+  render_pass_desc.colorAttachments[0].loadAction = MTLLoadActionClear;
+  render_pass_desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+  render_pass_desc.colorAttachments[0].clearColor =
+      MTLClearColorMake(0.0, 0.0, 0.0, 1.0);  // Black background
+
+  // Create render command encoder
+  id<MTLRenderCommandEncoder> render_encoder =
+      [command_buffer renderCommandEncoderWithDescriptor:render_pass_desc];
+  if (!render_encoder) {
+    XELOGW("Metal PaintAndPresentImpl failed to create render encoder");
+    return PaintResult::kNotPresented;
+  }
+
+  if (draw_guest_output && paint_texture) {
+    MTLViewport viewport;
+    viewport.originX = 0.0;
+    viewport.originY = 0.0;
+    viewport.width = double(drawable_width);
+    viewport.height = double(drawable_height);
+    viewport.znear = 0.0;
+    viewport.zfar = 1.0;
+    [render_encoder setViewport:viewport];
+
+    MTLScissorRect scissor;
+    scissor.x = 0;
+    scissor.y = 0;
+    scissor.width = drawable_width;
+    scissor.height = drawable_height;
+    [render_encoder setScissorRect:scissor];
+
+    [render_encoder setRenderPipelineState:
+        use_dither ? guest_output_pipeline_bilinear_dither_
+                   : guest_output_pipeline_bilinear_];
+    [render_encoder setVertexBytes:&constants
+                            length:sizeof(constants)
+                           atIndex:0];
+    [render_encoder setFragmentBytes:&fragment_constants
+                              length:sizeof(fragment_constants)
+                             atIndex:0];
+    [render_encoder setFragmentTexture:paint_texture atIndex:0];
+    if (guest_output_sampler_) {
+      [render_encoder setFragmentSamplerState:guest_output_sampler_
+                                      atIndex:0];
+    }
+    [render_encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                       vertexStart:0
+                       vertexCount:4];
   }
 
   // Execute UI drawers if requested
@@ -664,8 +787,8 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
     // Create Metal UI draw context
     MetalUIDrawContext metal_ui_draw_context(
         *this, 
-        static_cast<uint32_t>(drawable.texture.width),
-        static_cast<uint32_t>(drawable.texture.height),
+        static_cast<uint32_t>(drawable_texture.width),
+        static_cast<uint32_t>(drawable_texture.height),
         command_buffer,
         render_encoder);
     
