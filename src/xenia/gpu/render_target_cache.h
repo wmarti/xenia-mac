@@ -340,6 +340,7 @@ class RenderTargetCache {
     }
   };
 
+
   class RenderTarget {
    public:
     virtual ~RenderTarget() = default;
@@ -356,6 +357,11 @@ class RenderTargetCache {
    private:
     RenderTargetKey key_;
   };
+
+  const std::unordered_map<RenderTargetKey, RenderTarget*, RenderTargetKey::Hasher>&
+  render_targets() const {
+    return render_targets_;
+  }
 
   struct Transfer {
     uint32_t start_tiles;
