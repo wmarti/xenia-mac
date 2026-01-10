@@ -571,6 +571,11 @@ class TextureCache {
     const TextureBinding& binding = texture_bindings_[fetch_constant_index];
     return binding.key.is_valid ? &binding : nullptr;
   }
+
+  size_t GetTextureCount() const { return textures_.size(); }
+  uint64_t GetTexturesTotalHostMemoryUsage() const {
+    return textures_total_host_memory_usage_;
+  }
   // Called when something in a texture binding is changed for the
   // implementation to update the internal dependencies of the binding.
   virtual void UpdateTextureBindingsImpl(uint32_t fetch_constant_mask) {}
