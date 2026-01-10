@@ -49,6 +49,31 @@ project("xenia-hid-demo")
       "xenia-hid-sdl",
     })
 
+  filter("system:macosx")
+    links({
+      "xenia-ui-metal",
+      "metal-cpp",
+      "SDL2",
+      "Metal.framework",
+      "MetalFX.framework",
+      "MetalKit.framework",
+      "QuartzCore.framework",
+    })
+    files({
+      "Info.plist",
+      project_root.."/xenia.entitlements",
+    })
+    buildoptions({
+      "-DINFOPLIST_FILE=" .. path.getabsolute("Info.plist"),
+    })
+    xcodebuildsettings({
+      ["INFOPLIST_FILE"] = path.getabsolute("Info.plist"),
+      ["PRODUCT_BUNDLE_IDENTIFIER"] = "com.xenia.hid-demo",
+      ["CODE_SIGN_STYLE"] = "Automatic",
+      ["CODE_SIGN_ENTITLEMENTS"] =
+          path.getabsolute(project_root.."/xenia.entitlements"),
+    })
+
   filter("platforms:Linux")
     links({
       "SDL2",

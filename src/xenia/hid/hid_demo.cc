@@ -30,10 +30,15 @@
 #include "xenia/ui/immediate_drawer.h"
 #include "xenia/ui/presenter.h"
 #include "xenia/ui/virtual_key.h"
-#include "xenia/ui/vulkan/vulkan_provider.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_listener.h"
 #include "xenia/ui/windowed_app.h"
+
+#if XE_PLATFORM_MAC
+#include "xenia/ui/metal/metal_provider.h"
+#else
+#include "xenia/ui/vulkan/vulkan_provider.h"
+#endif  // XE_PLATFORM_MAC
 
 // Available input drivers:
 #include "xenia/hid/nop/nop_hid.h"
@@ -176,7 +181,11 @@ std::vector<std::unique_ptr<hid::InputDriver>> HidDemoApp::CreateInputDrivers(
 
 bool HidDemoApp::OnInitialize() {
   // Create the graphics provider that provides the presenter for the window.
+#if XE_PLATFORM_MAC
+  graphics_provider_ = xe::ui::metal::MetalProvider::Create();
+#else
   graphics_provider_ = xe::ui::vulkan::VulkanProvider::Create(true);
+#endif  // XE_PLATFORM_MAC
   if (!graphics_provider_) {
     XELOGE("Failed to initialize the graphics provider");
     return false;
