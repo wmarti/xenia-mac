@@ -523,50 +523,24 @@ std::string fix_path_separators(const std::string_view path,
     return std::string();
   }
 
-  // Swap all separators to new_sep.
-  const char32_t old_separator = new_separator == U'\\' ? U'/' : U'\\';
-
-  auto [path_begin, path_end] = make_citer(path);
+  // Path separators are ASCII, so we can use a simple byte-level replacement
+  // that works even with malformed UTF-8
+  char old_sep = new_separator == U'\\' ? '/' : '\\';
+  char new_sep = static_cast<char>(new_separator);
 
   std::string result;
-  auto it = path_begin;
-  auto last = it;
+  result.reserve(path.size());
 
-  auto is_separator = [old_separator, new_separator](char32_t c) {
-    return c == uint32_t(old_separator) || c == uint32_t(new_separator);
-  };
-
-  // Begins with a separator
-  if (is_separator(*it)) {
-    utfcpp::append(new_separator, result);
-    ++it;
-    last = it;
-  }
-
-  for (;;) {
-    it = std::find_if(it, path_end, is_separator);
-    if (it == path_end) {
-      break;
+  for (size_t i = 0; i < path.size(); ++i) {
+    char c = path[i];
+    if (c == old_sep || c == new_sep) {
+      // Skip redundant separators
+      if (result.empty() || result.back() != new_sep) {
+        result += new_sep;
+      }
+    } else {
+      result += c;
     }
-
-    if (it != last) {
-      auto offset = byte_length(path_begin, last);
-      auto length = byte_length(path_begin, it) - offset;
-      result += path.substr(offset, length);
-      utfcpp::append(new_separator, result);
-    }
-
-    ++it;
-    last = it;
-  }
-
-  if (last == path_begin) {
-    return std::string(path);
-  }
-
-  if (last != path_end) {
-    auto offset = byte_length(path_begin, last);
-    result += path.substr(offset);
   }
 
   return result;
