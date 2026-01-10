@@ -44,6 +44,10 @@
 #include "build/version.h"
 
 DECLARE_bool(debug);
+#if XE_PLATFORM_MAC
+DECLARE_bool(metal_presenter_use_metalfx);
+DECLARE_int32(metal_presenter_metalfx_color_processing);
+#endif  // XE_PLATFORM_MAC
 
 DEFINE_bool(fullscreen, false, "Whether to launch the emulator in fullscreen.",
             "Display");
@@ -133,6 +137,22 @@ using xe::ui::MenuItem;
 using xe::ui::UIEvent;
 
 const std::string kBaseTitle = "Xenia";
+
+template <typename T>
+static void OverrideConfigVarByName(const char* name, T value) {
+  if (!cvar::ConfigVars) {
+    return;
+  }
+  auto it = cvar::ConfigVars->find(name);
+  if (it == cvar::ConfigVars->end()) {
+    return;
+  }
+  auto* typed_var = dynamic_cast<cvar::ConfigVar<T>*>(it->second);
+  if (!typed_var) {
+    return;
+  }
+  typed_var->OverrideConfigValue(value);
+}
 
 EmulatorWindow::EmulatorWindow(Emulator* emulator,
                                ui::WindowedAppContext& app_context)
@@ -450,6 +470,38 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
 
       ImGui::TreePop();
     }
+
+#if XE_PLATFORM_MAC
+    if (ImGui::TreeNodeEx(
+            "MetalFX (macOS)",
+            ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_DefaultOpen)) {
+      bool use_metalfx = cvars::metal_presenter_use_metalfx;
+      if (ImGui::Checkbox(
+              "Enable MetalFX spatial scaling when upscaling", &use_metalfx)) {
+        OverrideConfigVarByName("metal_presenter_use_metalfx", use_metalfx);
+      }
+
+      int color_processing_mode =
+          cvars::metal_presenter_metalfx_color_processing;
+      if (color_processing_mode < 0) {
+        color_processing_mode = 0;
+      } else if (color_processing_mode > 1) {
+        color_processing_mode = 1;
+      }
+      const char* color_modes[] = {"Perceptual (default)", "Linear"};
+      if (ImGui::Combo("Color processing", &color_processing_mode,
+                       color_modes, IM_ARRAYSIZE(color_modes))) {
+        OverrideConfigVarByName("metal_presenter_metalfx_color_processing",
+                                color_processing_mode);
+      }
+
+      ImGui::TextUnformatted(
+          "MetalFX applies only when output is larger than guest output.");
+      ImGui::TextUnformatted("Requires macOS 13+.");
+
+      ImGui::TreePop();
+    }
+#endif  // XE_PLATFORM_MAC
 
     if (ImGui::TreeNodeEx("Dithering", ImGuiTreeNodeFlags_Framed |
                                            ImGuiTreeNodeFlags_DefaultOpen)) {

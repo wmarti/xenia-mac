@@ -29,6 +29,7 @@ project("xenia-ui-metal")
     -- Add Metal framework dependencies
     links({
       "Metal.framework",
+      "MetalFX.framework",
       "MetalKit.framework",
       "QuartzCore.framework",
     })
@@ -74,6 +75,7 @@ project("xenia-ui-window-metal-demo")
     -- Add Metal framework dependencies
     links({
       "Metal.framework",
+      "MetalFX.framework",
       "MetalKit.framework", 
       "QuartzCore.framework",
     })

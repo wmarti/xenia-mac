@@ -216,6 +216,7 @@ project("xenia-app")
       "LLVMDxcSupport",
       "SDL2",
       "Metal.framework",
+      "MetalFX.framework",
       "MetalKit.framework",
       "QuartzCore.framework",
     })
