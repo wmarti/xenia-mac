@@ -85,6 +85,11 @@ DEFINE_bool(metal_log_edram_dump_color_samples, false,
             "Log Metal EDRAM dump color samples and packed values (debug).",
             "GPU");
 
+DEFINE_bool(metal_verbose_logging, false,
+            "Enable extremely verbose Metal backend logging (very slow; use only "
+            "for debugging).",
+            "GPU");
+
 DEFINE_bool(metal_shader_disk_cache, true,
             "Cache compiled Metal shader libraries (metallib) to disk when "
             "store_shaders is enabled.",

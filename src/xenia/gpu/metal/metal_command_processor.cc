@@ -91,6 +91,12 @@ DEFINE_bool(metal_draw_debug_quad, false,
             "GPU");
 DEFINE_bool(metal_capture_frame, false,
             "Capture Metal swap frames for readback (debug).", "GPU");
+DEFINE_bool(metal_log_memexport, false,
+            "Log Metal memexport draws and ranges (debug).", "GPU");
+DEFINE_bool(metal_readback_memexport, false,
+            "Read back Metal memexport ranges on command buffer completion "
+            "(debug).",
+            "GPU");
 DEFINE_bool(metal_disable_swap_dest_swap, false,
             "Disable forcing RB swap based on resolve dest_swap (debug).",
             "GPU");
@@ -312,6 +318,7 @@ void ProbeGeometryMetallib(MTL::Device* device) {
   NS::String* fn_name = NS::String::string("main", NS::UTF8StringEncoding);
   MTL::Function* fn_no_constants = library->newFunction(fn_name);
   if (fn_no_constants) {
+    XELOGI("Geometry probe: newFunction(main) succeeded without constants");
     fn_no_constants->release();
   } else {
     XELOGE("Geometry probe: newFunction(main) failed without constants");
@@ -333,6 +340,10 @@ void ProbeGeometryMetallib(MTL::Device* device) {
   error = nullptr;
   MTL::Function* fn_constants = library->newFunction(fn_name, fc, &error);
   if (fn_constants) {
+    XELOGI(
+        "Geometry probe: newFunction(main) succeeded with constants "
+        "(output_size={})",
+        output_size);
     fn_constants->release();
   } else {
     LogMetalErrorDetails(
@@ -634,6 +645,8 @@ void MetalCommandProcessor::MarkResolvedMemory(uint32_t base_ptr,
                                                uint32_t length) {
   if (length == 0) return;
   resolved_memory_ranges_.push_back({base_ptr, length});
+  XELOGI("MetalCommandProcessor::MarkResolvedMemory: 0x{:08X} length={}",
+         base_ptr, length);
 }
 
 bool MetalCommandProcessor::IsResolvedMemory(uint32_t base_ptr,
@@ -687,6 +700,7 @@ bool MetalCommandProcessor::ConsumeSwapDestSwap(uint32_t dest_base,
 }
 
 bool MetalCommandProcessor::SetupContext() {
+  XELOGI("MetalCommandProcessor::SetupContext: Starting");
   saw_swap_ = false;
   last_swap_ptr_ = 0;
   last_swap_width_ = 0;
@@ -698,6 +712,7 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("Failed to initialize base command processor context");
     return false;
   }
+  XELOGI("MetalCommandProcessor::SetupContext: Base context initialized");
 
   const ui::metal::MetalProvider& provider = GetMetalProvider();
   device_ = provider.GetDevice();
@@ -707,6 +722,7 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("MetalCommandProcessor: No Metal device or command queue available");
     return false;
   }
+  XELOGI("MetalCommandProcessor::SetupContext: Got device and queue");
 
   wait_shared_event_ = device_->newSharedEvent();
   if (wait_shared_event_) {
@@ -722,46 +738,65 @@ bool MetalCommandProcessor::SetupContext() {
   bool supports_mac2 = device_->supportsFamily(MTL::GPUFamilyMac2);
   bool supports_metal3 = device_->supportsFamily(MTL::GPUFamilyMetal3);
   bool supports_metal4 = device_->supportsFamily(MTL::GPUFamilyMetal4);
+  XELOGI(
+      "MetalCommandProcessor::SetupContext: GPU family support Apple7={} "
+      "Mac2={} Metal3={} Metal4={}",
+      supports_apple7, supports_mac2, supports_metal3, supports_metal4);
   mesh_shader_supported_ = supports_apple7 || supports_mac2;
+  XELOGI("MetalCommandProcessor::SetupContext: Mesh shaders supported={}",
+         mesh_shader_supported_);
 
   draw_ring_count_ =
       std::max<int32_t>(1, ::cvars::metal_draw_ring_count);
 
   // Initialize shared memory
+  XELOGI("MetalCommandProcessor::SetupContext: Creating shared memory");
   shared_memory_ = std::make_unique<MetalSharedMemory>(*this, *memory_);
   if (!shared_memory_->Initialize()) {
     XELOGE("Failed to initialize shared memory");
     return false;
   }
+  XELOGI("MetalCommandProcessor::SetupContext: Shared memory initialized");
 
   // Initialize primitive processor (index/primitive conversion like D3D12).
+  XELOGI("MetalCommandProcessor::SetupContext: Creating primitive processor");
   primitive_processor_ = std::make_unique<MetalPrimitiveProcessor>(
       *this, *register_file_, *memory_, trace_writer_, *shared_memory_);
   if (!primitive_processor_->Initialize()) {
     XELOGE("Failed to initialize Metal primitive processor");
     return false;
   }
+  XELOGI(
+      "MetalCommandProcessor::SetupContext: Primitive processor initialized");
 
+  XELOGI("MetalCommandProcessor::SetupContext: Creating texture cache");
   texture_cache_ = std::make_unique<MetalTextureCache>(this, *register_file_,
                                                        *shared_memory_, 1, 1);
   if (!texture_cache_->Initialize()) {
     XELOGE("Failed to initialize Metal texture cache");
     return false;
   }
+  XELOGI("MetalCommandProcessor::SetupContext: Texture cache initialized");
 
   // Initialize render target cache
+  XELOGI("MetalCommandProcessor::SetupContext: Creating render target cache");
   render_target_cache_ = std::make_unique<MetalRenderTargetCache>(
       *register_file_, *memory_, &trace_writer_, 1, 1, *this);
   if (!render_target_cache_->Initialize()) {
     XELOGE("Failed to initialize Metal render target cache");
     return false;
   }
+  XELOGI(
+      "MetalCommandProcessor::SetupContext: Render target cache initialized");
 
   // Initialize shader translation pipeline
+  XELOGI(
+      "MetalCommandProcessor::SetupContext: Initializing shader translation");
   if (!InitializeShaderTranslation()) {
     XELOGE("Failed to initialize shader translation");
     return false;
   }
+  XELOGI("MetalCommandProcessor::SetupContext: Shader translation initialized");
   ProbeGeometryMetallib(device_);
 
   if (mesh_shader_supported_) {
@@ -777,6 +812,7 @@ bool MetalCommandProcessor::SetupContext() {
     tessellator_tables_buffer_->setLabel(
         NS::String::string("XeniaTessellatorTables", NS::UTF8StringEncoding));
     IRRuntimeLoadTessellatorTables(tessellator_tables_buffer_);
+    XELOGI("MetalCommandProcessor::SetupContext: Loaded tessellator tables");
   }
 
   // Create render target texture for offscreen rendering
@@ -912,6 +948,7 @@ bool MetalCommandProcessor::SetupContext() {
   }
   SetActiveDrawRing(ring);
 
+  XELOGI("MetalCommandProcessor::SetupContext() completed successfully");
   return true;
 }
 
@@ -968,14 +1005,21 @@ bool MetalCommandProcessor::InitializeShaderTranslation() {
     std::ostringstream version_stream;
     version_stream << os_version.majorVersion << "." << os_version.minorVersion
                    << "." << os_version.patchVersion;
+    XELOGI("MetalShaderConverter: minimum target gpu_family={} os={}",
+           static_cast<int>(min_family), version_stream.str());
     metal_shader_converter_->SetMinimumTarget(
         min_family, IROperatingSystem_macOS, version_stream.str());
   }
 
+  XELOGI("Shader translation pipeline initialized successfully");
   return true;
 }
 
 void MetalCommandProcessor::PrepareForWait() {
+  XELOGI("MetalCommandProcessor::PrepareForWait: enter (encoder={}, cb={})",
+         current_render_encoder_ ? "yes" : "no",
+         current_command_buffer_ ? "yes" : "no");
+
   // Flush any pending Metal command buffers before entering wait state.
   // This is critical because:
   // 1. The worker thread's autorelease pool will be drained when it exits
@@ -988,12 +1032,16 @@ void MetalCommandProcessor::PrepareForWait() {
   // drainage.
 
   if (current_render_encoder_) {
+    XELOGI("MetalCommandProcessor::PrepareForWait: ending render encoder");
     current_render_encoder_->endEncoding();
     current_render_encoder_->release();
     current_render_encoder_ = nullptr;
   }
 
   if (current_command_buffer_) {
+    XELOGI(
+        "MetalCommandProcessor::PrepareForWait: submitting and waiting for "
+        "command buffer");
     uint64_t wait_value = 0;
     if (wait_shared_event_) {
       wait_value = ++wait_shared_event_value_;
@@ -1012,6 +1060,7 @@ void MetalCommandProcessor::PrepareForWait() {
     current_command_buffer_ = nullptr;
     SetActiveDrawRing(nullptr);
     current_draw_index_ = 0;
+    XELOGI("MetalCommandProcessor::PrepareForWait: command buffer completed");
   }
   DrainCommandBufferAutoreleasePool();
 
@@ -1021,6 +1070,9 @@ void MetalCommandProcessor::PrepareForWait() {
   // Submit and wait for a dummy command buffer to ensure ALL GPU work
   // completes.
   if (command_queue_) {
+    XELOGI(
+        "MetalCommandProcessor::PrepareForWait: submitting sync command "
+        "buffer");
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
     // Note: commandBuffer() returns an autoreleased object per metal-cpp docs.
     // We do NOT call release() since we didn't retain() it.
@@ -1040,6 +1092,7 @@ void MetalCommandProcessor::PrepareForWait() {
         sync_cmd->waitUntilCompleted();
       }
       // Don't release - it's autoreleased and will be cleaned up by the pool
+      XELOGI("MetalCommandProcessor::PrepareForWait: sync complete");
     }
     pool->release();
   }
@@ -1049,14 +1102,24 @@ void MetalCommandProcessor::PrepareForWait() {
 }
 
 void MetalCommandProcessor::ShutdownContext() {
+  XELOGI("MetalCommandProcessor::ShutdownContext: begin");
+  fflush(stdout);
+  fflush(stderr);
+
   // End any active render encoder before shutdown
   if (current_render_encoder_) {
+    XELOGI("MetalCommandProcessor::ShutdownContext: ending render encoder");
+    fflush(stdout);
+    fflush(stderr);
     current_render_encoder_->endEncoding();
     // Don't release yet - wait until command buffer completes
   }
 
   // Submit and wait for any pending command buffer
   if (current_command_buffer_) {
+    XELOGI("MetalCommandProcessor::ShutdownContext: committing command buffer");
+    fflush(stdout);
+    fflush(stderr);
     uint64_t wait_value = 0;
     if (wait_shared_event_) {
       wait_value = ++wait_shared_event_value_;
@@ -1064,12 +1127,18 @@ void MetalCommandProcessor::ShutdownContext() {
     }
     ScheduleDrawRingRelease(current_command_buffer_);
     current_command_buffer_->commit();
+    XELOGI("MetalCommandProcessor::ShutdownContext: waiting for completion");
+    fflush(stdout);
+    fflush(stderr);
     if (wait_shared_event_) {
       wait_shared_event_->waitUntilSignaledValue(
           wait_value, std::numeric_limits<uint64_t>::max());
     } else {
       current_command_buffer_->waitUntilCompleted();
     }
+    XELOGI("MetalCommandProcessor::ShutdownContext: command buffer completed");
+    fflush(stdout);
+    fflush(stderr);
     current_command_buffer_->release();
     current_command_buffer_ = nullptr;
     SetActiveDrawRing(nullptr);
@@ -1082,6 +1151,9 @@ void MetalCommandProcessor::ShutdownContext() {
   // a dummy command buffer to ensure all GPU work on this queue has completed
   // before tearing down resources on thread exit.
   if (command_queue_) {
+    XELOGI(
+        "MetalCommandProcessor::ShutdownContext: submitting sync command "
+        "buffer");
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
     MTL::CommandBuffer* sync_cmd = command_queue_->commandBuffer();
     if (sync_cmd) {
@@ -1097,12 +1169,16 @@ void MetalCommandProcessor::ShutdownContext() {
       } else {
         sync_cmd->waitUntilCompleted();
       }
+      XELOGI("MetalCommandProcessor::ShutdownContext: sync complete");
     }
     pool->release();
   }
 
   // Now safe to release encoder and command buffer
   if (current_render_encoder_) {
+    XELOGI("MetalCommandProcessor::ShutdownContext: releasing render encoder");
+    fflush(stdout);
+    fflush(stderr);
     current_render_encoder_->release();
     current_render_encoder_ = nullptr;
   }
@@ -1111,6 +1187,9 @@ void MetalCommandProcessor::ShutdownContext() {
     current_command_buffer_ = nullptr;
   }
   DrainCommandBufferAutoreleasePool();
+  XELOGI("MetalCommandProcessor::ShutdownContext: encoder/cb cleanup done");
+  fflush(stdout);
+  fflush(stderr);
 
   {
     std::lock_guard<std::mutex> lock(draw_ring_mutex_);
@@ -1152,7 +1231,13 @@ void MetalCommandProcessor::ShutdownContext() {
 
   ShutdownShaderStorage();
 
+  XELOGI(
+      "MetalCommandProcessor::ShutdownContext: tessellation draws: "
+      "path_select={} tessellated={}",
+      tessellation_enabled_draws_, tessellated_draws_);
+
   CommandProcessor::ShutdownContext();
+  XELOGI("MetalCommandProcessor::ShutdownContext: end");
 }
 
 void MetalCommandProcessor::InitializeShaderStorage(
@@ -1615,12 +1700,18 @@ void MetalCommandProcessor::PrewarmPipelineBinaryArchive(
     }
   }
 
+  if (::cvars::metal_verbose_logging) {
+    XELOGI("Metal pipeline binary archive prewarmed {} pipelines", prewarmed);
+  }
 }
 
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
-  ProcessCompletedSubmissions();
+  if (::cvars::metal_verbose_logging) {
+    XELOGI("MetalCommandProcessor::IssueSwap(ptr={:08X}, {}x{})", frontbuffer_ptr,
+           frontbuffer_width, frontbuffer_height);
+  }
   saw_swap_ = true;
   last_swap_ptr_ = frontbuffer_ptr;
   last_swap_width_ = frontbuffer_width;
@@ -1686,6 +1777,11 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         if (src_format != last_format || src_samples != last_samples ||
             src_width != last_width || src_height != last_height ||
             swap_format_int != last_swap_format) {
+          XELOGI(
+              "Metal IssueSwap: source fmt={} samples={} size={}x{} "
+              "swap_format={} output={}x{}",
+              int(src_format), src_samples, src_width, src_height,
+              swap_format_int, output_width, output_height);
           last_format = src_format;
           last_samples = src_samples;
           last_width = src_width;
@@ -1719,6 +1815,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       static uint32_t swap_dest_miss_count = 0;
       if (swap_dest_miss_count < 8) {
         ++swap_dest_miss_count;
+        XELOGI(
+            "Metal IssueSwap: no dest_swap record for swap ptr 0x{:08X}",
+            frontbuffer_ptr);
       }
     }
     bool force_swap_rb = has_swap_dest_swap && swap_dest_swap;
@@ -1726,8 +1825,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       static uint32_t swap_dest_disable_log_count = 0;
       if (swap_dest_disable_log_count < 8) {
         ++swap_dest_disable_log_count;
+        XELOGI(
+            "Metal IssueSwap: dest_swap RB swap disabled by "
+            "metal_disable_swap_dest_swap");
       }
       force_swap_rb = false;
+    }
+    if (force_swap_rb) {
+      XELOGI("Metal IssueSwap: forcing RB swap due to dest_swap");
     }
 
     if (!source_texture) {
@@ -1909,6 +2014,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       bool major_mode_explicit) {
   const RegisterFile& regs = *register_file_;
   LogCacheStatsIfNeeded();
+  // Debug flags for background-related render targets.
+  bool debug_bg_rt0_320x2048 = false;
   uint32_t normalized_color_mask = 0;
 
   // Check for copy mode
@@ -1961,6 +2068,38 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   if (memexport_used_pixel) {
     draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
   }
+  static std::unordered_set<uint64_t> logged_memexport_vs;
+  static std::unordered_set<uint64_t> logged_memexport_ps;
+  if (memexport_used_vertex) {
+    uint64_t vs_hash = vertex_shader->ucode_data_hash();
+    if (logged_memexport_vs.insert(vs_hash).second) {
+      XELOGI("Metal memexport VS: hash={:016X} eM=0x{:02X}", vs_hash,
+             vertex_shader->memexport_eM_written());
+    }
+  }
+  if (memexport_used_pixel && pixel_shader) {
+    uint64_t ps_hash = pixel_shader->ucode_data_hash();
+    if (logged_memexport_ps.insert(ps_hash).second) {
+      XELOGI("Metal memexport PS: hash={:016X} eM=0x{:02X}", ps_hash,
+             pixel_shader->memexport_eM_written());
+    }
+  }
+  static uint32_t memexport_log_count = 0;
+  if (cvars::metal_log_memexport && memexport_used && memexport_log_count < 16) {
+    ++memexport_log_count;
+    XELOGI(
+        "Metal memexport draw: vs_memexport={} ps_memexport={} ranges={}",
+        memexport_used_vertex ? 1 : 0, memexport_used_pixel ? 1 : 0,
+        memexport_ranges_.size());
+    if (memexport_ranges_.empty()) {
+      XELOGW("Metal memexport draw has no ranges (missing stream constants?)");
+    }
+    for (const auto& range : memexport_ranges_) {
+      XELOGI("  memexport range: base=0x{:08X} size={}",
+             range.base_address_dwords << 2, range.size_bytes);
+    }
+  }
+
   // Primitive/index processing (like D3D12/Vulkan).
   PrimitiveProcessor::ProcessingResult primitive_processing_result;
   if (!primitive_processor_) {
@@ -1978,6 +2117,41 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       Shader::HostVertexShaderType::kMemExportCompute) {
     primitive_processing_result.host_vertex_shader_type =
         Shader::HostVertexShaderType::kVertex;
+    static bool logged_memexport_compute = false;
+    if (!logged_memexport_compute) {
+      logged_memexport_compute = true;
+      XELOGI(
+          "Metal: memexport-only draws use the vertex path (MSC supports UAV "
+          "writes in vertex shaders)");
+    }
+  }
+
+  // Log the first few draws to identify primitive processing / shader
+  // modification issues quickly when bringing up the backend.
+  static uint32_t draw_debug_log_count = 0;
+  if (draw_debug_log_count < 8) {
+    ++draw_debug_log_count;
+    auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+    auto vgt_output_path_cntl = regs.Get<reg::VGT_OUTPUT_PATH_CNTL>();
+    auto vgt_hos_cntl = regs.Get<reg::VGT_HOS_CNTL>();
+    auto rb_modecontrol = regs.Get<reg::RB_MODECONTROL>();
+    XELOGI(
+        "DRAW_PROC_DEBUG[{}]: guest_prim={} host_prim={} host_vs_type={} "
+        "tessellated={} tess_mode={} path_select={} hos_tess_mode={} "
+        "src_select={} idx_fmt={} host_idx_fmt={} ib_type={} edram_mode={}",
+        draw_debug_log_count,
+        uint32_t(primitive_processing_result.guest_primitive_type),
+        uint32_t(primitive_processing_result.host_primitive_type),
+        uint32_t(primitive_processing_result.host_vertex_shader_type),
+        primitive_processing_result.IsTessellated(),
+        uint32_t(primitive_processing_result.tessellation_mode),
+        uint32_t(vgt_output_path_cntl.path_select),
+        uint32_t(vgt_hos_cntl.tess_mode),
+        uint32_t(vgt_draw_initiator.source_select),
+        uint32_t(vgt_draw_initiator.index_size),
+        uint32_t(primitive_processing_result.host_index_format),
+        uint32_t(primitive_processing_result.index_buffer_type),
+        uint32_t(rb_modecontrol.edram_mode));
   }
 
   auto vgt_output_path_cntl = regs.Get<reg::VGT_OUTPUT_PATH_CNTL>();
@@ -1986,9 +2160,27 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       xenos::VGTOutputPath::kTessellationEnable;
   if (tessellation_enabled) {
     ++tessellation_enabled_draws_;
+    if (!logged_tessellation_enable_) {
+      logged_tessellation_enable_ = true;
+      auto vgt_hos_cntl = regs.Get<reg::VGT_HOS_CNTL>();
+      XELOGI(
+          "Metal: tessellation enabled in draw (hos_tess_mode={}, "
+          "guest_prim={}, host_prim={})",
+          uint32_t(vgt_hos_cntl.tess_mode),
+          uint32_t(primitive_processing_result.guest_primitive_type),
+          uint32_t(primitive_processing_result.host_primitive_type));
+    }
   }
   if (primitive_processing_result.IsTessellated()) {
     ++tessellated_draws_;
+    if (!logged_tessellated_draw_) {
+      logged_tessellated_draw_ = true;
+      XELOGI(
+          "Metal: tessellation emulation active in draw (host_vs_type={}, "
+          "tess_mode={})",
+          uint32_t(primitive_processing_result.host_vertex_shader_type),
+          uint32_t(primitive_processing_result.tessellation_mode));
+    }
   }
 
   bool use_tessellation_emulation = false;
@@ -2030,6 +2222,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
         pixel_shader ? draw_util::GetNormalizedColorMask(
                            regs, pixel_shader->writes_color_targets())
                      : 0;
+    XELOGI(
+        "Metal IssueDraw: writes_color_targets=0x{:X}, "
+        "normalized_color_mask=0x{:X}",
+        pixel_shader ? pixel_shader->writes_color_targets() : 0,
+        normalized_color_mask);
     if (!render_target_cache_->Update(is_rasterization_done,
                                       normalized_depth_control,
                                       normalized_color_mask, *vertex_shader)) {
@@ -2039,11 +2236,100 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       return false;
     }
 
+    // Log info for all draws to help debug missing background
+    MTL::Texture* rt0_tex = render_target_cache_->GetColorTarget(0);
+    if (rt0_tex) {
+      uint32_t rt0_w = rt0_tex->width();
+      uint32_t rt0_h = rt0_tex->height();
+      static uint32_t draw_counter = 0;
+      ++draw_counter;
+
+      // Check texture bindings
+      size_t vs_tex_count =
+          vertex_shader
+              ? vertex_shader->GetTextureBindingsAfterTranslation().size()
+              : 0;
+      size_t ps_tex_count =
+          pixel_shader
+              ? pixel_shader->GetTextureBindingsAfterTranslation().size()
+              : 0;
+
+      XELOGI(
+          "DRAW_DEBUG: #{} RT0={}x{} index_count={} primitive={} VS_tex={} "
+          "PS_tex={}",
+          draw_counter, rt0_w, rt0_h, index_count,
+          static_cast<int>(primitive_type), vs_tex_count, ps_tex_count);
+
+      // Mark background-related RT sizes for additional debugging.
+      if (rt0_w == 320 && rt0_h == 2048) {
+        debug_bg_rt0_320x2048 = true;
+        XELOGI("BG_DEBUG: draw {} into 320x2048 RT0", draw_counter);
+      } else if (rt0_w == 1280 && rt0_h == 2048) {
+        XELOGI("BG_DEBUG: draw {} into 1280x2048 RT0", draw_counter);
+      }
+    }
   }
 
   // Begin command buffer if needed (will use cache-provided render targets).
   BeginCommandBuffer();
   EnsureDrawRingCapacity();
+  if (cvars::metal_readback_memexport && memexport_used) {
+    static uint32_t memexport_readback_count = 0;
+    if (memexport_readback_count < 4) {
+      ++memexport_readback_count;
+      MTL::CommandBuffer* cmd = EnsureCommandBuffer();
+      MTL::Buffer* shared_mem_buffer =
+          shared_memory_ ? shared_memory_->GetBuffer() : nullptr;
+      if (!cmd || !shared_mem_buffer) {
+        XELOGW("Metal memexport readback skipped (no command buffer/buffer)");
+      } else if (shared_mem_buffer->storageMode() !=
+                 MTL::StorageModeShared) {
+        XELOGW(
+            "Metal memexport readback skipped (shared memory not CPU-visible)");
+      } else {
+        auto ranges = memexport_ranges_;
+        uint32_t readback_id = memexport_readback_count;
+        cmd->addCompletedHandler(
+            [shared_mem_buffer, ranges, readback_id](MTL::CommandBuffer*) {
+              const uint8_t* bytes =
+                  static_cast<const uint8_t*>(shared_mem_buffer->contents());
+              if (!bytes) {
+                XELOGW("Metal memexport readback {}: no buffer contents",
+                       readback_id);
+                return;
+              }
+              for (const auto& range : ranges) {
+                uint32_t base_bytes = range.base_address_dwords << 2;
+                uint64_t buffer_length = shared_mem_buffer->length();
+                if (base_bytes >= buffer_length) {
+                  continue;
+                }
+                uint32_t available = std::min<uint32_t>(
+                    range.size_bytes,
+                    uint32_t(buffer_length - base_bytes));
+                uint8_t sample_bytes[16] = {};
+                uint32_t sample_count = std::min<uint32_t>(available, 16u);
+                std::memcpy(sample_bytes, bytes + base_bytes, sample_count);
+                XELOGI(
+                    "Metal memexport readback {}: base=0x{:08X} size={} "
+                    "bytes[0..15]={:02X} {:02X} {:02X} {:02X}  "
+                    "{:02X} {:02X} {:02X} {:02X}  {:02X} {:02X} {:02X} {:02X}  "
+                    "{:02X} {:02X} {:02X} {:02X}",
+                    readback_id, base_bytes, range.size_bytes, sample_bytes[0],
+                    sample_bytes[1], sample_bytes[2], sample_bytes[3],
+                    sample_bytes[4], sample_bytes[5], sample_bytes[6],
+                    sample_bytes[7], sample_bytes[8], sample_bytes[9],
+                    sample_bytes[10], sample_bytes[11], sample_bytes[12],
+                    sample_bytes[13], sample_bytes[14], sample_bytes[15]);
+                if (sample_count < 16) {
+                  break;
+                }
+              }
+            });
+      }
+    }
+  }
+
   if (cvars::metal_draw_debug_quad) {
     if (!debug_pipeline_) {
       if (!CreateDebugPipeline()) {
@@ -2250,6 +2536,51 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     texture_cache_->RequestTextures(used_texture_mask);
   }
 
+  // For the background pass (draws into 320x2048 RT0), log the pixel shader
+  // texture bindings so we can see which textures are actually sampled and
+  // whether they are present in the Metal texture cache.
+  if (debug_bg_rt0_320x2048 && texture_cache_) {
+    uint32_t vs_mask = vertex_shader->GetUsedTextureMaskAfterTranslation();
+    uint32_t ps_mask =
+        pixel_shader ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0;
+    XELOGI("BG_DEBUG: used_texture_mask: VS=0x{:X}, PS=0x{:X}, Combined=0x{:X}",
+           vs_mask, ps_mask, vs_mask | ps_mask);
+
+    if (vertex_shader) {
+      const auto& vs_tex_bindings =
+          vertex_shader->GetTextureBindingsAfterTranslation();
+      XELOGI("BG_DEBUG: vertex shader has {} texture bindings",
+             vs_tex_bindings.size());
+      for (size_t i = 0; i < vs_tex_bindings.size(); ++i) {
+        const auto& binding = vs_tex_bindings[i];
+        MTL::Texture* tex = texture_cache_->GetTextureForBinding(
+            binding.fetch_constant, binding.dimension, binding.is_signed);
+        XELOGI(
+            "BG_DEBUG: VS binding[{}]: fetch_constant={}, dim={}, signed={}, "
+            "texture_present={}",
+            i, binding.fetch_constant, static_cast<int>(binding.dimension),
+            binding.is_signed, tex != nullptr);
+      }
+    }
+
+    if (pixel_shader) {
+      const auto& ps_tex_bindings =
+          pixel_shader->GetTextureBindingsAfterTranslation();
+      XELOGI("BG_DEBUG: pixel shader has {} texture bindings",
+             ps_tex_bindings.size());
+      for (size_t i = 0; i < ps_tex_bindings.size(); ++i) {
+        const auto& binding = ps_tex_bindings[i];
+        MTL::Texture* tex = texture_cache_->GetTextureForBinding(
+            binding.fetch_constant, binding.dimension, binding.is_signed);
+        XELOGI(
+            "BG_DEBUG: PS binding[{}]: fetch_constant={}, dim={}, signed={}, "
+            "texture_present={}",
+            i, binding.fetch_constant, static_cast<int>(binding.dimension),
+            binding.is_signed, tex != nullptr);
+      }
+    }
+  }
+
   struct VertexBindingRange {
     uint32_t binding_index = 0;
     uint32_t offset = 0;
@@ -2340,6 +2671,48 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       vertex_ranges[vertex_range_count++] = range;
     }
 
+    // Debug: Check vertex data AFTER sync - with endian swap
+    static int draw_count = 0;
+    if (::cvars::metal_verbose_logging && draw_count < 3) {
+      draw_count++;
+      const RegisterFile& regs_dbg = *register_file_;
+      const uint32_t* fetch_data =
+          &regs_dbg.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0];
+      uint32_t fc0 = fetch_data[0];
+      uint32_t fc1 = fetch_data[1];
+      uint32_t vertex_addr = fc0 & 0xFFFFFFFC;
+      uint32_t endian_mode = fc1 & 0x3;  // bits 0-1 of dword_1
+      MTL::Buffer* sm = shared_memory_->GetBuffer();
+      if (sm && vertex_addr < sm->length()) {
+        const uint8_t* sm_data = static_cast<const uint8_t*>(sm->contents());
+        const uint32_t* raw =
+            reinterpret_cast<const uint32_t*>(sm_data + vertex_addr);
+
+        // Byteswap if endian mode is k8in32 (mode 2)
+        auto bswap32 = [](uint32_t v) -> uint32_t {
+          return ((v >> 24) & 0xFF) | ((v >> 8) & 0xFF00) |
+                 ((v << 8) & 0xFF0000) | ((v << 24) & 0xFF000000);
+        };
+
+        float v0x, v0y, v0z;
+        if (endian_mode == 2) {
+          uint32_t x = bswap32(raw[0]);
+          uint32_t y = bswap32(raw[1]);
+          uint32_t z = bswap32(raw[2]);
+          std::memcpy(&v0x, &x, 4);
+          std::memcpy(&v0y, &y, 4);
+          std::memcpy(&v0z, &z, 4);
+        } else {
+          std::memcpy(&v0x, &raw[0], 4);
+          std::memcpy(&v0y, &raw[1], 4);
+          std::memcpy(&v0z, &raw[2], 4);
+        }
+
+        XELOGI("DRAW#{}: FC0=0x{:08X} FC1=0x{:08X} addr=0x{:08X} endian={}",
+               draw_count, fc0, fc1, vertex_addr, endian_mode);
+        XELOGI("  After byteswap: v0=({:.3f},{:.3f},{:.3f})", v0x, v0y, v0z);
+      }
+    }
   }
 
   // Set pipeline state on encoder
@@ -2363,6 +2736,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       shared_memory_is_uav
           ? (MTL::ResourceUsageRead | MTL::ResourceUsageWrite)
           : MTL::ResourceUsageRead;
+  if (cvars::metal_log_memexport && memexport_used) {
+    XELOGI("Metal memexport shared_memory_is_uav={}",
+           shared_memory_is_uav ? 1 : 0);
+  }
+
   // Bind IR Converter runtime resources.
   // The Metal Shader Converter expects resources at specific bind points.
   if (res_heap_ab_ && smp_heap_ab_ && uniforms_buffer_ && shared_memory_) {
@@ -2411,8 +2789,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
     // Apply per-draw viewport and scissor so the Metal viewport
     // matches the guest viewport computed by draw_util.
-    draw_util::Scissor scissor;
-    draw_util::GetScissor(regs, scissor);
+    draw_util::Scissor scissor = guest_scissor;
+    if (!guest_scissor_valid) {
+      draw_util::GetScissor(regs, scissor);
+    }
     uint32_t draw_resolution_scale_x =
         texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1;
     uint32_t draw_resolution_scale_y =
@@ -2451,6 +2831,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       mtl_scissor.y = 0;
       mtl_scissor.width = vp_width;
       mtl_scissor.height = vp_height;
+      static bool logged_full_scissor_override = false;
+      if (!logged_full_scissor_override) {
+        logged_full_scissor_override = true;
+        XELOGI("Metal: forcing full scissor override (debug)");
+      }
     }
     current_render_encoder_->setScissorRect(mtl_scissor);
 
@@ -2459,6 +2844,68 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     // Fixed-function depth/stencil state is not part of the pipeline state in
     // Metal, so update it per draw.
     ApplyDepthStencilState(primitive_polygonal, depth_control);
+
+    // Debug: Log viewport/scissor setup for early draws
+    static int vp_log_count = 0;
+    if (vp_log_count < 8) {
+      vp_log_count++;
+      XELOGI(
+          "VP_DEBUG: draw={} RT={}x{} viewport=({},{} {}x{}) scissor=({},{} "
+          "{}x{}) ndc_scale=({:.3f},{:.3f},{:.3f}) "
+          "ndc_offset=({:.3f},{:.3f},{:.3f})",
+          vp_log_count, vp_width, vp_height,
+          static_cast<int>(mtl_viewport.originX),
+          static_cast<int>(mtl_viewport.originY),
+          static_cast<int>(mtl_viewport.width),
+          static_cast<int>(mtl_viewport.height), mtl_scissor.x, mtl_scissor.y,
+          mtl_scissor.width, mtl_scissor.height, viewport_info.ndc_scale[0],
+          viewport_info.ndc_scale[1], viewport_info.ndc_scale[2],
+          viewport_info.ndc_offset[0], viewport_info.ndc_offset[1],
+          viewport_info.ndc_offset[2]);
+    }
+
+    // Log scissor changes and deviations from full RT.
+    static uint64_t scissor_draw_index = 0;
+    static bool last_scissor_valid = false;
+    static MTL::ScissorRect last_scissor = {};
+    static int scissor_log_count = 0;
+    static bool logged_full_scissor = false;
+    scissor_draw_index++;
+    bool is_full_scissor = mtl_scissor.x == 0 && mtl_scissor.y == 0 &&
+                           mtl_scissor.width == vp_width &&
+                           mtl_scissor.height == vp_height;
+    bool scissor_changed = !last_scissor_valid ||
+                           last_scissor.x != mtl_scissor.x ||
+                           last_scissor.y != mtl_scissor.y ||
+                           last_scissor.width != mtl_scissor.width ||
+                           last_scissor.height != mtl_scissor.height;
+    if (scissor_changed && scissor_log_count < 64) {
+      last_scissor = mtl_scissor;
+      last_scissor_valid = true;
+      ++scissor_log_count;
+      auto scissor_tl = regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
+      auto scissor_br = regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
+      auto screen_tl = regs.Get<reg::PA_SC_SCREEN_SCISSOR_TL>();
+      auto screen_br = regs.Get<reg::PA_SC_SCREEN_SCISSOR_BR>();
+      auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+      uint32_t surface_pitch =
+          regs.Get<reg::RB_SURFACE_INFO>().surface_pitch;
+      XELOGI(
+          "SCISSOR_DEBUG: draw={} RT={}x{} scissor=({},{} {}x{}) "
+          "window_tl=({},{}), window_br=({},{}), screen_tl=({},{}), "
+          "screen_br=({},{}), window_offset=({},{}), surface_pitch={}",
+          scissor_draw_index, vp_width, vp_height, mtl_scissor.x,
+          mtl_scissor.y, mtl_scissor.width, mtl_scissor.height,
+          scissor_tl.tl_x, scissor_tl.tl_y, scissor_br.br_x, scissor_br.br_y,
+          screen_tl.tl_x, screen_tl.tl_y, screen_br.br_x, screen_br.br_y,
+          window_offset.window_x_offset, window_offset.window_y_offset,
+          surface_pitch);
+    }
+    if (is_full_scissor && !logged_full_scissor) {
+      logged_full_scissor = true;
+      XELOGI("SCISSOR_DEBUG: draw={} scissor now full RT {}x{}",
+             scissor_draw_index, vp_width, vp_height);
+    }
 
     // Update full system constants from GPU registers
     // This populates flags, NDC transform, alpha test, blend constants, etc.
@@ -2576,6 +3023,97 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     std::memcpy(uniforms_pixel + kFetchConstantOffset,
                 &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
                 kFetchConstantCount * sizeof(uint32_t));
+
+    // DEBUG: Log system constants and interpolators on first draw
+    static bool logged_debug_info = false;
+    if (!logged_debug_info) {
+      logged_debug_info = true;
+
+      XELOGI("=== FIRST DRAW DEBUG INFO ===");
+      XELOGI("shared_memory_is_uav: {} (vs_memexport={}, ps_memexport={})",
+             shared_memory_is_uav, memexport_used_vertex, memexport_used_pixel);
+      XELOGI("primitive_polygonal: {}", primitive_polygonal);
+
+      // Dump full uniforms buffer
+      DumpUniformsBuffer();
+
+      // Log interpolator info
+      LogInterpolators(vertex_shader, pixel_shader);
+
+      // Log shared memory info
+      MTL::Buffer* sm = shared_memory_->GetBuffer();
+      if (sm) {
+        XELOGI("Shared memory GPU addr=0x{:016X} size={}MB", sm->gpuAddress(),
+               sm->length() / (1024 * 1024));
+      }
+
+      // Log top-level AB layout
+      XELOGI("Top-level AB entries:");
+      XELOGI("  [0-3] SRV: res_heap @ 0x{:016X}", res_heap_ab_->gpuAddress());
+      XELOGI("  [5-8] UAV: res_heap @ 0x{:016X}", res_heap_ab_->gpuAddress());
+      XELOGI("  [9] Samplers: smp_heap @ 0x{:016X}",
+             smp_heap_ab_->gpuAddress());
+      XELOGI("  [10-13] CBV: cbv_heap @ 0x{:016X}", cbv_heap_ab_->gpuAddress());
+      XELOGI("  CBV heap entries point to uniforms @ 0x{:016X} (stride={})",
+             uniforms_buffer_->gpuAddress(), kCBVSize);
+
+      // Dump fetch constant 95 from b3 (at offset 760 in fetch constants
+      // buffer) FC95 is at register 47 (95/2=47), offset = 47*16 = 752 bytes
+      // Plus 8 bytes for zw components = 760 bytes
+      uint8_t* fc_buffer = uniforms_vertex + kFetchConstantOffset;
+      const uint32_t* fc95 = reinterpret_cast<const uint32_t*>(fc_buffer + 760);
+      XELOGI("Fetch constant 95 (at b3 offset 760):");
+      XELOGI("  Raw: 0x{:08X} 0x{:08X}", fc95[0], fc95[1]);
+      uint32_t vb_addr = fc95[0] & 0xFFFFFFFC;
+      uint32_t vb_size = (fc95[1] >> 2) & 0x3FFFFF;  // size field
+      XELOGI("  VB addr=0x{:08X} size={}", vb_addr, vb_size * 4);
+
+      // Check if vertex data exists at this address in shared memory
+      if (sm && vb_addr < sm->length()) {
+        const uint32_t* raw_data = reinterpret_cast<const uint32_t*>(
+            static_cast<const uint8_t*>(sm->contents()) + vb_addr);
+
+        // Log raw data first
+        XELOGI(
+            "  Raw vertex data: 0x{:08X} 0x{:08X} 0x{:08X} 0x{:08X} 0x{:08X}",
+            raw_data[0], raw_data[1], raw_data[2], raw_data[3], raw_data[4]);
+
+        // Apply 8-in-32 byteswap (endian mode 2)
+        auto bswap32 = [](uint32_t v) -> uint32_t {
+          return ((v >> 24) & 0xFF) | ((v >> 8) & 0xFF00) |
+                 ((v << 8) & 0xFF0000) | ((v << 24) & 0xFF000000);
+        };
+
+        uint32_t swapped[5];
+        for (int i = 0; i < 5; i++) {
+          swapped[i] = bswap32(raw_data[i]);
+        }
+
+        float pos[3];
+        std::memcpy(&pos[0], &swapped[0], 4);
+        std::memcpy(&pos[1], &swapped[1], 4);
+        std::memcpy(&pos[2], &swapped[2], 4);
+
+        XELOGI("  After byteswap: ({:.3f}, {:.3f}, {:.3f})", pos[0], pos[1],
+               pos[2]);
+
+        // Show all 4 vertices (stride is 20 bytes = 5 DWORDs)
+        for (int v = 0; v < 4; v++) {
+          const uint32_t* vraw = raw_data + v * 5;
+          uint32_t vswapped[3];
+          for (int i = 0; i < 3; i++) {
+            vswapped[i] = bswap32(vraw[i]);
+          }
+          float vpos[3];
+          std::memcpy(&vpos[0], &vswapped[0], 4);
+          std::memcpy(&vpos[1], &vswapped[1], 4);
+          std::memcpy(&vpos[2], &vswapped[2], 4);
+          XELOGI("  Vertex[{}]: ({:.3f}, {:.3f}, {:.3f})", v, vpos[0], vpos[1],
+                 vpos[2]);
+        }
+      }
+      XELOGI("=== END FIRST DRAW DEBUG INFO ===");
+    }
 
     auto* res_entries_all =
         reinterpret_cast<IRDescriptorTableEntry*>(res_heap_ab_->contents());
@@ -2938,12 +3476,23 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                              shared_memory_usage);
 
         // Bind vertex buffers for each binding
+        static int vb_log_count = 0;
         for (uint32_t i = 0; i < vertex_range_count; ++i) {
           const auto& range = vertex_ranges[i];
           uint64_t buffer_index =
               kIRVertexBufferBindPoint + uint64_t(range.binding_index);
           current_render_encoder_->setVertexBuffer(shared_mem_buffer,
                                                    range.offset, buffer_index);
+          if (::cvars::metal_verbose_logging && vb_log_count < 5) {
+            XELOGI(
+                "VB_DEBUG: binding={} addr=0x{:08X} size={} stride={} -> "
+                "buffer_index={}",
+                range.binding_index, range.offset, range.length, range.stride,
+                buffer_index);
+          }
+        }
+        if (vb_log_count < 5) {
+          vb_log_count++;
         }
       }
     } else if (shared_memory_) {
@@ -3246,6 +3795,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     }
   }
 
+  XELOGI(
+      "IssueDraw: guest_prim={} guest_count={} ib_info={} host_prim={} "
+      "host_count={} idx_type={}",
+      uint32_t(primitive_type), index_count, index_buffer_info != nullptr,
+      uint32_t(primitive_processing_result.host_primitive_type),
+      primitive_processing_result.host_draw_vertex_count,
+      uint32_t(primitive_processing_result.index_buffer_type));
+
   if (memexport_used && shared_memory_) {
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
       shared_memory_->RangeWrittenByGpu(
@@ -3261,6 +3818,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 }
 
 bool MetalCommandProcessor::IssueCopy() {
+  XELOGI("MetalCommandProcessor::IssueCopy");
+  XELOGI("MetalCommandProcessor::IssueCopy: encoder={} command_buffer={}",
+         current_render_encoder_ ? "yes" : "no",
+         current_command_buffer_ ? "yes" : "no");
+
   // Finish any in-flight rendering so the render target contents are
   // available to the render target cache, similar to D3D12's
   // D3D12CommandProcessor::IssueCopy.
@@ -3302,6 +3864,7 @@ bool MetalCommandProcessor::IssueCopy() {
   }
 
   if (!written_length) {
+    XELOGI("MetalCommandProcessor::IssueCopy - Resolve wrote no data");
     // Commit any in-flight work so ordering matches D3D12 submission behavior.
     ScheduleDrawRingRelease(current_command_buffer_);
     current_command_buffer_->commit();
@@ -3311,6 +3874,9 @@ bool MetalCommandProcessor::IssueCopy() {
     current_draw_index_ = 0;
     return true;
   }
+
+  XELOGI("MetalCommandProcessor::IssueCopy - Completed: {} bytes at 0x{:08X}",
+         written_length, written_address);
 
   // Track this resolved region so the trace player can avoid overwriting it
   // with stale MemoryRead commands from the trace file.
@@ -3349,6 +3915,71 @@ void MetalCommandProcessor::OnGammaRampPWLValueWritten() {
 }
 
 void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  if (::cvars::metal_log_copy_dest_register_writes) {
+    static uint32_t copy_dest_base_log_count = 0;
+    static uint32_t copy_dest_info_log_count = 0;
+    static uint32_t copy_dest_pitch_log_count = 0;
+    static uint32_t copy_control_log_count = 0;
+    static uint32_t color_info_log_count = 0;
+    constexpr uint32_t kMaxLogCount = 64;
+    if (index == XE_GPU_REG_RB_COPY_DEST_BASE &&
+        copy_dest_base_log_count < kMaxLogCount) {
+      ++copy_dest_base_log_count;
+      XELOGI("MetalRegWrite RB_COPY_DEST_BASE=0x{:08X}", value);
+    } else if (index == XE_GPU_REG_RB_COPY_DEST_INFO &&
+        copy_dest_info_log_count < kMaxLogCount) {
+      ++copy_dest_info_log_count;
+      reg::RB_COPY_DEST_INFO info;
+      info.value = value;
+      XELOGI(
+          "MetalRegWrite RB_COPY_DEST_INFO=0x{:08X} endian={} array={} "
+          "slice={} format={} number={} exp_bias={} swap={}",
+          value, uint32_t(info.copy_dest_endian), info.copy_dest_array ? 1 : 0,
+          uint32_t(info.copy_dest_slice), uint32_t(info.copy_dest_format),
+          uint32_t(info.copy_dest_number), int(info.copy_dest_exp_bias),
+          info.copy_dest_swap ? 1 : 0);
+    } else if (index == XE_GPU_REG_RB_COPY_DEST_PITCH &&
+               copy_dest_pitch_log_count < kMaxLogCount) {
+      ++copy_dest_pitch_log_count;
+      reg::RB_COPY_DEST_PITCH pitch;
+      pitch.value = value;
+      XELOGI(
+          "MetalRegWrite RB_COPY_DEST_PITCH=0x{:08X} pitch={} height={}",
+          value, uint32_t(pitch.copy_dest_pitch),
+          uint32_t(pitch.copy_dest_height));
+    } else if (index == XE_GPU_REG_RB_COPY_CONTROL &&
+               copy_control_log_count < kMaxLogCount) {
+      ++copy_control_log_count;
+      reg::RB_COPY_CONTROL control;
+      control.value = value;
+      XELOGI(
+          "MetalRegWrite RB_COPY_CONTROL=0x{:08X} src_select={} "
+          "sample_select={} color_clear={} depth_clear={} copy_command={}",
+          value, uint32_t(control.copy_src_select),
+          uint32_t(control.copy_sample_select),
+          control.color_clear_enable ? 1 : 0,
+          control.depth_clear_enable ? 1 : 0,
+          uint32_t(control.copy_command));
+    } else if (color_info_log_count < kMaxLogCount) {
+      for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+        if (index != reg::RB_COLOR_INFO::rt_register_indices[i]) {
+          continue;
+        }
+        ++color_info_log_count;
+        reg::RB_COLOR_INFO color_info;
+        color_info.value = value;
+        uint32_t color_base =
+            color_info.color_base | (color_info.color_base_bit_11 << 11);
+        XELOGI(
+            "MetalRegWrite RB_COLOR{}_INFO=0x{:08X} base_tiles={} "
+            "format={} exp_bias={}",
+            i, value, color_base, uint32_t(color_info.color_format),
+            int(color_info.color_exp_bias));
+        break;
+      }
+    }
+  }
+
   CommandProcessor::WriteRegister(index, value);
 
   if (index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
@@ -3361,7 +3992,6 @@ void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 }
 
 MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
-  ProcessCompletedSubmissions();
   if (current_command_buffer_) {
     return current_command_buffer_;
   }
@@ -3379,7 +4009,6 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
     return nullptr;
   }
   created_command_buffers_.fetch_add(1, std::memory_order_relaxed);
-  ++submission_current_;
   const auto start_time = std::chrono::steady_clock::now();
   current_command_buffer_->retain();
   current_command_buffer_->setLabel(
@@ -3405,36 +4034,12 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
     last_command_buffer_complete_time_ = std::chrono::steady_clock::now();
   });
 
-  if (primitive_processor_) {
-    primitive_processor_->BeginSubmission();
-  }
-  if (texture_cache_) {
-    texture_cache_->BeginSubmission(submission_current_);
-  }
   if (primitive_processor_ && !frame_open_) {
     primitive_processor_->BeginFrame();
-    if (texture_cache_) {
-      texture_cache_->BeginFrame();
-    }
     frame_open_ = true;
   }
 
   return current_command_buffer_;
-}
-
-void MetalCommandProcessor::ProcessCompletedSubmissions() {
-  const uint64_t completed =
-      completed_command_buffers_.load(std::memory_order_relaxed);
-  if (completed <= submission_completed_processed_) {
-    return;
-  }
-  submission_completed_processed_ = completed;
-  if (primitive_processor_) {
-    primitive_processor_->CompletedSubmissionUpdated();
-  }
-  if (texture_cache_) {
-    texture_cache_->CompletedSubmissionUpdated(completed);
-  }
 }
 
 void MetalCommandProcessor::EnsureCommandBufferAutoreleasePool() {
@@ -3562,6 +4167,8 @@ void MetalCommandProcessor::BeginCommandBuffer() {
          depth_control.zfunc == xenos::CompareFunction::kGreaterEqual);
     if (auto* da = pass_descriptor->depthAttachment()) {
       if (reverse_z) {
+        XELOGI("BeginCommandBuffer: Reverse-Z detected (zfunc={}), setting ClearDepth to 0.0",
+               int(depth_control.zfunc));
         da->setClearDepth(0.0);
       } else {
         da->setClearDepth(1.0);
@@ -3611,6 +4218,13 @@ void MetalCommandProcessor::BeginCommandBuffer() {
     if (pass_size_texture) {
       rt_width = static_cast<uint32_t>(pass_size_texture->width());
       rt_height = static_cast<uint32_t>(pass_size_texture->height());
+      XELOGI("BeginCommandBuffer: using pass size {}x{} for viewport/scissor",
+             rt_width, rt_height);
+    } else {
+      XELOGI(
+          "BeginCommandBuffer: no pass texture, falling back to {}x{} for "
+          "viewport/scissor",
+          rt_width, rt_height);
     }
   }
 
@@ -3636,12 +4250,17 @@ void MetalCommandProcessor::EnsureDrawRingCapacity() {
     return;
   }
 
+  if (::cvars::metal_verbose_logging) {
+    XELOGI("Metal draw ring exhausted ({} draws); switching ring page",
+           current_draw_index_);
+  }
   SetActiveDrawRing(ring);
   command_buffer_draw_rings_.push_back(ring);
   current_draw_index_ = 0;
 }
 
 void MetalCommandProcessor::EndCommandBuffer() {
+  XELOGI("MetalCommandProcessor::EndCommandBuffer: called");
   EndRenderEncoder();
 
   if (current_command_buffer_) {
@@ -4163,6 +4782,9 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreatePipelineState(
     if (pipeline_binary_archive_->addRenderPipelineFunctions(desc,
                                                              &archive_error)) {
       pipeline_binary_archive_dirty_ = true;
+    } else if (archive_error && ::cvars::metal_verbose_logging) {
+      XELOGI("Metal binary archive add failed: {}",
+             archive_error->localizedDescription()->utf8String());
     }
   }
 
@@ -4186,6 +4808,14 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreatePipelineState(
   if (record_disk_entry) {
     AppendPipelineDiskCacheEntry(disk_entry);
   }
+
+  // Log pipeline creation for debugging
+  static int pipeline_count = 0;
+  pipeline_count++;
+  XELOGI("GPU DEBUG: Created pipeline #{} (VS={}, PS={})", pipeline_count,
+         vertex_translation->metal_function() ? "valid" : "null",
+         (pixel_translation && pixel_translation->metal_function()) ? "valid"
+                                                                    : "null");
 
   return pipeline;
 }
@@ -4446,6 +5076,11 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
         input_topology = IRInputTopologyUndefined;
         break;
     }
+    if (input_topology == IRInputTopologyUndefined &&
+        geometry_shader_key.type == PipelineGeometryShader::kQuadList) {
+      XELOGI("Geometry VS: quad list uses adjacency; input topology left undefined");
+    }
+
     MetalShaderConversionResult vertex_result;
     MetalShaderReflectionInfo vertex_reflection;
 
@@ -4588,6 +5223,17 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
                          geometry_dump_type, geometry_dump_key,
                          "vs_input_summary.txt", input_summary);
       }
+      XELOGI(
+          "Geometry dump {} {} key={:#010x}: vs_dxil={}B hash=0x{:016x}, "
+          "vs_metallib={}B hash=0x{:016x}, stagein_metallib={}B hash=0x{:016x}",
+          geometry_dump_id, GetGeometryShaderTypeName(geometry_dump_type),
+          geometry_dump_key, dxil_data.size(),
+          HashBytes(dxil_data.data(), dxil_data.size()),
+          vertex_result.metallib_data.size(),
+          HashBytes(vertex_result.metallib_data.data(),
+                    vertex_result.metallib_data.size()),
+          stage_in_metallib.size(),
+          HashBytes(stage_in_metallib.data(), stage_in_metallib.size()));
     }
 
     NS::Error* error = nullptr;
@@ -4674,6 +5320,11 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
         input_topology = IRInputTopologyUndefined;
         break;
     }
+    if (input_topology == IRInputTopologyUndefined &&
+        geometry_shader_key.type == PipelineGeometryShader::kQuadList) {
+      XELOGI("Geometry GS: quad list uses adjacency; input topology left undefined");
+    }
+
     MetalShaderConversionResult geometry_result;
     MetalShaderReflectionInfo geometry_reflection;
     if (!metal_shader_converter_->ConvertWithStageEx(
@@ -4706,6 +5357,16 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
       DumpGeometryText(geometry_dump_dir, geometry_dump_id,
                        geometry_dump_type, geometry_dump_key, "gs_info.txt",
                        info.str());
+      XELOGI(
+          "Geometry dump {} {} key={:#010x}: gs_dxbc={}B hash=0x{:016x}, "
+          "gs_dxil={}B hash=0x{:016x}, gs_metallib={}B hash=0x{:016x}",
+          geometry_dump_id, GetGeometryShaderTypeName(geometry_dump_type),
+          geometry_dump_key, dxbc_bytes.size(),
+          HashBytes(dxbc_bytes.data(), dxbc_bytes.size()), dxil_data.size(),
+          HashBytes(dxil_data.data(), dxil_data.size()),
+          geometry_result.metallib_data.size(),
+          HashBytes(geometry_result.metallib_data.data(),
+                    geometry_result.metallib_data.size()));
     }
     if (!geometry_result.has_mesh_stage && !geometry_result.has_geometry_stage) {
       XELOGE(
@@ -4864,6 +5525,7 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
           LogMetalErrorDetails("Geometry pipeline probe: geometry function (no constants)",
                                probe_error);
         } else if (probe_no_constants) {
+          XELOGI("Geometry pipeline probe: geometry function materialized without constants");
           probe_no_constants->release();
         }
 
@@ -4889,6 +5551,9 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
               "Geometry pipeline probe: geometry function (UInt4 by index)",
               probe_error);
         } else if (probe_uint4) {
+          XELOGI(
+              "Geometry pipeline probe: geometry function materialized with "
+              "UInt4 constants by index");
           probe_uint4->release();
         }
         probe_fc->release();
@@ -5911,6 +6576,7 @@ bool MetalCommandProcessor::CreateDebugPipeline() {
     return false;
   }
 
+  XELOGI("Debug pipeline created successfully");
   return true;
 }
 
@@ -5978,6 +6644,7 @@ void MetalCommandProcessor::DrawDebugQuad() {
   current_render_encoder_->drawPrimitives(MTL::PrimitiveTypeTriangle,
                                           NS::UInteger(0), NS::UInteger(6));
 
+  XELOGI("Drew debug quad");
 }
 
 bool MetalCommandProcessor::CreateIRConverterBuffers() {
@@ -6117,6 +6784,12 @@ MetalCommandProcessor::CreateDrawRingBuffers() {
       NS::UTF8StringEncoding));
   std::memset(ring->cbv_heap_ab->contents(), 0, kCBVHeapBytes);
 
+  XELOGI(
+      "MetalCommandProcessor: Created draw ring {} (res_heap={} entries, "
+      "smp_heap={} entries, cbv_heap={} entries, uniforms={}B, top_level={}B, "
+      "draw_args={}B)",
+      ring_id, kResourceHeapSlotsTotal, kSamplerHeapSlots, kCBVHeapSlots,
+      kUniformsBufferSize, kTopLevelABTotalBytes, kDrawArgsSize);
   ++ring_id;
 
   return ring;
@@ -6568,6 +7241,154 @@ void MetalCommandProcessor::UpdateSystemConstantValues(
   system_constants_dirty_ = true;
 }
 
+void MetalCommandProcessor::DumpUniformsBuffer() {
+  if (!uniforms_buffer_) {
+    XELOGI("BUFFER DUMP: uniforms_buffer_ is null");
+    return;
+  }
+
+  const uint8_t* data =
+      static_cast<const uint8_t*>(uniforms_buffer_->contents());
+  const size_t kCBVSize = 4096;
+
+  XELOGI("=== UNIFORMS BUFFER DUMP ===");
+  XELOGI("Buffer GPU address: 0x{:016X}, size: {} bytes",
+         uniforms_buffer_->gpuAddress(), uniforms_buffer_->length());
+
+  // Dump system constants (b0) - first 256 bytes
+  XELOGI("--- b0: System Constants (offset 0) ---");
+  const auto* sys =
+      reinterpret_cast<const DxbcShaderTranslator::SystemConstants*>(data);
+  XELOGI("  flags: 0x{:08X}", sys->flags);
+  XELOGI("  tessellation_factor_range: [{}, {}]",
+         sys->tessellation_factor_range_min,
+         sys->tessellation_factor_range_max);
+  XELOGI("  line_loop_closing_index: {}", sys->line_loop_closing_index);
+  XELOGI("  vertex_index_endian: {}",
+         static_cast<uint32_t>(sys->vertex_index_endian));
+  XELOGI("  vertex_index_offset: {}", sys->vertex_index_offset);
+  XELOGI("  vertex_index_min/max: [{}, {}]", sys->vertex_index_min,
+         sys->vertex_index_max);
+  XELOGI("  ndc_scale: [{}, {}, {}]", sys->ndc_scale[0], sys->ndc_scale[1],
+         sys->ndc_scale[2]);
+  XELOGI("  ndc_offset: [{}, {}, {}]", sys->ndc_offset[0], sys->ndc_offset[1],
+         sys->ndc_offset[2]);
+  XELOGI("  point_vertex_diameter: [{}, {}]", sys->point_vertex_diameter_min,
+         sys->point_vertex_diameter_max);
+  XELOGI("  alpha_test_reference: {}", sys->alpha_test_reference);
+  XELOGI("  alpha_to_mask: 0x{:08X}", sys->alpha_to_mask);
+  XELOGI("  color_exp_bias: [{}, {}, {}, {}]", sys->color_exp_bias[0],
+         sys->color_exp_bias[1], sys->color_exp_bias[2],
+         sys->color_exp_bias[3]);
+  XELOGI("  edram_blend_constant: [{}, {}, {}, {}]",
+         sys->edram_blend_constant[0], sys->edram_blend_constant[1],
+         sys->edram_blend_constant[2], sys->edram_blend_constant[3]);
+
+  // Flag breakdown
+  XELOGI("  Flag breakdown:");
+  XELOGI("    SharedMemoryIsUAV: {}",
+         (sys->flags & DxbcShaderTranslator::kSysFlag_SharedMemoryIsUAV) != 0);
+  XELOGI("    XYDividedByW: {}",
+         (sys->flags & DxbcShaderTranslator::kSysFlag_XYDividedByW) != 0);
+  XELOGI("    ZDividedByW: {}",
+         (sys->flags & DxbcShaderTranslator::kSysFlag_ZDividedByW) != 0);
+  XELOGI("    WNotReciprocal: {}",
+         (sys->flags & DxbcShaderTranslator::kSysFlag_WNotReciprocal) != 0);
+  XELOGI("    PrimitivePolygonal: {}",
+         (sys->flags & DxbcShaderTranslator::kSysFlag_PrimitivePolygonal) != 0);
+  XELOGI("    PrimitiveLine: {}",
+         (sys->flags & DxbcShaderTranslator::kSysFlag_PrimitiveLine) != 0);
+  XELOGI("    DepthFloat24: {}",
+         (sys->flags & DxbcShaderTranslator::kSysFlag_DepthFloat24) != 0);
+
+  // Dump float constants (b1) - scan for non-zero
+  XELOGI("--- b1: Float Constants (offset {}) ---", kCBVSize);
+  const float* float_consts = reinterpret_cast<const float*>(data + kCBVSize);
+  int non_zero_count = 0;
+  for (int i = 0; i < 256 && non_zero_count < 16; ++i) {
+    float x = float_consts[i * 4 + 0];
+    float y = float_consts[i * 4 + 1];
+    float z = float_consts[i * 4 + 2];
+    float w = float_consts[i * 4 + 3];
+    if (x != 0.0f || y != 0.0f || z != 0.0f || w != 0.0f) {
+      XELOGI("  c[{}]: [{}, {}, {}, {}]", i, x, y, z, w);
+      non_zero_count++;
+    }
+  }
+  if (non_zero_count == 0) {
+    XELOGI("  (all float constants are zero)");
+  }
+
+  // Dump fetch constants (b3)
+  XELOGI("--- b3: Fetch Constants (offset {}) ---", 3 * kCBVSize);
+  const uint32_t* fetch_consts =
+      reinterpret_cast<const uint32_t*>(data + 3 * kCBVSize);
+  for (int i = 0; i < 4; ++i) {
+    XELOGI("  FC[{}]: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}", i,
+           fetch_consts[i * 6 + 0], fetch_consts[i * 6 + 1],
+           fetch_consts[i * 6 + 2], fetch_consts[i * 6 + 3],
+           fetch_consts[i * 6 + 4], fetch_consts[i * 6 + 5]);
+  }
+
+  XELOGI("=== END UNIFORMS BUFFER DUMP ===");
+}
+
+void MetalCommandProcessor::LogInterpolators(MetalShader* vertex_shader,
+                                             MetalShader* pixel_shader) {
+  if (!vertex_shader) {
+    XELOGI("INTERPOLATORS: No vertex shader");
+    return;
+  }
+
+  XELOGI("=== INTERPOLATOR INFO ===");
+
+  // Get interpolators written by vertex shader
+  uint32_t vs_interpolators = vertex_shader->writes_interpolators();
+  XELOGI("Vertex shader writes interpolators: 0x{:04X}", vs_interpolators);
+  for (int i = 0; i < 16; ++i) {
+    if (vs_interpolators & (1 << i)) {
+      XELOGI("  - Interpolator {} written by VS", i);
+    }
+  }
+
+  if (pixel_shader) {
+    // Get interpolators read by pixel shader
+    const RegisterFile& regs = *register_file_;
+
+    auto sq_program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
+    auto sq_context_misc = regs.Get<reg::SQ_CONTEXT_MISC>();
+    uint32_t ps_param_gen_pos = UINT32_MAX;
+    uint32_t ps_interpolators = pixel_shader->GetInterpolatorInputMask(
+        sq_program_cntl, sq_context_misc, ps_param_gen_pos);
+
+    XELOGI("Pixel shader reads interpolators: 0x{:04X}", ps_interpolators);
+    for (int i = 0; i < 16; ++i) {
+      if (ps_interpolators & (1 << i)) {
+        XELOGI("  - Interpolator {} read by PS", i);
+      }
+    }
+
+    // Check for mismatches
+    uint32_t used_mask = vs_interpolators & ps_interpolators;
+    uint32_t missing_in_vs = ps_interpolators & ~vs_interpolators;
+    uint32_t unused_from_vs = vs_interpolators & ~ps_interpolators;
+
+    if (missing_in_vs) {
+      XELOGI("WARNING: PS reads interpolators not written by VS: 0x{:04X}",
+             missing_in_vs);
+    }
+    if (unused_from_vs) {
+      XELOGI("Note: VS writes interpolators not read by PS: 0x{:04X}",
+             unused_from_vs);
+    }
+    XELOGI("Effectively used interpolators: 0x{:04X}", used_mask);
+  } else {
+    XELOGI("No pixel shader - depth-only rendering");
+  }
+
+  XELOGI("=== END INTERPOLATOR INFO ===");
+}
+
 void MetalCommandProcessor::LogCacheStatsIfNeeded() {
   if (!::cvars::metal_log_cache_stats) {
     return;
@@ -6588,50 +7409,12 @@ void MetalCommandProcessor::LogCacheStatsIfNeeded() {
   };
 
   MetalTextureCache::CacheStats tex_stats;
-  size_t scaled_resolve_count = 0;
-  size_t scaled_resolve_retired_count = 0;
-  uint64_t scaled_resolve_bytes = 0;
-  uint64_t scaled_resolve_retired_bytes = 0;
-  size_t upload_pool_entries = 0;
-  uint64_t upload_pool_bytes = 0;
-  uint64_t swizzled_views_created = 0;
-  uint64_t swizzled_views_released = 0;
-  uint64_t swizzled_views_live = 0;
-  uint64_t cache_textures_created = 0;
-  uint64_t cache_texture_bytes_created = 0;
   if (texture_cache_) {
     tex_stats = texture_cache_->GetCacheStats();
-    scaled_resolve_count = texture_cache_->GetScaledResolveBufferCount();
-    scaled_resolve_retired_count =
-        texture_cache_->GetScaledResolveRetiredBufferCount();
-    scaled_resolve_bytes = texture_cache_->GetScaledResolveBytes();
-    scaled_resolve_retired_bytes =
-        texture_cache_->GetScaledResolveRetiredBytes();
-    upload_pool_entries = texture_cache_->GetUploadPoolEntryCount();
-    upload_pool_bytes = texture_cache_->GetUploadPoolBytes();
-    swizzled_views_created = texture_cache_->GetSwizzledViewCreated();
-    swizzled_views_released = texture_cache_->GetSwizzledViewReleased();
-    swizzled_views_live = texture_cache_->GetSwizzledViewLive();
-    cache_textures_created = texture_cache_->GetCacheTexturesCreated();
-    cache_texture_bytes_created = texture_cache_->GetCacheTextureBytesCreated();
   }
   MetalRenderTargetCache::CacheStats rt_stats;
-  uint64_t rt_temp_created = 0;
-  uint64_t rt_temp_released = 0;
-  uint64_t rt_textures_created = 0;
-  uint64_t rt_texture_bytes_created = 0;
-  uint64_t rt_views_created = 0;
-  uint64_t rt_dummy_textures_created = 0;
-  uint64_t rt_dummy_texture_bytes_created = 0;
   if (render_target_cache_) {
     rt_stats = render_target_cache_->GetCacheStats();
-    rt_temp_created = rt_stats.temp_textures_created;
-    rt_temp_released = rt_stats.temp_textures_released;
-    rt_textures_created = rt_stats.render_target_textures_created;
-    rt_texture_bytes_created = rt_stats.render_target_texture_bytes_created;
-    rt_views_created = rt_stats.render_target_views_created;
-    rt_dummy_textures_created = rt_stats.dummy_textures_created;
-    rt_dummy_texture_bytes_created = rt_stats.dummy_texture_bytes_created;
   }
   MetalShaderCache::CacheStats shader_stats;
   if (g_metal_shader_cache && g_metal_shader_cache->IsInitialized()) {
@@ -6694,8 +7477,6 @@ void MetalCommandProcessor::LogCacheStatsIfNeeded() {
       last_resource_stats_.buffer_bytes_created;
   resource_delta.buffer_bytes_released -=
       last_resource_stats_.buffer_bytes_released;
-  resource_delta.heap_bytes_created -= last_resource_stats_.heap_bytes_created;
-  resource_delta.heap_bytes_released -= last_resource_stats_.heap_bytes_released;
   resource_delta.textures_created -= last_resource_stats_.textures_created;
   resource_delta.textures_released -= last_resource_stats_.textures_released;
   resource_delta.texture_bytes_created -=
@@ -6704,37 +7485,10 @@ void MetalCommandProcessor::LogCacheStatsIfNeeded() {
       last_resource_stats_.texture_bytes_released;
   last_resource_stats_ = resource_stats;
 
-  const uint64_t cache_textures_created_delta =
-      cache_textures_created - last_cache_textures_created_;
-  const uint64_t cache_texture_bytes_created_delta =
-      cache_texture_bytes_created - last_cache_texture_bytes_created_;
-  const uint64_t rt_textures_created_delta =
-      rt_textures_created - last_rt_textures_created_;
-  const uint64_t rt_texture_bytes_created_delta =
-      rt_texture_bytes_created - last_rt_texture_bytes_created_;
-  const uint64_t rt_views_created_delta =
-      rt_views_created - last_rt_views_created_;
-  const uint64_t rt_dummy_textures_created_delta =
-      rt_dummy_textures_created - last_rt_dummy_textures_created_;
-  const uint64_t rt_dummy_texture_bytes_created_delta =
-      rt_dummy_texture_bytes_created - last_rt_dummy_texture_bytes_created_;
-
-  last_cache_textures_created_ = cache_textures_created;
-  last_cache_texture_bytes_created_ = cache_texture_bytes_created;
-  last_rt_textures_created_ = rt_textures_created;
-  last_rt_texture_bytes_created_ = rt_texture_bytes_created;
-  last_rt_views_created_ = rt_views_created;
-  last_rt_dummy_textures_created_ = rt_dummy_textures_created;
-  last_rt_dummy_texture_bytes_created_ = rt_dummy_texture_bytes_created;
-
   const double buffers_created_mb =
       bytes_to_mb(resource_delta.buffer_bytes_created);
   const double buffers_released_mb =
       bytes_to_mb(resource_delta.buffer_bytes_released);
-  const double heaps_created_mb =
-      bytes_to_mb(resource_delta.heap_bytes_created);
-  const double heaps_released_mb =
-      bytes_to_mb(resource_delta.heap_bytes_released);
   const double textures_created_mb =
       bytes_to_mb(resource_delta.texture_bytes_created);
   const double textures_released_mb =
@@ -6742,12 +7496,31 @@ void MetalCommandProcessor::LogCacheStatsIfNeeded() {
   const double buffers_live_mb =
       bytes_to_mb(resource_stats.buffer_bytes_created -
                   resource_stats.buffer_bytes_released);
-  const double heaps_live_mb =
-      bytes_to_mb(resource_stats.heap_bytes_created -
-                  resource_stats.heap_bytes_released);
   const double textures_live_mb =
       bytes_to_mb(resource_stats.texture_bytes_created -
                   resource_stats.texture_bytes_released);
+
+  XELOGI(
+      "MetalCacheStats: textures={} host_mb={:.2f} rts={} rt_textures={} "
+      "rt_mb~{:.2f} shaders={} shader_mb={:.2f} pipelines={} geom_pipelines={} "
+      "tess_pipelines={} draw_rings={} ring_pool={} shared_mb={:.2f} "
+      "edram_mb={:.2f} cb={} enc={} inflight_cb={} completed_cb={} "
+      "ms_since_cb_done={} cb_created={} cb_completed_delta={} "
+      "cb_avg_ms={:.2f} cb_max_ms={:.2f} pools_created={} pools_drained={} "
+      "new_bufs={} buf_mb+={:.2f} buf_mb-={:.2f} new_tex={} tex_mb+={:.2f} "
+      "tex_mb-={:.2f} buf_live_mb={:.2f} tex_live_mb={:.2f}",
+      tex_stats.texture_count, bytes_to_mb(tex_stats.total_host_memory_bytes),
+      rt_stats.render_target_count, rt_stats.texture_count,
+      bytes_to_mb(rt_stats.approx_texture_bytes), shader_stats.entry_count,
+      bytes_to_mb(shader_stats.total_bytes), pipeline_cache_.size(),
+      geometry_pipeline_cache_.size(), tessellation_pipeline_cache_.size(),
+      command_buffer_draw_rings_.size(), draw_ring_pool_.size(),
+      bytes_to_mb(shared_memory_bytes), bytes_to_mb(edram_bytes), cb_state,
+      enc_state, inflight, completed, ms_since_complete, created,
+      completed_delta, completed_avg_ms, completed_max_ms, pools_created_delta,
+      pools_drained_delta, resource_delta.buffers_created, buffers_created_mb,
+      buffers_released_mb, resource_delta.textures_created, textures_created_mb,
+      textures_released_mb, buffers_live_mb, textures_live_mb);
 
   std::filesystem::path log_path = "scratch/logs/metal_cache_stats.log";
   std::error_code ec;
@@ -6758,46 +7531,24 @@ void MetalCommandProcessor::LogCacheStatsIfNeeded() {
         "MetalCacheStats: textures={} host_mb={:.2f} rts={} rt_textures={} "
         "rt_mb~{:.2f} shaders={} shader_mb={:.2f} pipelines={} geom_pipelines={} "
         "tess_pipelines={} draw_rings={} ring_pool={} shared_mb={:.2f} "
-        "edram_mb={:.2f} rt_temp+={} rt_temp-={} rt_tex+={} rt_tex_mb+={:.2f} "
-        "rt_view+={} rt_dummy_tex+={} rt_dummy_mb+={:.2f} "
-        "cache_tex+={} cache_tex_mb+={:.2f} cb={} enc={} inflight_cb={} "
-        "completed_cb={} "
+        "edram_mb={:.2f} cb={} enc={} inflight_cb={} completed_cb={} "
         "ms_since_cb_done={} cb_created={} cb_completed_delta={} "
         "cb_avg_ms={:.2f} cb_max_ms={:.2f} pools_created={} pools_drained={} "
-        "scaled_resolve_cnt={} scaled_resolve_mb={:.2f} "
-        "scaled_resolve_retired_cnt={} scaled_resolve_retired_mb={:.2f} "
-        "upload_pool_entries={} upload_pool_mb={:.2f} "
-        "swizzled_views_created={} swizzled_views_released={} "
-        "swizzled_views_live={} "
-        "new_bufs={} buf_mb+={:.2f} buf_mb-={:.2f} heap_mb+={:.2f} "
-        "heap_mb-={:.2f} new_tex={} tex_mb+={:.2f} tex_mb-={:.2f} "
-        "buf_live_mb={:.2f} heap_live_mb={:.2f} tex_live_mb={:.2f}\n",
+        "new_bufs={} buf_mb+={:.2f} buf_mb-={:.2f} new_tex={} tex_mb+={:.2f} "
+        "tex_mb-={:.2f} buf_live_mb={:.2f} tex_live_mb={:.2f}\n",
         tex_stats.texture_count, bytes_to_mb(tex_stats.total_host_memory_bytes),
         rt_stats.render_target_count, rt_stats.texture_count,
         bytes_to_mb(rt_stats.approx_texture_bytes), shader_stats.entry_count,
         bytes_to_mb(shader_stats.total_bytes), pipeline_cache_.size(),
         geometry_pipeline_cache_.size(), tessellation_pipeline_cache_.size(),
         command_buffer_draw_rings_.size(), draw_ring_pool_.size(),
-        bytes_to_mb(shared_memory_bytes), bytes_to_mb(edram_bytes),
-        rt_temp_created, rt_temp_released, rt_textures_created_delta,
-        bytes_to_mb(rt_texture_bytes_created_delta), rt_views_created_delta,
-        rt_dummy_textures_created_delta,
-        bytes_to_mb(rt_dummy_texture_bytes_created_delta),
-        cache_textures_created_delta,
-        bytes_to_mb(cache_texture_bytes_created_delta),
-        cb_state, enc_state, inflight,
-        completed, ms_since_complete, created, completed_delta,
-        completed_avg_ms, completed_max_ms,
-        pools_created_delta, pools_drained_delta, scaled_resolve_count,
-        bytes_to_mb(scaled_resolve_bytes), scaled_resolve_retired_count,
-        bytes_to_mb(scaled_resolve_retired_bytes), upload_pool_entries,
-        bytes_to_mb(upload_pool_bytes), swizzled_views_created,
-        swizzled_views_released, swizzled_views_live,
-        resource_delta.buffers_created,
-        buffers_created_mb, buffers_released_mb,
-        heaps_created_mb, heaps_released_mb, resource_delta.textures_created,
+        bytes_to_mb(shared_memory_bytes), bytes_to_mb(edram_bytes), cb_state,
+        enc_state, inflight, completed, ms_since_complete, created,
+        completed_delta, completed_avg_ms, completed_max_ms,
+        pools_created_delta, pools_drained_delta, resource_delta.buffers_created,
+        buffers_created_mb, buffers_released_mb, resource_delta.textures_created,
         textures_created_mb, textures_released_mb, buffers_live_mb,
-        heaps_live_mb, textures_live_mb);
+        textures_live_mb);
   }
 }
 

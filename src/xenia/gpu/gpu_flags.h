@@ -35,6 +35,7 @@ DECLARE_bool(metal_force_full_scissor_on_swap_resolve);
 DECLARE_bool(metal_log_edram_dump_color_samples);
 
 // Enable extremely verbose Metal backend logging (may significantly impact performance).
+DECLARE_bool(metal_verbose_logging);
 
 DECLARE_bool(metal_shader_disk_cache);
 DECLARE_bool(metal_pipeline_binary_archive);

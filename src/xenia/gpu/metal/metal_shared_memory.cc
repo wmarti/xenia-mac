@@ -11,6 +11,13 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
+#define METAL_VERBOSE_LOG(...)                           \
+  do {                                                   \
+    if (::cvars::metal_verbose_logging) {                  \
+      XELOGI(__VA_ARGS__);                               \
+    }                                                    \
+  } while (false)
+
 MetalSharedMemory::MetalSharedMemory(MetalCommandProcessor& command_processor,
                                      Memory& memory)
     : SharedMemory(memory), command_processor_(command_processor) {}
@@ -34,6 +41,10 @@ bool MetalSharedMemory::Initialize() {
 
   // Create Metal buffer - similar to D3D12's approach
   // On Apple Silicon, ResourceStorageModeShared gives CPU/GPU access
+  METAL_VERBOSE_LOG("Creating Metal shared memory buffer: size={}MB", kBufferSize >> 20);
+  fflush(stdout);
+  fflush(stderr);
+
   void* xbox_ram = memory().TranslatePhysical(0);
   if (!xbox_ram) {
     XELOGE("Metal shared memory: Xbox RAM is null");
@@ -47,7 +58,7 @@ bool MetalSharedMemory::Initialize() {
                                   MTL::ResourceStorageModeShared, nullptr);
       if (buffer_) {
         use_zero_copy_ = true;
-        XELOGD("Metal shared memory: using bytes-no-copy buffer");
+        METAL_VERBOSE_LOG("Metal shared memory: using bytes-no-copy buffer");
       } else {
         XELOGW("Metal shared memory: bytes-no-copy buffer creation failed");
       }
@@ -59,6 +70,9 @@ bool MetalSharedMemory::Initialize() {
   if (!buffer_) {
     buffer_ = device->newBuffer(kBufferSize, MTL::ResourceStorageModeShared);
   }
+  XELOGI("Metal buffer allocated: {}", buffer_ ? "success" : "failed");
+  fflush(stdout);
+  fflush(stderr);
   if (!buffer_) {
     XELOGE("Failed to create Metal shared memory buffer");
     return false;
@@ -68,13 +82,22 @@ bool MetalSharedMemory::Initialize() {
   // For trace dump, do initial full copy; UploadRanges handles incremental
   // updates for normal runs.
   if (!use_zero_copy_) {
+    XELOGI("xbox_ram={}, about to copy 512MB", xbox_ram ? "valid" : "null");
+    fflush(stdout);
+    fflush(stderr);
     if (xbox_ram) {
       memcpy(buffer_->contents(), xbox_ram, kBufferSize);
+      XELOGI("Copied Xbox memory to Metal buffer (initial sync)");
+      fflush(stdout);
+      fflush(stderr);
     }
   } else {
-    XELOGD("Metal shared memory: skipping initial copy (zero-copy)");
+    METAL_VERBOSE_LOG("Metal shared memory: skipping initial copy (zero-copy)");
   }
 
+  XELOGI("Metal shared memory initialized successfully");
+  fflush(stdout);
+  fflush(stderr);
 
   return true;
 }
@@ -90,17 +113,15 @@ bool MetalSharedMemory::UploadRanges(
   if (first_upload) {
     first_upload = false;
     const uint32_t page_size = 1u << page_size_log2();
-    XELOGD(
-        "MetalSharedMemory::UploadRanges: page_size={}, {} ranges to upload",
-        page_size, upload_page_ranges.size());
+    METAL_VERBOSE_LOG("MetalSharedMemory::UploadRanges: page_size={}, {} ranges to upload",
+           page_size, upload_page_ranges.size());
     for (size_t i = 0; i < std::min(size_t(5), upload_page_ranges.size());
          i++) {
       uint32_t start_byte = upload_page_ranges[i].first * page_size;
       uint32_t length_bytes = upload_page_ranges[i].second * page_size;
-      XELOGD(
-          "  Range[{}]: page={} count={} -> byte offset=0x{:08X} length={}",
-          i, upload_page_ranges[i].first, upload_page_ranges[i].second,
-          start_byte, length_bytes);
+      METAL_VERBOSE_LOG("  Range[{}]: page={} count={} -> byte offset=0x{:08X} length={}",
+             i, upload_page_ranges[i].first, upload_page_ranges[i].second,
+             start_byte, length_bytes);
     }
   }
 
@@ -170,7 +191,7 @@ bool MetalSharedMemory::UploadRanges(
     flush_merged_range(merged_start, merged_end);
   }
 
-  XELOGD("MetalSharedMemory::UploadRanges: Copied {} ranges to Metal buffer",
+  METAL_VERBOSE_LOG("MetalSharedMemory::UploadRanges: Copied {} ranges to Metal buffer",
          upload_page_ranges.size());
 
   return true;
@@ -190,3 +211,5 @@ void MetalSharedMemory::Shutdown() {
 }  // namespace metal
 }  // namespace gpu
 }  // namespace xe
+
+#undef METAL_VERBOSE_LOG
