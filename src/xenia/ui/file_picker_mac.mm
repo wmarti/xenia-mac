@@ -69,6 +69,32 @@ std::vector<std::string> ParseAllowedExtensions(std::string_view patterns) {
   return extensions;
 }
 
+bool HasWildcard(std::string_view patterns) {
+  size_t start = 0;
+  while (start < patterns.size()) {
+    size_t end = patterns.find(';', start);
+    if (end == std::string_view::npos) {
+      end = patterns.size();
+    }
+
+    auto token = patterns.substr(start, end - start);
+    while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) {
+      token.remove_prefix(1);
+    }
+    while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) {
+      token.remove_suffix(1);
+    }
+
+    if (token == "*" || token == "*.*") {
+      return true;
+    }
+
+    start = end + 1;
+  }
+
+  return false;
+}
+
 }  // namespace
 
 class MacFilePicker : public FilePicker {
@@ -128,20 +154,24 @@ class MacFilePicker : public FilePicker {
         [panel setCanChooseDirectories:YES];
       } else {
         [panel setCanChooseFiles:YES];
-        [panel setCanChooseDirectories:NO];
+        // Allow selecting directories for content packages.
+        [panel setCanChooseDirectories:YES];
       }
 
       [panel setAllowsMultipleSelection:multi_selection() ? YES : NO];
 
       // Apply file extension filtering when possible.
       if (type() == Type::kFile && !extensions().empty()) {
-        const auto allowed = ParseAllowedExtensions(extensions().front().second);
-        if (!allowed.empty()) {
-          NSMutableArray<NSString*>* types = [NSMutableArray array];
-          for (const auto& ext : allowed) {
-            [types addObject:[NSString stringWithUTF8String:ext.c_str()]];
+        const auto patterns = extensions().front().second;
+        if (!HasWildcard(patterns)) {
+          const auto allowed = ParseAllowedExtensions(patterns);
+          if (!allowed.empty()) {
+            NSMutableArray<NSString*>* types = [NSMutableArray array];
+            for (const auto& ext : allowed) {
+              [types addObject:[NSString stringWithUTF8String:ext.c_str()]];
+            }
+            [panel setAllowedFileTypes:types];
           }
-          [panel setAllowedFileTypes:types];
         }
       }
 
