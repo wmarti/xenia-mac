@@ -30,7 +30,7 @@
 DEFINE_path(mappings_file, "gamecontrollerdb.txt",
             "Filename of a database with custom game controller mappings.",
             "SDL");
-DEFINE_bool(sdl_keyboard_fallback, false,
+DEFINE_bool(sdl_keyboard_fallback, true,
             "Use keyboard input as a fallback controller when no SDL "
             "gamepads are connected.",
             "SDL");
@@ -97,7 +97,6 @@ SDLInputDriver::SDLInputDriver(xe::ui::Window* window, size_t window_z_order)
     : InputDriver(window, window_z_order),
       sdl_events_initialized_(false),
       sdl_gamecontroller_initialized_(false),
-      sdl_events_unflushed_(0),
       sdl_pumpevents_queued_(false),
       controllers_(),
       controllers_mutex_(),
@@ -151,30 +150,6 @@ X_STATUS SDLInputDriver::Setup() {
       return;
     }
     sdl_events_initialized_ = true;
-
-    // With an event watch we will always get notified, even if the event queue
-    // is full, which can happen if another subsystem does not clear its events.
-    SDL_AddEventWatch(
-        [](void* userdata, SDL_Event* event) -> int {
-          if (!userdata || !event) {
-            assert_always();
-            return 0;
-          }
-
-          const auto type = event->type;
-          if (type < SDL_JOYAXISMOTION || type >= SDL_FINGERDOWN) {
-            return 0;
-          }
-
-          // If another part of xenia uses another SDL subsystem that generates
-          // events, this may seem like a bad idea. They will however not
-          // subscribe to controller events so we get away with that.
-          const auto driver = static_cast<SDLInputDriver*>(userdata);
-          driver->HandleEvent(*event);
-
-          return 0;
-        },
-        this);
 
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
       return;
@@ -480,18 +455,6 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
 }
 
 void SDLInputDriver::HandleEvent(const SDL_Event& event) {
-  // This callback will likely run on the thread that posts the event, which
-  // may be a dedicated thread SDL has created for the joystick subsystem.
-
-  // Event queue should never be (this) full
-  assert(SDL_PeepEvents(nullptr, 0, SDL_PEEKEVENT, SDL_FIRSTEVENT,
-                        SDL_LASTEVENT) < 0xFFFF);
-
-  // The queue could grow up to 3.5MB since it is never polled.
-  if (++sdl_events_unflushed_ > 64) {
-    SDL_FlushEvents(SDL_JOYAXISMOTION, SDL_FINGERDOWN - 1);
-    sdl_events_unflushed_ = 0;
-  }
   switch (event.type) {
     case SDL_CONTROLLERDEVICEADDED:
       OnControllerDeviceAdded(event);
@@ -564,7 +527,10 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
   }
   if (user_id >= 0) {
     auto& state = controllers_.at(user_id);
-    state = {controller, {}};
+    state = {};
+    state.sdl = controller;
+    auto joystick = SDL_GameControllerGetJoystick(controller);
+    state.instance_id = joystick ? SDL_JoystickInstanceID(joystick) : -1;
     // XInput seems to start with packet_number = 1 .
     state.state_changed = true;
     UpdateXCapabilities(state);
@@ -693,15 +659,11 @@ std::optional<size_t> SDLInputDriver::GetControllerIndexFromInstanceID(
     SDL_JoystickID instance_id) {
   // Loop through our controllers and try to match the given ID.
   for (size_t i = 0; i < controllers_.size(); i++) {
-    auto controller = controllers_.at(i).sdl;
-    if (!controller) {
+    const auto& controller = controllers_.at(i);
+    if (!controller.sdl) {
       continue;
     }
-    auto joystick = SDL_GameControllerGetJoystick(controller);
-    assert(joystick);
-    auto joy_instance_id = SDL_JoystickInstanceID(joystick);
-    assert(joy_instance_id >= 0);
-    if (joy_instance_id == instance_id) {
+    if (controller.instance_id == instance_id) {
       return i;
     }
   }
@@ -1080,8 +1042,24 @@ void SDLInputDriver::QueueControllerUpdate() {
   if (!is_queued) {
     window()->app_context().CallInUIThread([this]() {
       SDL_PumpEvents();
+      PollControllerEvents();
       sdl_pumpevents_queued_ = false;
     });
+  }
+}
+
+void SDLInputDriver::PollControllerEvents() {
+  std::array<SDL_Event, 64> events = {};
+  while (true) {
+    const int count =
+        SDL_PeepEvents(events.data(), static_cast<int>(events.size()),
+                       SDL_GETEVENT, SDL_JOYAXISMOTION, SDL_FINGERDOWN - 1);
+    if (count <= 0) {
+      break;
+    }
+    for (int i = 0; i < count; ++i) {
+      HandleEvent(events[i]);
+    }
   }
 }
 

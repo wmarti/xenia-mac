@@ -49,11 +49,12 @@ class SDLInputDriver final : public InputDriver,
 
  private:
   struct ControllerState {
-    SDL_GameController* sdl;
-    X_INPUT_CAPABILITIES caps;
-    X_INPUT_STATE state;
-    bool state_changed;
-    bool is_active;
+    SDL_GameController* sdl = nullptr;
+    SDL_JoystickID instance_id = -1;
+    X_INPUT_CAPABILITIES caps = {};
+    X_INPUT_STATE state = {};
+    bool state_changed = false;
+    bool is_active = false;
   };
 
   enum class RepeatState {
@@ -100,10 +101,10 @@ class SDLInputDriver final : public InputDriver,
                                    bool is_active,
                                    X_INPUT_KEYSTROKE* out_keystroke);
   void QueueControllerUpdate();
+  void PollControllerEvents();
 
   bool sdl_events_initialized_;
   bool sdl_gamecontroller_initialized_;
-  int sdl_events_unflushed_;
   std::atomic<bool> sdl_pumpevents_queued_;
   std::array<ControllerState, HID_SDL_USER_COUNT> controllers_;
   std::mutex controllers_mutex_;
