@@ -27,6 +27,12 @@ namespace cpu {
 namespace backend {
 namespace a64 {
 
+#if XE_ARCH_ARM64
+#define XE_A64_INDIRECTION_64BIT 1
+#else
+#define XE_A64_INDIRECTION_64BIT 0
+#endif
+
 struct EmitFunctionInfo {
   struct _code_size {
     size_t prolog;
@@ -76,11 +82,39 @@ class A64CodeCache : public CodeCache {
 
   GuestFunction* LookupFunction(uint64_t host_pc) override;
 
- protected:
+  // Access to indirection table base for emitter
+  uint8_t* indirection_table_base() const { return indirection_table_base_; }
+
+  // Returns the actual base address used for indirection table
+  uintptr_t indirection_table_base_address() const {
+    return indirection_table_actual_base_;
+  }
+#if XE_A64_INDIRECTION_64BIT
+  uintptr_t indirection_table_base_bias() const {
+    return indirection_table_base_bias_;
+  }
+#endif
+
+ public:
   // All executable code falls within 0x80000000 to 0x9FFFFFFF, so we can
   // only map enough for lookups within that range.
-  static const size_t kIndirectionTableSize = 0x1FFFFFFF;
+  // Size of the indirection table in bytes.
+  // On ARM64 platforms we store 64-bit entries (8 bytes) per 4-byte guest slot
+  // for the 0x2000_0000-byte guest executable range (0x8000_0000..0xA000_0000),
+  // so we need 0x4000_0000 bytes to cover the full space.
+#if XE_A64_INDIRECTION_64BIT
+  static const size_t kIndirectionTableSize = 0x40000000;  // 1 GiB
+#else
+  static const size_t kIndirectionTableSize =
+      0x20000000 - 1;  // 512 MiB - 1 (legacy)
+#endif
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, the base address is determined dynamically at runtime
+  // based on where the OS allows us to allocate memory
+  static uintptr_t kIndirectionTableBase;
+#else
   static const uintptr_t kIndirectionTableBase = 0x80000000;
+#endif
   // The code range is 512MB, but we know the total code games will have is
   // pretty small (dozens of mb at most) and our expansion is reasonablish
   // so 256MB should be more than enough.
@@ -125,12 +159,33 @@ class A64CodeCache : public CodeCache {
   xe::global_critical_region global_critical_region_;
 
   // Value that the indirection table will be initialized with upon commit.
+#if XE_A64_INDIRECTION_64BIT
+  uint64_t indirection_default_value_ = 0xFEEDF00D;
+#else
   uint32_t indirection_default_value_ = 0xFEEDF00D;
+#endif
 
-  // Fixed at kIndirectionTableBase in host space, holding 4 byte pointers into
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, we use 64-bit pointers in the indirection table to
+  // handle high addresses that can't fit in 32-bit values.
+  using indirection_entry_t = uint64_t;
+  static constexpr size_t kIndirectionEntrySize = 8;
+#else
+  // Other platforms use 32-bit pointers
+  using indirection_entry_t = uint32_t;
+  static constexpr size_t kIndirectionEntrySize = 4;
+#endif
+
+  // Fixed at kIndirectionTableBase in host space, holding pointers into
   // the generated code table that correspond to the PPC functions in guest
   // space.
   uint8_t* indirection_table_base_ = nullptr;
+  // Actual base address of the indirection table (may differ from
+  // kIndirectionTableBase on systems where fixed address allocation fails)
+  uintptr_t indirection_table_actual_base_ = 0;
+#if XE_A64_INDIRECTION_64BIT
+  uintptr_t indirection_table_base_bias_ = 0;
+#endif
   // Fixed at kGeneratedCodeExecuteBase and holding all generated code, growing
   // as needed.
   uint8_t* generated_code_execute_base_ = nullptr;

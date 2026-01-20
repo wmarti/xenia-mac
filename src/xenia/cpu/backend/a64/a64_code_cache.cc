@@ -9,12 +9,14 @@
 
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -22,12 +24,43 @@
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/module.h"
 
+DEFINE_bool(a64_indirection_table_log, false,
+            "Log A64 indirection table mapping and updates.", "CPU");
+DEFINE_int32(a64_indirection_table_log_limit, 32,
+             "Maximum number of A64 indirection table log entries.", "CPU");
+
 namespace xe {
 namespace cpu {
 namespace backend {
 namespace a64 {
 
 using namespace xe::literals;
+
+namespace {
+
+bool ShouldLogIndirectionTable() {
+  if (!cvars::a64_indirection_table_log) {
+    return false;
+  }
+  const int32_t limit = cvars::a64_indirection_table_log_limit;
+  if (limit <= 0) {
+    return false;
+  }
+  static std::atomic<int32_t> log_count{0};
+  const int32_t count = log_count.fetch_add(1, std::memory_order_relaxed);
+  return count < limit;
+}
+
+}  // namespace
+
+// Define static constants for linking
+const size_t A64CodeCache::kIndirectionTableSize;
+#if XE_A64_INDIRECTION_64BIT
+// On ARM64 platforms, this will be set dynamically during initialization
+uintptr_t A64CodeCache::kIndirectionTableBase = 0x80000000;
+#else
+const uintptr_t A64CodeCache::kIndirectionTableBase;
+#endif
 
 A64CodeCache::A64CodeCache() = default;
 
