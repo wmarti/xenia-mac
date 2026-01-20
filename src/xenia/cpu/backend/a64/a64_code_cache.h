@@ -111,6 +111,11 @@ class A64CodeCache : public CodeCache {
                          void* code_execute_address,
                          UnwindReservation unwind_reservation) {}
 
+  // Platform-specific code copying with JIT protection handling
+  virtual void CopyMachineCode(void* dest, const void* src, size_t size) {
+    std::memcpy(dest, src, size);
+  }
+
   std::filesystem::path file_name_;
   xe::memory::FileMappingHandle mapping_ =
       xe::memory::kFileMappingHandleInvalid;

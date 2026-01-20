@@ -241,12 +241,25 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
     } while (generated_code_commit_mark_.compare_exchange_weak(
         old_commit_mark, new_commit_mark));
 
-    // Copy code.
-    std::memcpy(code_write_address, machine_code, func_info.code_size.total);
-
-    // Fill unused slots with 0x00
-    std::memset(tail_write_address, 0x00,
-                static_cast<size_t>(end_write_address - tail_write_address));
+    // Copy code and fill padding while in write mode on MAP_JIT.
+#if XE_PLATFORM_MAC && defined(__aarch64__)
+    const bool jit_write =
+        (generated_code_execute_base_ == generated_code_write_base_);
+    if (jit_write) {
+      pthread_jit_write_protect_np(0);
+    }
+#endif
+    CopyMachineCode(code_write_address, machine_code,
+                    func_info.code_size.total);
+    if (end_write_address > tail_write_address) {
+      std::memset(tail_write_address, 0x00,
+                  static_cast<size_t>(end_write_address - tail_write_address));
+    }
+#if XE_PLATFORM_MAC && defined(__aarch64__)
+    if (jit_write) {
+      pthread_jit_write_protect_np(1);
+    }
+#endif
 
     // Notify subclasses of placed code.
     PlaceCode(guest_address, machine_code, func_info, code_execute_address,
