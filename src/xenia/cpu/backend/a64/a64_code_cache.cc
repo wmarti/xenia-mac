@@ -87,17 +87,66 @@ A64CodeCache::~A64CodeCache() {
 }
 
 bool A64CodeCache::Initialize() {
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, allocate the indirection table wherever the OS allows,
+  // then update our base address to match. This gives us the same direct
+  // access pattern as x64 without needing complex offset calculations.
+
+  indirection_table_base_ = reinterpret_cast<uint8_t*>(
+      xe::memory::AllocFixed(nullptr, kIndirectionTableSize,
+                             xe::memory::AllocationType::kReserveCommit,
+                             xe::memory::PageAccess::kReadWrite));
+
+  if (!indirection_table_base_) {
+    XELOGE("Unable to allocate indirection table at any address");
+    return false;
+  }
+
+  // Keep kIndirectionTableBase as 0x80000000 for offset calculations
+  // Store the actual allocated address separately
+  indirection_table_actual_base_ =
+      reinterpret_cast<uintptr_t>(indirection_table_base_);
+#if XE_A64_INDIRECTION_64BIT
+  indirection_table_base_bias_ =
+      indirection_table_actual_base_ -
+      (static_cast<uintptr_t>(kIndirectionTableBase) * 2);
+#endif
+#else
+  // Other platforms: try to allocate at the preferred address first.
   indirection_table_base_ = reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
       reinterpret_cast<void*>(kIndirectionTableBase), kIndirectionTableSize,
       xe::memory::AllocationType::kReserve,
       xe::memory::PageAccess::kReadWrite));
   if (!indirection_table_base_) {
+    XELOGW("Preferred indirection table base unavailable; falling back");
+    indirection_table_base_ = reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
+        nullptr, kIndirectionTableSize, xe::memory::AllocationType::kReserve,
+        xe::memory::PageAccess::kReadWrite));
+  }
+  if (!indirection_table_base_) {
     XELOGE("Unable to allocate code cache indirection table");
-    XELOGE(
-        "This is likely because the {:X}-{:X} range is in use by some other "
-        "system DLL",
-        static_cast<uint64_t>(kIndirectionTableBase),
-        kIndirectionTableBase + kIndirectionTableSize);
+    XELOGE("Tried preferred range {:X}-{:X} with fallback to OS-chosen",
+           static_cast<uint64_t>(kIndirectionTableBase),
+           kIndirectionTableBase + kIndirectionTableSize);
+    return false;
+  }
+  indirection_table_actual_base_ =
+      reinterpret_cast<uintptr_t>(indirection_table_base_);
+#if XE_A64_INDIRECTION_64BIT
+  indirection_table_base_bias_ =
+      indirection_table_actual_base_ -
+      (static_cast<uintptr_t>(kIndirectionTableBase) * 2);
+#endif
+#endif
+
+  if (ShouldLogIndirectionTable()) {
+    XELOGI(
+        "A64 indirection table: guest_base=0x{:08X} table_base=0x{:016X} "
+        "size=0x{:X} entry_bytes={}",
+        static_cast<uint32_t>(kIndirectionTableBase),
+        static_cast<uint64_t>(indirection_table_actual_base_),
+        static_cast<uint32_t>(kIndirectionTableSize),
+        static_cast<uint32_t>(kIndirectionEntrySize));
   }
 
   // Create mmap file. This allows us to share the code cache with the debugger.
