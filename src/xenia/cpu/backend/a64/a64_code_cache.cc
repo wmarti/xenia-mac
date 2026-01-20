@@ -432,7 +432,7 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
                                   void*& code_write_address_out) {
   // Hold a lock while we bump the pointers up. This is important as the
   // unwind table requires entries AND code to be sorted in order.
-  size_t low_mark;
+  [[maybe_unused]] size_t low_mark;
   size_t high_mark;
   uint8_t* code_execute_address;
   UnwindReservation unwind_reservation;
