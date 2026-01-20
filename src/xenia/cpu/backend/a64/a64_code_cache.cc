@@ -155,11 +155,26 @@ bool A64CodeCache::Initialize() {
 }
 
 void A64CodeCache::set_indirection_default(uint32_t default_value) {
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, we extend 32-bit values to 64-bit
+  indirection_default_value_ = default_value;
+#else
+  indirection_default_value_ = default_value;
+#endif
+}
+
+#if XE_A64_INDIRECTION_64BIT
+void A64CodeCache::set_indirection_default_64(uint64_t default_value) {
   indirection_default_value_ = default_value;
 }
+#endif
 
 void A64CodeCache::AddIndirection(uint32_t guest_address,
                                   uint32_t host_address) {
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, delegate to the 64-bit version
+  AddIndirection64(guest_address, host_address);
+#else
   if (!indirection_table_base_) {
     return;
   }
@@ -167,25 +182,121 @@ void A64CodeCache::AddIndirection(uint32_t guest_address,
   uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
       indirection_table_base_ + (guest_address - kIndirectionTableBase));
   *indirection_slot = host_address;
+#endif
 }
 
-void A64CodeCache::CommitExecutableRange(uint32_t guest_low,
-                                         uint32_t guest_high) {
+#if XE_A64_INDIRECTION_64BIT
+void A64CodeCache::AddIndirection64(uint32_t guest_address,
+                                    uint64_t host_address) {
   if (!indirection_table_base_) {
     return;
   }
 
-  // Commit the memory.
-  xe::memory::AllocFixed(
-      indirection_table_base_ + (guest_low - kIndirectionTableBase),
-      guest_high - guest_low, xe::memory::AllocationType::kCommit,
-      xe::memory::PageAccess::kReadWrite);
+  if (guest_address < kIndirectionTableBase) {
+    XELOGE(
+        "A64CodeCache::AddIndirection64: guest_address 0x{:08X} below base "
+        "0x{:08X}",
+        guest_address, static_cast<uint32_t>(kIndirectionTableBase));
+    return;
+  }
 
-  // Fill memory with the default value.
+  const uint64_t guest_delta = guest_address - kIndirectionTableBase;
+  if (guest_delta & 0x3) {
+    XELOGW(
+        "A64CodeCache::AddIndirection64: guest_address 0x{:08X} not 4-byte "
+        "aligned (delta=0x{:X})",
+        guest_address, guest_delta);
+  }
+
+  // Calculate offset from the logical base (0x80000000), not from actual table
+  // address.
+  const uint64_t guest_offset = (guest_delta >> 2) * kIndirectionEntrySize;
+  if (guest_offset + kIndirectionEntrySize > kIndirectionTableSize) {
+    XELOGE(
+        "A64CodeCache::AddIndirection64: guest_address 0x{:08X} offset 0x{:X} "
+        "exceeds table size 0x{:X}",
+        guest_address, guest_offset,
+        static_cast<uint32_t>(kIndirectionTableSize));
+    return;
+  }
+
+  uint64_t* indirection_slot =
+      reinterpret_cast<uint64_t*>(indirection_table_base_ + guest_offset);
+  *indirection_slot = host_address;
+
+  if (ShouldLogIndirectionTable()) {
+    XELOGI(
+        "A64 indirection add: guest=0x{:08X} delta=0x{:X} offset=0x{:X} "
+        "slot=0x{:016X} host=0x{:016X}",
+        guest_address, guest_delta, guest_offset,
+        reinterpret_cast<uint64_t>(indirection_slot), host_address);
+  }
+}
+#endif
+
+void A64CodeCache::CommitExecutableRange(uint32_t guest_low,
+                                         uint32_t guest_high) {
+  if (!indirection_table_base_) {
+    XELOGE("CommitExecutableRange: indirection_table_base_ is null!");
+    return;
+  }
+
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms: use offset-based addressing from guest base
+  // (0x80000000)
+  static const uintptr_t kGuestAddressBase = 0x80000000;
+
+  // Calculate offsets from the guest address base, not the table base
+  if (guest_low < kGuestAddressBase) {
+    XELOGE(
+        "CommitExecutableRange: guest_low 0x{:08X} is below guest base "
+        "0x{:08X}",
+        guest_low, kGuestAddressBase);
+    return;
+  }
+
+  uint32_t start_offset =
+      ((guest_low - kGuestAddressBase) >> 2) * kIndirectionEntrySize;
+  uint32_t size = ((guest_high - guest_low) >> 2) * kIndirectionEntrySize;
+
+  // Sanity check bounds; the table should fully cover the XEX guest range now.
+  if (start_offset + size > kIndirectionTableSize) {
+    XELOGE(
+        "CommitExecutableRange: range [0x{:08X}, 0x{:08X}) exceeds table (size "
+        "0x{:X})",
+        guest_low, guest_high, (unsigned)kIndirectionTableSize);
+    return;
+  }
+
+  // The memory should already be allocated, just fill with default value
+  void* target_memory = indirection_table_base_ + start_offset;
+  uint64_t* p = reinterpret_cast<uint64_t*>(target_memory);
+  uint32_t entry_count = size / kIndirectionEntrySize;
+  for (uint32_t i = 0; i < entry_count; i++) {
+    p[i] = indirection_default_value_;
+  }
+
+  if (ShouldLogIndirectionTable()) {
+    XELOGI(
+        "A64 indirection commit: guest=[0x{:08X},0x{:08X}) "
+        "offset=0x{:X} size=0x{:X} entries={} base=0x{:016X}",
+        guest_low, guest_high, start_offset, size, entry_count,
+        static_cast<uint64_t>(indirection_table_actual_base_));
+  }
+#else
+  // Other platforms: use 32-bit entries
+  uint32_t start_offset = (guest_low - kIndirectionTableBase);
+  uint32_t size = (guest_high - guest_low);
+
+  xe::memory::AllocFixed(indirection_table_base_ + start_offset, size,
+                         xe::memory::AllocationType::kCommit,
+                         xe::memory::PageAccess::kReadWrite);
+
   uint32_t* p = reinterpret_cast<uint32_t*>(indirection_table_base_);
-  for (uint32_t address = guest_low; address < guest_high; ++address) {
+  for (uint32_t address = guest_low; address < guest_high; address += 4) {
     p[(address - kIndirectionTableBase) / 4] = indirection_default_value_;
   }
+#endif
 }
 
 void A64CodeCache::PlaceHostCode(uint32_t guest_address, void* machine_code,
@@ -303,10 +414,59 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
   // Note that we do support code that doesn't have an indirection fixup, so
   // ignore those when we see them.
   if (guest_address && indirection_table_base_) {
+#if XE_A64_INDIRECTION_64BIT
+    // On ARM64 platforms, map guest addresses to table offsets using logical
+    // base kIndirectionTableBase remains 0x80000000 for calculation purposes
+
+    // Calculate offset from the logical guest base (0x80000000)
+    if (guest_address < kIndirectionTableBase) {
+      XELOGE(
+          "A64CodeCache::PlaceGuestCode: ERROR - guest_address 0x{:08X} is "
+          "below logical base 0x{:08X}!",
+          guest_address, static_cast<uint32_t>(kIndirectionTableBase));
+      return;
+    }
+
+    uintptr_t guest_diff = guest_address - kIndirectionTableBase;
+    if (guest_diff & 0x3) {
+      XELOGW(
+          "A64CodeCache::PlaceGuestCode: guest_address 0x{:08X} not 4-byte "
+          "aligned (delta=0x{:X})",
+          guest_address, guest_diff);
+    }
+    uintptr_t guest_offset =
+        (guest_diff >> 2) * kIndirectionEntrySize;  // 8-byte entries
+    uintptr_t slot_address =
+        reinterpret_cast<uintptr_t>(indirection_table_base_) + guest_offset;
+    uint64_t* indirection_slot = reinterpret_cast<uint64_t*>(slot_address);
+
+    // Check if the slot address is within bounds
+    uintptr_t table_end = reinterpret_cast<uintptr_t>(indirection_table_base_) +
+                          kIndirectionTableSize;
+    if (slot_address >= table_end) {
+      XELOGE(
+          "A64CodeCache::PlaceGuestCode: slot 0x{:016X} beyond table end "
+          "0x{:016X}",
+          slot_address, table_end);
+      return;
+    }
+
+    *indirection_slot = reinterpret_cast<uint64_t>(code_execute_address);
+
+    if (ShouldLogIndirectionTable()) {
+      XELOGI(
+          "A64 indirection place: guest=0x{:08X} diff=0x{:X} offset=0x{:X} "
+          "slot=0x{:016X} host=0x{:016X}",
+          guest_address, guest_diff, guest_offset, slot_address,
+          static_cast<uint64_t>(
+              reinterpret_cast<uintptr_t>(code_execute_address)));
+    }
+#else
     uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
         indirection_table_base_ + (guest_address - kIndirectionTableBase));
     *indirection_slot =
         uint32_t(reinterpret_cast<uint64_t>(code_execute_address));
+#endif
   }
 }
 

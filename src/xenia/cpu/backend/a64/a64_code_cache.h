@@ -65,7 +65,13 @@ class A64CodeCache : public CodeCache {
 
   bool has_indirection_table() { return indirection_table_base_ != nullptr; }
   void set_indirection_default(uint32_t default_value);
+#if XE_A64_INDIRECTION_64BIT
+  void set_indirection_default_64(uint64_t default_value);
+#endif
   void AddIndirection(uint32_t guest_address, uint32_t host_address);
+#if XE_A64_INDIRECTION_64BIT
+  void AddIndirection64(uint32_t guest_address, uint64_t host_address);
+#endif
 
   void CommitExecutableRange(uint32_t guest_low, uint32_t guest_high);
 
