@@ -66,7 +66,7 @@ A64CodeCache::A64CodeCache() = default;
 
 A64CodeCache::~A64CodeCache() {
   if (indirection_table_base_) {
-    xe::memory::DeallocFixed(indirection_table_base_, 0,
+    xe::memory::DeallocFixed(indirection_table_base_, kIndirectionTableSize,
                              xe::memory::DeallocationType::kRelease);
   }
 
