@@ -48,17 +48,30 @@ class PosixMappedMemory : public MappedMemory {
 
     size_t map_length = length;
     if (!length) {
+#if XE_PLATFORM_MAC
+      struct stat file_stat;
+      if (fstat(file_descriptor, &file_stat)) {
+        close(file_descriptor);
+        return nullptr;
+      }
+      map_length = size_t(file_stat.st_size);
+#else
       struct stat64 file_stat;
       if (fstat64(file_descriptor, &file_stat)) {
         close(file_descriptor);
         return nullptr;
       }
       map_length = size_t(file_stat.st_size);
+#endif
     }
 
     void* data =
         mmap(0, map_length, protection, MAP_SHARED, file_descriptor, offset);
-    ftruncate(file_descriptor, map_length);
+#if XE_PLATFORM_MAC
+    ftruncate(file_descriptor, off_t(map_length));
+#else
+    ftruncate64(file_descriptor, off64_t(map_length));
+#endif
     if (!data) {
       close(file_descriptor);
       return nullptr;
@@ -75,7 +88,11 @@ class PosixMappedMemory : public MappedMemory {
     }
     if (file_descriptor_ >= 0) {
       if (truncate_size) {
+#if XE_PLATFORM_MAC
+        ftruncate(file_descriptor_, off_t(truncate_size));
+#else
         ftruncate64(file_descriptor_, off64_t(truncate_size));
+#endif
       }
       close(file_descriptor_);
       file_descriptor_ = -1;
