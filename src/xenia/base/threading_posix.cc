@@ -20,10 +20,16 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <ctime>
+#include <limits>
 
 #include "logging.h"
+
+#if XE_PLATFORM_MAC
+#include <mach/mach.h>
+#endif
 
 #if XE_PLATFORM_ANDROID
 #include <dlfcn.h>
@@ -101,6 +107,32 @@ enum class SignalType {
   k_Count
 };
 
+#if XE_PLATFORM_MAC
+// macOS lacks real-time signals (SIGRTMIN/SIGRTMAX). Use SIGUSR1/SIGUSR2.
+int GetSystemSignal(SignalType num) {
+  switch (num) {
+    case SignalType::kThreadSuspend:
+      return SIGUSR1;
+    case SignalType::kThreadUserCallback:
+      return SIGUSR2;
+    default:
+      assert_always();
+      return SIGUSR1;
+  }
+}
+
+SignalType GetSystemSignalType(int num) {
+  switch (num) {
+    case SIGUSR1:
+      return SignalType::kThreadSuspend;
+    case SIGUSR2:
+      return SignalType::kThreadUserCallback;
+    default:
+      assert_always();
+      return SignalType::k_Count;
+  }
+}
+#else
 int GetSystemSignal(SignalType num) {
   auto result = SIGRTMIN + static_cast<int>(num);
   assert_true(result < SIGRTMAX);
@@ -110,20 +142,26 @@ int GetSystemSignal(SignalType num) {
 SignalType GetSystemSignalType(int num) {
   return static_cast<SignalType>(num - SIGRTMIN);
 }
+#endif
 
-thread_local std::array<bool, static_cast<size_t>(SignalType::k_Count)>
+std::array<std::atomic<bool>, static_cast<size_t>(SignalType::k_Count)>
     signal_handler_installed = {};
 
 static void signal_handler(int signal, siginfo_t* info, void* context);
 
 void install_signal_handler(SignalType type) {
-  if (signal_handler_installed[static_cast<size_t>(type)]) return;
+  bool expected = false;
+  if (!signal_handler_installed[static_cast<size_t>(type)]
+           .compare_exchange_strong(expected, true)) {
+    return;
+  }
   struct sigaction action{};
-  action.sa_flags = SA_SIGINFO;
+  action.sa_flags = SA_SIGINFO | SA_RESTART;
   action.sa_sigaction = signal_handler;
   sigemptyset(&action.sa_mask);
-  if (sigaction(GetSystemSignal(type), &action, nullptr) != -1)
-    signal_handler_installed[static_cast<size_t>(type)] = true;
+  if (sigaction(GetSystemSignal(type), &action, nullptr) != 0) {
+    signal_handler_installed[static_cast<size_t>(type)] = false;
+  }
 }
 
 // TODO(dougvj)
@@ -132,7 +170,11 @@ void EnableAffinityConfiguration() {}
 // uint64_t ticks() { return mach_absolute_time(); }
 
 uint32_t current_thread_system_id() {
+#if XE_PLATFORM_MAC
+  return static_cast<uint32_t>(pthread_mach_thread_np(pthread_self()));
+#else
   return static_cast<uint32_t>(syscall(SYS_gettid));
+#endif
 }
 
 void MaybeYield() {
@@ -187,13 +229,41 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
 
 class PosixConditionBase {
  public:
+  PosixConditionBase() {
+#if !XE_PLATFORM_MAC
+    // Initialize as robust mutex to handle thread termination gracefully.
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
+
+    // Get the native handle and set it as robust.
+    auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
+    pthread_mutex_destroy(native_mutex);      // Destroy default mutex.
+    pthread_mutex_init(native_mutex, &attr);  // Reinit as robust.
+    pthread_mutexattr_destroy(&attr);
+#endif
+  }
+
   virtual ~PosixConditionBase() = default;
   virtual bool Signal() = 0;
 
   WaitResult Wait(std::chrono::milliseconds timeout) {
     bool executed;
     auto predicate = [this] { return this->signaled(); };
-    auto lock = std::unique_lock(mutex_);
+#if XE_PLATFORM_MAC
+    // Standard locking on macOS (no robust mutex support).
+    std::unique_lock<std::mutex> lock(mutex_);
+#else
+    // Handle robust mutex locking.
+    auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
+    int lock_result = pthread_mutex_lock(native_mutex);
+    if (lock_result == EOWNERDEAD) {
+      pthread_mutex_consistent(native_mutex);
+    } else if (lock_result != 0) {
+      return WaitResult::kFailed;
+    }
+    std::unique_lock<std::mutex> lock(mutex_, std::adopt_lock);
+#endif
     if (predicate()) {
       executed = true;
     } else {
@@ -216,63 +286,128 @@ class PosixConditionBase {
       std::chrono::milliseconds timeout) {
     assert_true(!handles.empty());
 
-    // Construct a condition for all or any depending on wait_all
-    std::function<bool()> predicate;
-    {
-      using iter_t = std::vector<PosixConditionBase*>::const_iterator;
-      const auto predicate_inner = [](auto h) { return h->signaled(); };
-      const auto operation =
-          wait_all ? std::all_of<iter_t, decltype(predicate_inner)>
-                   : std::any_of<iter_t, decltype(predicate_inner)>;
-      predicate = [&handles, operation, predicate_inner] {
-        return operation(handles.cbegin(), handles.cend(), predicate_inner);
-      };
+    // For single handle, just use the normal Wait path.
+    if (handles.size() == 1) {
+      auto result = handles[0]->Wait(timeout);
+      return std::make_pair(result, 0);
     }
 
-    // TODO(bwrsandman, Triang3l) This is controversial, see issue #1677
-    // This will probably cause a deadlock on the next thread doing any waiting
-    // if the thread is suspended between locking and waiting
-    std::unique_lock lock(mutex_);
+    // For multiple handles, we need to poll since we can't wait on multiple
+    // condition variables simultaneously. This is a limitation of the POSIX
+    // condition variable API.
+    auto start_time = std::chrono::steady_clock::now();
+    auto end_time = (timeout == std::chrono::milliseconds::max())
+                        ? std::chrono::steady_clock::time_point::max()
+                        : start_time + timeout;
 
-    bool wait_success = true;
-    // If the timeout is infinite, wait without timeout.
-    // The predicate will be checked before beginning the wait
-    if (timeout == std::chrono::milliseconds::max()) {
-      cond_.wait(lock, predicate);
-    } else {
-      // Wait with timeout.
-      wait_success = cond_.wait_for(lock, timeout, predicate);
-    }
-    if (wait_success) {
-      auto first_signaled = std::numeric_limits<size_t>::max();
-      for (auto i = 0u; i < handles.size(); ++i) {
-        if (handles[i]->signaled()) {
-          if (first_signaled > i) {
+    while (true) {
+      // Check all handles to see if any/all are signaled.
+      // Use try_lock to avoid deadlocks from lock ordering issues.
+      size_t first_signaled = std::numeric_limits<size_t>::max();
+      bool condition_met = false;
+
+      // Try to acquire all locks without blocking.
+      std::vector<std::unique_lock<std::mutex>> locks;
+      locks.reserve(handles.size());
+      bool all_locked = true;
+
+      for (size_t i = 0; i < handles.size(); ++i) {
+#if XE_PLATFORM_MAC
+        // macOS: no robust mutex support.
+        std::unique_lock<std::mutex> lk(handles[i]->mutex_, std::try_to_lock);
+        if (!lk.owns_lock()) {
+          all_locked = false;
+          break;
+        }
+        locks.emplace_back(std::move(lk));
+#else
+        // Linux/Android: robust-aware trylock.
+        auto native_mutex = static_cast<pthread_mutex_t*>(
+            handles[i]->mutex_.native_handle());
+        int result = pthread_mutex_trylock(native_mutex);
+        if (result == 0 || result == EOWNERDEAD) {
+          if (result == EOWNERDEAD) {
+            pthread_mutex_consistent(native_mutex);
+          }
+          locks.emplace_back(handles[i]->mutex_, std::adopt_lock);
+        } else {
+          all_locked = false;
+          break;
+        }
+#endif
+      }
+
+      // If we couldn't acquire all locks, release what we have and retry.
+      if (!all_locked) {
+        locks.clear();
+        std::this_thread::yield();
+        continue;
+      }
+
+      // Now we have all locks, check the condition.
+      if (wait_all) {
+        // For wait_all, check if ALL are signaled.
+        bool all_signaled = true;
+        for (size_t i = 0; i < handles.size(); ++i) {
+          if (!handles[i]->signaled()) {
+            all_signaled = false;
+            break;
+          }
+          if (first_signaled == std::numeric_limits<size_t>::max()) {
             first_signaled = i;
           }
-          handles[i]->post_execution();
-          if (!wait_all) break;
+        }
+        condition_met = all_signaled;
+      } else {
+        // For wait_any, check if ANY is signaled.
+        for (size_t i = 0; i < handles.size(); ++i) {
+          if (handles[i]->signaled()) {
+            first_signaled = i;
+            condition_met = true;
+            break;
+          }
         }
       }
-      assert_true(std::numeric_limits<size_t>::max() != first_signaled);
-      return std::make_pair(WaitResult::kSuccess, first_signaled);
+
+      if (condition_met) {
+        // Execute post_execution for the signaled handle(s).
+        if (wait_all) {
+          for (size_t i = 0; i < handles.size(); ++i) {
+            handles[i]->post_execution();
+          }
+        } else {
+          handles[first_signaled]->post_execution();
+        }
+        return std::make_pair(WaitResult::kSuccess, first_signaled);
+      }
+
+      // Release locks before sleeping.
+      locks.clear();
+
+      // Check timeout.
+      auto now = std::chrono::steady_clock::now();
+      if (now >= end_time) {
+        return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
+      }
+
+      // Sleep for a short time before polling again.
+      auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
+      auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
+      std::this_thread::sleep_for(sleep_time);
     }
-    return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
   }
 
   [[nodiscard]] virtual void* native_handle() const {
-    return cond_.native_handle();
+    return const_cast<std::condition_variable&>(cond_).native_handle();
   }
 
  protected:
   [[nodiscard]] inline virtual bool signaled() const = 0;
   inline virtual void post_execution() = 0;
-  static std::condition_variable cond_;
-  static std::mutex mutex_;
+  std::condition_variable cond_;
+  std::mutex mutex_;
 };
-
-std::condition_variable PosixConditionBase::cond_;
-std::mutex PosixConditionBase::mutex_;
 
 // There really is no native POSIX handle for a single wait/signal construct
 // pthreads is at a lower level with more handles for such a mechanism.
@@ -367,7 +502,7 @@ class PosixCondition<Mutant> final : public PosixConditionBase {
   }
 
   [[nodiscard]] void* native_handle() const override {
-    return mutex_.native_handle();
+    return const_cast<std::mutex&>(mutex_).native_handle();
   }
 
  private:
@@ -584,9 +719,16 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     WaitStarted();
     std::unique_lock<std::mutex> lock(state_mutex_);
     if (state_ != State::kUninitialized && state_ != State::kFinished) {
+#if XE_PLATFORM_MAC
+      // macOS can only set the current thread's name.
+      if (pthread_self() == thread_) {
+        pthread_setname_np(std::string(name).c_str());
+      }
+#else
       pthread_setname_np(thread_, std::string(name).c_str());
 #if XE_PLATFORM_ANDROID
       SetAndroidPreApi26Name(name);
+#endif
 #endif
     }
   }
@@ -602,10 +744,20 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   }
 #endif
 
-  uint32_t system_id() const { return static_cast<uint32_t>(thread_); }
+  uint32_t system_id() const {
+#if XE_PLATFORM_MAC
+    return static_cast<uint32_t>(pthread_mach_thread_np(thread_));
+#else
+    return static_cast<uint32_t>(thread_);
+#endif
+  }
 
   uint64_t affinity_mask() const {
     WaitStarted();
+#if XE_PLATFORM_MAC
+    // Thread affinity is not supported on macOS.
+    return 0;
+#else
     cpu_set_t cpu_set;
 #if XE_PLATFORM_ANDROID
     if (sched_getaffinity(pthread_gettid_np(thread_), sizeof(cpu_set_t),
@@ -624,10 +776,16 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       result |= set << i;
     }
     return result;
+#endif
   }
 
   void set_affinity_mask(uint64_t mask) const {
     WaitStarted();
+#if XE_PLATFORM_MAC
+    // Thread affinity is not supported on macOS.
+    (void)mask;
+    return;
+#else
     cpu_set_t cpu_set;
     CPU_ZERO(&cpu_set);
     for (auto i = 0u; i < 64; i++) {
@@ -644,6 +802,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     if (pthread_setaffinity_np(thread_, sizeof(cpu_set_t), &cpu_set) != 0) {
       assert_always();
     }
+#endif
 #endif
   }
 
@@ -681,12 +840,17 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     WaitStarted();
     std::unique_lock lock(callback_mutex_);
     user_callback_ = std::move(callback);
+#if XE_PLATFORM_MAC
+    // No pthread_sigqueue on macOS, use pthread_kill (no si_value payload).
+    pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
+#elif XE_PLATFORM_ANDROID
     sigval value{};
     value.sival_ptr = this;
-#if XE_PLATFORM_ANDROID
     sigqueue(pthread_gettid_np(thread_),
              GetSystemSignal(SignalType::kThreadUserCallback), value);
 #else
+    sigval value{};
+    value.sival_ptr = this;
     pthread_sigqueue(thread_, GetSystemSignal(SignalType::kThreadUserCallback),
                      value);
 #endif
@@ -756,6 +920,9 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       cond_.notify_all();
     }
     if (is_current_thread) {
+#if XE_PLATFORM_MAC && defined(__aarch64__)
+      pthread_jit_write_protect_np(1);
+#endif
       pthread_exit(reinterpret_cast<void*>(exit_code));
     }
 #ifdef XE_PLATFORM_ANDROID
@@ -1126,10 +1293,10 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     thread->handle_.state_ = State::kFinished;
   }
 
-  std::unique_lock lock(mutex_);
+  std::unique_lock lock(thread->handle_.mutex_);
   thread->handle_.exit_code_ = 0;
   thread->handle_.signaled_ = true;
-  cond_.notify_all();
+  thread->handle_.cond_.notify_all();
 
   current_thread_ = nullptr;
   return nullptr;
@@ -1171,6 +1338,9 @@ void Thread::Exit(int exit_code) {
     current_thread_->Terminate(exit_code);
   } else {
     // Should only happen with the main thread
+#if XE_PLATFORM_MAC && defined(__aarch64__)
+    pthread_jit_write_protect_np(1);
+#endif
     pthread_exit(reinterpret_cast<void*>(exit_code));
   }
   // Function must not return
@@ -1178,27 +1348,44 @@ void Thread::Exit(int exit_code) {
 }
 
 void set_name(const std::string_view name) {
+#if XE_PLATFORM_MAC
+  pthread_setname_np(std::string(name).c_str());
+#else
   pthread_setname_np(pthread_self(), std::string(name).c_str());
 #if XE_PLATFORM_ANDROID
   if (!android_pthread_getname_np_ && current_thread_) {
     current_thread_->condition().SetAndroidPreApi26Name(name);
   }
 #endif
+#endif
 }
 
 static void signal_handler(int signal, siginfo_t* info, void* /*context*/) {
   switch (GetSystemSignalType(signal)) {
     case SignalType::kThreadSuspend: {
-      assert_not_null(current_thread_);
+      if (!current_thread_) {
+        // current_thread_ is NULL - this can happen if the signal arrives
+        // before the thread has initialized or after it has exited.
+        return;
+      }
       current_thread_->WaitSuspended();
     } break;
     case SignalType::kThreadUserCallback: {
+#if XE_PLATFORM_MAC
+      // macOS: no si_value payload when using pthread_kill.
+      if (alertable_state_ && current_thread_) {
+        auto& condition =
+            static_cast<PosixCondition<Thread>&>(current_thread_->condition());
+        condition.CallUserCallback();
+      }
+#else
       assert_not_null(info->si_value.sival_ptr);
       auto p_thread =
           static_cast<PosixCondition<Thread>*>(info->si_value.sival_ptr);
       if (alertable_state_) {
         p_thread->CallUserCallback();
       }
+#endif
     } break;
 #if XE_PLATFORM_ANDROID
     case SignalType::kThreadTerminate: {
