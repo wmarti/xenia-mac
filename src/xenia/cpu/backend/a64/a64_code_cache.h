@@ -55,7 +55,9 @@ class A64CodeCache : public CodeCache {
 
   const std::filesystem::path& file_name() const override { return file_name_; }
   uintptr_t execute_base_address() const override {
-    return kGeneratedCodeExecuteBase;
+    return generated_code_execute_base_
+               ? reinterpret_cast<uintptr_t>(generated_code_execute_base_)
+               : kGeneratedCodeExecuteBase;
   }
   size_t total_size() const override { return kGeneratedCodeSize; }
 

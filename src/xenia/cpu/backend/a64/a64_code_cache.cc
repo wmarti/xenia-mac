@@ -13,6 +13,10 @@
 #include <cstdlib>
 #include <cstring>
 
+#if XE_PLATFORM_MAC
+#include <pthread.h>
+#endif
+
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
@@ -72,6 +76,15 @@ A64CodeCache::~A64CodeCache() {
 
   // Unmap all views and close mapping.
   if (mapping_ != xe::memory::kFileMappingHandleInvalid) {
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+    // On macOS ARM64, we used AllocFixed instead of MapFileView, so use
+    // DeallocFixed
+    if (generated_code_execute_base_) {
+      xe::memory::DeallocFixed(generated_code_execute_base_, kGeneratedCodeSize,
+                               xe::memory::DeallocationType::kRelease);
+    }
+#else
+    // Other platforms use MapFileView/UnmapFileView
     if (generated_code_write_base_ &&
         generated_code_write_base_ != generated_code_execute_base_) {
       xe::memory::UnmapFileView(mapping_, generated_code_write_base_,
@@ -81,6 +94,7 @@ A64CodeCache::~A64CodeCache() {
       xe::memory::UnmapFileView(mapping_, generated_code_execute_base_,
                                 kGeneratedCodeSize);
     }
+#endif
     xe::memory::CloseFileMappingHandle(mapping_, file_name_);
     mapping_ = xe::memory::kFileMappingHandleInvalid;
   }
@@ -161,10 +175,32 @@ bool A64CodeCache::Initialize() {
 
   // Map generated code region into the file. Pages are committed as required.
   if (xe::memory::IsWritableExecutableMemoryPreferred()) {
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+    // On macOS ARM64, always use OS-chosen MAP_JIT memory.
+    generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
+        xe::memory::AllocFixed(nullptr, kGeneratedCodeSize,
+                               xe::memory::AllocationType::kReserveCommit,
+                               xe::memory::PageAccess::kExecuteReadWrite));
+    generated_code_write_base_ = generated_code_execute_base_;
+    if (!generated_code_execute_base_ || !generated_code_write_base_) {
+      XELOGE("Unable to allocate code cache generated code storage");
+      return false;
+    }
+    // On macOS ARM64, verify the memory is properly allocated for MAP_JIT
+#else
     generated_code_execute_base_ =
         reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
             mapping_, reinterpret_cast<void*>(kGeneratedCodeExecuteBase),
             kGeneratedCodeSize, xe::memory::PageAccess::kExecuteReadWrite, 0));
+    if (!generated_code_execute_base_) {
+      XELOGW(
+          "Fixed address mapping for generated code failed, trying OS-chosen "
+          "address");
+      generated_code_execute_base_ =
+          reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
+              mapping_, nullptr, kGeneratedCodeSize,
+              xe::memory::PageAccess::kExecuteReadWrite, 0));
+    }
     generated_code_write_base_ = generated_code_execute_base_;
     if (!generated_code_execute_base_ || !generated_code_write_base_) {
       XELOGE("Unable to allocate code cache generated code storage");
@@ -175,15 +211,45 @@ bool A64CodeCache::Initialize() {
           uint64_t(kGeneratedCodeExecuteBase + kGeneratedCodeSize));
       return false;
     }
+#endif
   } else {
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+    // On macOS ARM64, always use OS-chosen addresses for the views.
+    generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
+        xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
+                                xe::memory::PageAccess::kExecuteReadOnly, 0));
+    generated_code_write_base_ = reinterpret_cast<uint8_t*>(
+        xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
+                                xe::memory::PageAccess::kReadWrite, 0));
+    if (!generated_code_execute_base_ || !generated_code_write_base_) {
+      XELOGE("Unable to allocate code cache generated code storage");
+      return false;
+    }
+#else
     generated_code_execute_base_ =
         reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
             mapping_, reinterpret_cast<void*>(kGeneratedCodeExecuteBase),
             kGeneratedCodeSize, xe::memory::PageAccess::kExecuteReadOnly, 0));
+    if (!generated_code_execute_base_) {
+      XELOGW(
+          "Fixed address mapping for execute code failed, trying OS-chosen "
+          "address");
+      generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
+          xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
+                                  xe::memory::PageAccess::kExecuteReadOnly, 0));
+    }
     generated_code_write_base_ =
         reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
             mapping_, reinterpret_cast<void*>(kGeneratedCodeWriteBase),
             kGeneratedCodeSize, xe::memory::PageAccess::kReadWrite, 0));
+    if (!generated_code_write_base_) {
+      XELOGW(
+          "Fixed address mapping for write code failed, trying OS-chosen "
+          "address");
+      generated_code_write_base_ = reinterpret_cast<uint8_t*>(
+          xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
+                                  xe::memory::PageAccess::kReadWrite, 0));
+    }
     if (!generated_code_execute_base_ || !generated_code_write_base_) {
       XELOGE("Unable to allocate code cache generated code storage");
       XELOGE(
@@ -195,6 +261,7 @@ bool A64CodeCache::Initialize() {
           uint64_t(kGeneratedCodeWriteBase + kGeneratedCodeSize));
       return false;
     }
+#endif
   }
 
   // Preallocate the function map to a large, reasonable size.
@@ -558,14 +625,24 @@ uint32_t A64CodeCache::PlaceData(const void* data, size_t length) {
   } while (generated_code_commit_mark_.compare_exchange_weak(old_commit_mark,
                                                              new_commit_mark));
 
-  // Copy code.
+  // Copy data.
+#if XE_PLATFORM_MAC && defined(__aarch64__)
+  if (generated_code_execute_base_ == generated_code_write_base_) {
+    pthread_jit_write_protect_np(0);
+    std::memcpy(data_address, data, length);
+    pthread_jit_write_protect_np(1);
+  } else {
+    std::memcpy(data_address, data, length);
+  }
+#else
   std::memcpy(data_address, data, length);
+#endif
 
   return uint32_t(uintptr_t(data_address));
 }
 
 GuestFunction* A64CodeCache::LookupFunction(uint64_t host_pc) {
-  uint32_t key = uint32_t(host_pc - kGeneratedCodeExecuteBase);
+  uint32_t key = uint32_t(host_pc - execute_base_address());
   void* fn_entry = std::bsearch(
       &key, generated_code_map_.data(), generated_code_map_.size() + 1,
       sizeof(std::pair<uint32_t, Function*>),
