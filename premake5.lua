@@ -219,108 +219,106 @@ filter({"configurations:Valgrind", "platforms:Linux"})
     "-g3",  -- Maximum debug info
   })
 
-filter("platforms:Linux")
-  system("linux")
-  toolset("clang")
-  local qt_dir = os.getenv("QT_DIR")
-  if qt_dir then
-    local qt_version = get_qt_version(qt_dir)
-    includedirs({
-      path.join(qt_dir, "include"),
-      path.join(qt_dir, "include/QtCore"),
-      path.join(qt_dir, "include/QtCore", qt_version),
-      path.join(qt_dir, "include/QtCore", qt_version, "QtCore"),
-      path.join(qt_dir, "include/QtGui"),
-      path.join(qt_dir, "include/QtGui", qt_version),
-      path.join(qt_dir, "include/QtGui", qt_version, "QtGui"),
-      path.join(qt_dir, "include/QtWidgets"),
-    })
-    libdirs({
-      path.join(qt_dir, "lib"),
-    })
-    runpathdirs({
-      path.join(qt_dir, "lib"),
-    })
-    -- For CMake: set RPATH to find Qt libraries
-    linkoptions({
-      "-Wl,-rpath," .. path.join(qt_dir, "lib"),
-    })
-    links({
-      "Qt6Core",
-      "Qt6Gui",
-      "Qt6Widgets",
-    })
-  end
+if os.istarget("linux") then
+  filter("platforms:Linux")
+    system("linux")
+    toolset("clang")
+    local qt_dir = os.getenv("QT_DIR")
+    if qt_dir then
+      local qt_version = get_qt_version(qt_dir)
+      includedirs({
+        path.join(qt_dir, "include"),
+        path.join(qt_dir, "include/QtCore"),
+        path.join(qt_dir, "include/QtCore", qt_version),
+        path.join(qt_dir, "include/QtCore", qt_version, "QtCore"),
+        path.join(qt_dir, "include/QtGui"),
+        path.join(qt_dir, "include/QtGui", qt_version),
+        path.join(qt_dir, "include/QtGui", qt_version, "QtGui"),
+        path.join(qt_dir, "include/QtWidgets"),
+      })
+      libdirs({
+        path.join(qt_dir, "lib"),
+      })
+      runpathdirs({
+        path.join(qt_dir, "lib"),
+      })
+      -- For CMake: set RPATH to find Qt libraries
+      linkoptions({
+        "-Wl,-rpath," .. path.join(qt_dir, "lib"),
+      })
+      links({
+        "Qt6Core",
+        "Qt6Gui",
+        "Qt6Widgets",
+      })
+    end
 
-  links({
-    "stdc++fs",
-    "dl",
-    "lz4",
-    "m",
-    "pthread",
-    "rt",
-  })
+    links({
+      "stdc++fs",
+      "dl",
+      "lz4",
+      "m",
+      "pthread",
+      "rt",
+    })
+end
 
 filter({"platforms:Linux", "kind:*App"})
   linkgroups("On")
 
-filter("platforms:Mac-*")
-  local qt_dir = os.getenv("QT_DIR")
-  if os.getenv("XE_PREMAKE_DEBUG_QT") then
-    print("premake macosx: QT_DIR env = " .. tostring(qt_dir))
-  end
-  if not qt_dir then
-    local brew_prefix = os.outputof("brew --prefix qt@6 2>/dev/null")
-    if not brew_prefix or brew_prefix == "" then
-      brew_prefix = os.outputof("brew --prefix qt 2>/dev/null")
-    end
-    if brew_prefix then
-      brew_prefix = brew_prefix:gsub("%s+$", "")
-      if #brew_prefix > 0 and os.isdir(brew_prefix) then
-        qt_dir = brew_prefix
+if os.istarget("macosx") then
+  filter("platforms:Mac-*")
+    local qt_dir = os.getenv("QT_DIR")
+    if not qt_dir then
+      local brew_prefix = os.outputof("brew --prefix qt@6 2>/dev/null")
+      if not brew_prefix or brew_prefix == "" then
+        brew_prefix = os.outputof("brew --prefix qt 2>/dev/null")
+      end
+      if brew_prefix then
+        brew_prefix = brew_prefix:gsub("%s+$", "")
+        if #brew_prefix > 0 and os.isdir(brew_prefix) then
+          qt_dir = brew_prefix
+        end
       end
     end
-  end
-  if not qt_dir then
-    local candidates = {
-      "/opt/homebrew/opt/qt",
-      "/opt/homebrew/opt/qt@6",
-      "/usr/local/opt/qt",
-      "/usr/local/opt/qt@6",
-    }
-    for _, candidate in ipairs(candidates) do
-      if os.isdir(candidate) then
-        qt_dir = candidate
-        break
+    if not qt_dir then
+      local candidates = {
+        "/opt/homebrew/opt/qt",
+        "/opt/homebrew/opt/qt@6",
+        "/usr/local/opt/qt",
+        "/usr/local/opt/qt@6",
+      }
+      for _, candidate in ipairs(candidates) do
+        if os.isdir(candidate) then
+          qt_dir = candidate
+          break
+        end
       end
     end
-  end
-  if os.getenv("XE_PREMAKE_DEBUG_QT") then
-    print("premake macosx: resolved qt_dir = " .. tostring(qt_dir))
-  end
-  if qt_dir then
-    frameworkdirs({
-      path.join(qt_dir, "lib"),
-    })
-    sysincludedirs({
-      path.join(qt_dir, "lib/QtCore.framework/Headers"),
-      path.join(qt_dir, "lib/QtGui.framework/Headers"),
-      path.join(qt_dir, "lib/QtWidgets.framework/Headers"),
-    })
-    buildoptions({
-      "-I" .. path.join(qt_dir, "lib/QtCore.framework/Headers"),
-      "-I" .. path.join(qt_dir, "lib/QtGui.framework/Headers"),
-      "-I" .. path.join(qt_dir, "lib/QtWidgets.framework/Headers"),
-    })
-    links({
-      "Qt6Core",
-      "Qt6Gui",
-      "Qt6Widgets",
-    })
-    linkoptions({
-      "-Wl,-rpath," .. path.join(qt_dir, "lib"),
-    })
-  end
+    if qt_dir then
+      frameworkdirs({
+        path.join(qt_dir, "lib"),
+      })
+      sysincludedirs({
+        path.join(qt_dir, "lib/QtCore.framework/Headers"),
+        path.join(qt_dir, "lib/QtGui.framework/Headers"),
+        path.join(qt_dir, "lib/QtWidgets.framework/Headers"),
+      })
+      buildoptions({
+        "-I" .. path.join(qt_dir, "lib/QtCore.framework/Headers"),
+        "-I" .. path.join(qt_dir, "lib/QtGui.framework/Headers"),
+        "-I" .. path.join(qt_dir, "lib/QtWidgets.framework/Headers"),
+      })
+      links({
+        "Qt6Core",
+        "Qt6Gui",
+        "Qt6Widgets",
+      })
+      linkoptions({
+        "-Wl,-rpath," .. path.join(qt_dir, "lib"),
+      })
+    end
+end
 
 filter({"platforms:Mac-*", "toolset:clang"})
   buildoptions({
