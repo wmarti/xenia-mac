@@ -1229,6 +1229,8 @@ static const vec128_t v_consts[] = {
     /* VPermuteByteMask     */ vec128b(0x1F),
     /* VPackD3DCOLORSat     */ vec128i(0x404000FFu),
     /* VPackD3DCOLOR        */
+    // Note: x86 PSHUFB uses 0xFF to zero bytes, ARM TBL uses indices >= 16
+    // Keep original 0xFF for consistency, handle in implementation
     vec128i(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x0C000408u),
     /* VUnpackD3DCOLOR      */
     vec128i(0xFFFFFF0Eu, 0xFFFFFF0Du, 0xFFFFFF0Cu, 0xFFFFFF0Fu),
