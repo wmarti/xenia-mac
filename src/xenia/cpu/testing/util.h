@@ -13,7 +13,9 @@
 #include <vector>
 
 #include "xenia/base/platform.h"
+#if XE_ARCH_AMD64
 #include "xenia/cpu/backend/x64/x64_backend.h"
+#endif
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
