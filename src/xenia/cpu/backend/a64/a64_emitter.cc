@@ -9,6 +9,8 @@
 
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 
 #include <cctype>
@@ -47,9 +49,15 @@ DEFINE_bool(debugprint_trap_log, false,
             "Log debugprint traps to the active debugger", "CPU");
 DEFINE_bool(ignore_undefined_externs, true,
             "Don't exit when an undefined extern is called.", "CPU");
+DEFINE_bool(log_undefined_extern_args, false,
+            "Log PPC args for undefined externs (once per function).", "CPU");
 DEFINE_bool(emit_source_annotations, false,
             "Add extra movs and nops to make disassembly easier to read.",
             "CPU");
+DEFINE_bool(a64_resolve_function_log, false,
+            "Log A64 ResolveFunction failures with module ranges.", "CPU");
+DEFINE_int32(a64_resolve_function_log_limit, 8,
+             "Maximum ResolveFunction failure logs.", "CPU");
 
 namespace xe {
 namespace cpu {
@@ -62,6 +70,19 @@ using namespace xe::literals;
 using namespace oaknut::util;
 
 namespace {
+
+bool ShouldLogResolveFailure() {
+  if (!cvars::a64_resolve_function_log) {
+    return false;
+  }
+  const int32_t limit = cvars::a64_resolve_function_log_limit;
+  if (limit <= 0) {
+    return false;
+  }
+  static std::atomic<int32_t> log_count{0};
+  const int32_t count = log_count.fetch_add(1, std::memory_order_relaxed);
+  return count < limit;
+}
 
 void AdjustStackPointer(A64Emitter& emitter, size_t stack_size, bool add) {
   if (!stack_size) {
@@ -749,15 +770,144 @@ void A64Emitter::UnimplementedInstr(const hir::Instr* i) {
 // This is used by the A64ThunkEmitter's ResolveFunctionThunk.
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
+  auto guest_context = thread_state->context();
 
-  // TODO(benvanik): required?
-  assert_not_zero(target_address);
+  uint32_t guest_address;
 
-  auto fn = thread_state->processor()->ResolveFunction(
-      static_cast<uint32_t>(target_address));
-  assert_not_null(fn);
+  // Check if this is a 64-bit host address that needs to be mapped back to
+  // guest address
+  if (target_address > 0xFFFFFFFF) {
+    // Precise guard: if target_address is within the PPCContext, this is a bug.
+    auto ctx_ptr = reinterpret_cast<uint64_t>(thread_state->context());
+    if (target_address >= ctx_ptr &&
+        target_address < ctx_ptr + sizeof(ppc::PPCContext)) {
+      XELOGE(
+          "ResolveFunction: target_address 0x{:016X} is within PPCContext "
+          "[0x{:016X}, 0x{:016X})",
+          target_address, ctx_ptr, ctx_ptr + sizeof(ppc::PPCContext));
+      XELOGE(
+          "ResolveFunction: The target register contains a context pointer "
+          "instead of a function address");
+      return 0;
+    }
+
+    // Try to find a function that contains this host address
+    auto code_cache = static_cast<A64CodeCache*>(
+        thread_state->processor()->backend()->code_cache());
+    auto guest_function = code_cache->LookupFunction(target_address);
+    if (guest_function) {
+      guest_address =
+          guest_function->MapMachineCodeToGuestAddress(target_address);
+    } else {
+      // This might be a guest memory address stored in 64-bit form
+      // Extract the lower 32 bits as the potential guest address
+      uint32_t potential_guest = static_cast<uint32_t>(target_address);
+      guest_address = potential_guest;
+    }
+  } else {
+    // Normal 32-bit guest address
+    guest_address = static_cast<uint32_t>(target_address);
+  }
+
+  // Xbox 360 guest addresses can be in these ranges:
+  // 0x00000000-0x3FFFFFFF: v00000000 heap (virtual)
+  // 0x40000000-0x7EFFFFFF: v40000000 heap (virtual)
+  // 0x70000000-0x7F000000: Thread stacks
+  // 0x80000000-0x8FFFFFFF: v80000000 heap (XEX)
+  // 0x90000000-0x9FFFFFFF: v90000000 heap (XEX)
+  // 0xA0000000-0xBFFFFFFF: vA0000000 heap (physical)
+  // 0xC0000000-0xDFFFFFFF: vC0000000 heap (physical)
+  // 0xE0000000-0xFFCFFFFF: vE0000000 heap (physical)
+
+  // Most executable code should be in XEX ranges (0x80000000-0x9FFFFFFF)
+  // but allow other ranges as they may contain valid code
+  if (guest_address == 0) {
+    XELOGE("ResolveFunction: guest_address is 0! This should not happen");
+    return 0;
+  }
+
+  auto fn = thread_state->processor()->ResolveFunction(guest_address);
+  if (!fn) {
+    XELOGE(
+        "ResolveFunction: Failed to resolve function at guest address 0x{:08X}",
+        guest_address);
+    XELOGE("ResolveFunction: Original target_address was 0x{:016X}",
+           target_address);
+    if (ShouldLogResolveFailure()) {
+      const uint32_t lr_guest = static_cast<uint32_t>(guest_context->lr);
+      XELOGI(
+          "ResolveFunction: lr=0x{:016X} ctr=0x{:016X} thread_id={} "
+          "target_is_host={} guest_address=0x{:08X}",
+          guest_context->lr, guest_context->ctr, guest_context->thread_id,
+          target_address > 0xFFFFFFFF, guest_address);
+      auto log_modules_for_address = [&](uint32_t address, const char* label) {
+        bool found = false;
+        for (auto* module : thread_state->processor()->GetModules()) {
+          if (!module) {
+            continue;
+          }
+          if (module->ContainsAddress(address)) {
+            XELOGI("ResolveFunction: {} module '{}' contains 0x{:08X}", label,
+                   module->name(), address);
+            found = true;
+          }
+        }
+        if (!found) {
+          XELOGI("ResolveFunction: {} no module contains 0x{:08X}", label,
+                 address);
+        }
+      };
+      log_modules_for_address(lr_guest, "lr");
+      log_modules_for_address(guest_address, "guest");
+
+      auto lr_functions =
+          thread_state->processor()->FindFunctionsWithAddress(lr_guest);
+      if (lr_functions.empty()) {
+        XELOGI("ResolveFunction: no resolved function covers LR 0x{:08X}",
+               lr_guest);
+      } else {
+        const auto* fn = lr_functions.front();
+        XELOGI("ResolveFunction: LR function {} [0x{:08X},0x{:08X}) name='{}'",
+               lr_functions.size(), fn->address(), fn->end_address(),
+               fn->name());
+      }
+
+      auto* memory = thread_state->memory();
+      if (!memory) {
+        XELOGI("ResolveFunction: no Memory available for guest dump");
+      } else if (!memory->LookupHeap(guest_address)) {
+        XELOGI(
+            "ResolveFunction: guest_address 0x{:08X} not in any heap for dump",
+            guest_address);
+      } else {
+        const uint8_t* data =
+            memory->TranslateVirtual<const uint8_t*>(guest_address);
+        std::array<uint8_t, 16> bytes = {};
+        std::memcpy(bytes.data(), data, bytes.size());
+        XELOGI(
+            "ResolveFunction: guest[0x{:08X}] = {:02X} {:02X} {:02X} {:02X} "
+            "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} "
+            "{:02X} {:02X} {:02X} {:02X}",
+            guest_address, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
+            bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
+            bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+      }
+    }
+
+    // This can happen if the target address doesn't point to a valid function
+    // Return 0 to indicate failure - the calling code should handle this
+    return 0;
+  }
+
   auto a64_fn = static_cast<A64Function*>(fn);
   uint64_t addr = reinterpret_cast<uint64_t>(a64_fn->machine_code());
+  if (!a64_fn->machine_code()) {
+    XELOGE(
+        "ResolveFunction: Function at guest address 0x{:08X} has no machine "
+        "code",
+        guest_address);
+    return 0;
+  }
 
   return addr;
 }
