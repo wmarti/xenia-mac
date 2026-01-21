@@ -28,6 +28,15 @@
 #include "xenia/kernel/xobject.h"
 #include "xenia/xbox.h"
 
+#if XE_PLATFORM_MAC
+#ifdef WAIT_ANY
+#undef WAIT_ANY
+#endif
+#ifdef WAIT_ALL
+#undef WAIT_ALL
+#endif
+#endif
+
 namespace xe {
 namespace kernel {
 
