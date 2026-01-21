@@ -310,9 +310,9 @@ if os.istarget("macosx") then
         "-I" .. path.join(qt_dir, "lib/QtWidgets.framework/Headers"),
       })
       links({
-        "Qt6Core",
-        "Qt6Gui",
-        "Qt6Widgets",
+        "QtCore.framework",
+        "QtGui.framework",
+        "QtWidgets.framework",
       })
       linkoptions({
         "-Wl,-rpath," .. path.join(qt_dir, "lib"),
