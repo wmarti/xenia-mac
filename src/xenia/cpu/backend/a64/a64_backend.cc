@@ -123,11 +123,16 @@ bool A64Backend::Initialize(Processor* processor) {
   guest_to_host_thunk_ = thunk_emitter.EmitGuestToHostThunk();
   resolve_function_thunk_ = thunk_emitter.EmitResolveFunctionThunk();
 
-  // Set the code cache to use the ResolveFunction thunk for default
-  // indirections.
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, we use 64-bit addresses and the indirection table now
+  // supports 64-bit entries, so we can store the actual thunk address directly.
+  static_cast<A64CodeCache*>(code_cache_.get())
+      ->set_indirection_default_64(uint64_t(resolve_function_thunk_));
+#else
   assert_zero(uint64_t(resolve_function_thunk_) & 0xFFFFFFFF00000000ull);
   code_cache_->set_indirection_default(
       uint32_t(uint64_t(resolve_function_thunk_)));
+#endif
 
   // Allocate some special indirections.
   code_cache_->CommitExecutableRange(0x9FFF0000, 0x9FFFFFFF);
