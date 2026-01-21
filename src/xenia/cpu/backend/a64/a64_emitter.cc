@@ -1174,7 +1174,7 @@ bool A64Emitter::ConstantFitsIn32Reg(uint64_t v) {
   if ((v & ~0x7FFFFFFF) == 0) {
     // Fits under 31 bits, so just load using normal mov.
     return true;
-  } else if ((v & ~0x7FFFFFFF) == ~0x7FFFFFFF) {
+  } else if ((v & ~0x7FFFFFFFUL) == ~0x7FFFFFFFUL) {
     // Negative number that fits in 32bits.
     return true;
   }
