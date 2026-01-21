@@ -1009,6 +1009,19 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
 
 uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
   auto function = reinterpret_cast<Function*>(function_ptr);
+  if (cvars::log_undefined_extern_args &&
+      function->name() == "XeKeysConsolePrivateKeySign") {
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
+      auto* context = reinterpret_cast<ppc::PPCContext*>(raw_context);
+      XELOGI(
+          "Undefined extern {} args: r3={:016X} r4={:016X} r5={:016X} "
+          "r6={:016X} r7={:016X} r8={:016X} r9={:016X} r10={:016X}",
+          function->name(), context->r[3], context->r[4], context->r[5],
+          context->r[6], context->r[7], context->r[8], context->r[9],
+          context->r[10]);
+    }
+  }
   if (!cvars::ignore_undefined_externs) {
     xe::FatalError(fmt::format("undefined extern call to {:08X} {}",
                                function->address(), function->name().c_str()));
