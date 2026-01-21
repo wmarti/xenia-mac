@@ -1033,6 +1033,10 @@ class BuildShadersCommand(Command):
             "--target", action="append",
             choices=["dxbc", "spirv", "metal"], default=[],
             help="Builds only the given target(s).")
+        self.parser.add_argument(
+            "--config", choices=["debug", "release"], default="release",
+            type=str.lower,
+            help="Build configuration. Release mode omits shader debug info.")
 
     def execute(self, args, pass_args, cwd):
         src_paths = [os.path.join(root, name)
@@ -1153,6 +1157,13 @@ class BuildShadersCommand(Command):
                     air_path = f"{metal_file_path_base}.air"
                     metallib_path = f"{metal_file_path_base}.metallib"
 
+                    # Debug flags for shader debugging (omitted in release)
+                    is_release = args["config"] == "release"
+                    debug_flags = [] if is_release else [
+                        "-frecord-sources",
+                        "-gline-tables-only",
+                    ]
+
                     if use_xcrun:
                         metal_cmd = [
                             "xcrun", "-sdk", "macosx", "metal",
@@ -1162,9 +1173,8 @@ class BuildShadersCommand(Command):
                             "-c",
                             src_path,
                             "-o", air_path,
-                            "-frecord-sources",
-                            "-gline-tables-only",
-                        ]
+                            "-std=metal3.0"
+                        ] + debug_flags
                     else:
                         metal_cmd = [
                             metal,
@@ -1174,9 +1184,8 @@ class BuildShadersCommand(Command):
                             "-c",
                             src_path,
                             "-o", air_path,
-                            "-frecord-sources",
-                            "-gline-tables-only",
-                        ]
+                            "-std=metal3.0"
+                        ] + debug_flags
                     if subprocess.call(metal_cmd) != 0:
                         print("ERROR: failed to compile a Metal shader")
                         return 1
