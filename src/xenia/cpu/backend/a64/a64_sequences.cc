@@ -1,4 +1,4 @@
-﻿/**
+/**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
@@ -53,7 +53,7 @@ using namespace xe::cpu::hir;
 using xe::cpu::hir::Instr;
 
 typedef bool (*SequenceSelectFn)(A64Emitter&, const Instr*);
-std::unordered_map<uint32_t, SequenceSelectFn> sequence_table;
+// std::unordered_map<uint32_t, SequenceSelectFn> sequence_table; Removed
 
 // ============================================================================
 // OPCODE_COMMENT
@@ -2769,10 +2769,12 @@ static int anchor_memory_dest = anchor_memory;
 extern volatile int anchor_vector;
 static int anchor_vector_dest = anchor_vector;
 
-bool SelectSequence(A64Emitter* e, const Instr* i, const Instr** new_tail) {
+bool SelectSequence(A64Emitter* e, const hir::Instr* i,
+                    const hir::Instr** new_tail) {
   const InstrKey key(i);
-  auto it = sequence_table.find(key);
-  if (it != sequence_table.end()) {
+  auto& table = GetSequenceTable();  // Use the singleton accessor
+  auto it = table.find(key);
+  if (it != table.end()) {
     if (it->second(*e, i)) {
       *new_tail = i->next;
       return true;
