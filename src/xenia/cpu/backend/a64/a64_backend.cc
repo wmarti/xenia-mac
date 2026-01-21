@@ -448,6 +448,39 @@ bool A64Backend::ExceptionCallbackThunk(Exception* ex, void* data) {
 }
 
 bool A64Backend::ExceptionCallback(Exception* ex) {
+  if (ex->code() == Exception::Code::kAccessViolation) {
+    const uint64_t host_pc = ex->pc();
+    const uint64_t fault_address = ex->fault_address();
+    uint64_t guest_pc = 0;
+    uint32_t host_offset = 0;
+    auto function = code_cache_->LookupFunction(host_pc);
+    if (function && function->machine_code()) {
+      const uint64_t function_pc =
+          reinterpret_cast<uint64_t>(function->machine_code());
+      host_offset = static_cast<uint32_t>(host_pc - function_pc);
+      if (const auto* entry = function->LookupMachineCodeOffset(host_offset)) {
+        guest_pc = entry->guest_address;
+      }
+    }
+#if XE_ARCH_ARM64
+    auto* thread_context = ex->thread_context();
+    XELOGE(
+        "A64 AV: host_pc=0x{:016X} guest_pc=0x{:08X} host_off=0x{:X} "
+        "fault=0x{:016X} op={} x21=0x{:016X} x27=0x{:016X} x28=0x{:016X}",
+        host_pc, guest_pc, host_offset, fault_address,
+        static_cast<int>(ex->access_violation_operation()),
+        thread_context ? thread_context->x[21] : 0,
+        thread_context ? thread_context->x[27] : 0,
+        thread_context ? thread_context->x[28] : 0);
+#else
+    XELOGE(
+        "A64 AV: host_pc=0x{:016X} guest_pc=0x{:08X} host_off=0x{:X} "
+        "fault=0x{:016X} op={}",
+        host_pc, guest_pc, host_offset, fault_address,
+        static_cast<int>(ex->access_violation_operation()));
+#endif
+    return false;
+  }
   if (ex->code() != Exception::Code::kIllegalInstruction) {
     // We only care about illegal instructions. Other things will be handled by
     // other handlers (probably). If nothing else picks it up we'll be called
