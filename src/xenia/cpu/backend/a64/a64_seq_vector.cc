@@ -2,13 +2,11 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2024 Xenia Developers. All rights reserved.                      *
+ * Copyright 2025 Xenia Developers. All rights reserved.                      *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
-
 #include "xenia/cpu/backend/a64/a64_sequences.h"
-#include "xenia/cpu/backend/a64/a64_util.h"
 
 #include <algorithm>
 #include <cstring>
@@ -1041,6 +1039,8 @@ EMITTER_OPCODE_TABLE(OPCODE_EXTRACT, EXTRACT_I8, EXTRACT_I16, EXTRACT_I32);
 struct SPLAT_I8 : Sequence<SPLAT_I8, I<OPCODE_SPLAT, V128Op, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
+      // int8_t is always <= 0xFF, so this is always true
+      // Keep the MOVI path for constants
       e.MOVI(i.dest.reg().B16(), i.src1.constant());
     } else {
       e.DUP(i.dest.reg().B16(), i.src1);
@@ -1050,11 +1050,8 @@ struct SPLAT_I8 : Sequence<SPLAT_I8, I<OPCODE_SPLAT, V128Op, I8Op>> {
 struct SPLAT_I16 : Sequence<SPLAT_I16, I<OPCODE_SPLAT, V128Op, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
-      if ((i.src1.constant() & 0xFF'00) == 0) {
+      if (i.src1.constant() <= 0xFF) {
         e.MOVI(i.dest.reg().H8(), i.src1.constant());
-        return;
-      } else if ((i.src1.constant() & 0x00'FF) == 0) {
-        e.MOVI(i.dest.reg().H8(), i.src1.constant(), oaknut::util::LSL, 8);
         return;
       }
       e.MOV(W0, i.src1.constant());
@@ -1067,21 +1064,8 @@ struct SPLAT_I16 : Sequence<SPLAT_I16, I<OPCODE_SPLAT, V128Op, I16Op>> {
 struct SPLAT_I32 : Sequence<SPLAT_I32, I<OPCODE_SPLAT, V128Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
-      oaknut::FImm8 fp8(0);
-      if (f32_to_fimm8(i.src1.value->constant.u32, fp8)) {
-        e.FMOV(i.dest.reg().S4(), fp8);
-        return;
-      } else if ((i.src1.constant() & 0xFF'FF'FF'00) == 0) {
+      if (i.src1.constant() <= 0xFF) {
         e.MOVI(i.dest.reg().S4(), i.src1.constant());
-        return;
-      } else if ((i.src1.constant() & 0xFF'FF'00'FF) == 0) {
-        e.MOVI(i.dest.reg().S4(), i.src1.constant(), oaknut::util::LSL, 8);
-        return;
-      } else if ((i.src1.constant() & 0xFF'00'FF'FF) == 0) {
-        e.MOVI(i.dest.reg().S4(), i.src1.constant(), oaknut::util::LSL, 16);
-        return;
-      } else if ((i.src1.constant() & 0x00'FF'FF'FF) == 0) {
-        e.MOVI(i.dest.reg().S4(), i.src1.constant(), oaknut::util::LSL, 24);
         return;
       }
       e.MOV(W0, i.src1.constant());
@@ -1094,24 +1078,8 @@ struct SPLAT_I32 : Sequence<SPLAT_I32, I<OPCODE_SPLAT, V128Op, I32Op>> {
 struct SPLAT_F32 : Sequence<SPLAT_F32, I<OPCODE_SPLAT, V128Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
-      oaknut::FImm8 fp8(0);
-      if (f32_to_fimm8(i.src1.value->constant.u32, fp8)) {
-        e.FMOV(i.dest.reg().S4(), fp8);
-        return;
-      } else if ((i.src1.value->constant.u32 & 0xFF'FF'FF'00) == 0) {
-        e.MOVI(i.dest.reg().S4(), i.src1.value->constant.u32);
-        return;
-      } else if ((i.src1.value->constant.u32 & 0xFF'FF'00'FF) == 0) {
-        e.MOVI(i.dest.reg().S4(), i.src1.value->constant.u32, oaknut::util::LSL,
-               8);
-        return;
-      } else if ((i.src1.value->constant.u32 & 0xFF'00'FF'FF) == 0) {
-        e.MOVI(i.dest.reg().S4(), i.src1.value->constant.u32, oaknut::util::LSL,
-               16);
-        return;
-      } else if ((i.src1.value->constant.u32 & 0x00'FF'FF'FF) == 0) {
-        e.MOVI(i.dest.reg().S4(), i.src1.value->constant.u32, oaknut::util::LSL,
-               24);
+      if (i.src1.value->constant.i32 <= 0xFF) {
+        e.MOVI(i.dest.reg().S4(), i.src1.value->constant.i32);
         return;
       }
       e.MOV(W0, i.src1.value->constant.i32);
