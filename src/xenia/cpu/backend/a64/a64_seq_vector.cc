@@ -1970,34 +1970,116 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
   static uint8x16_t EmulateFLOAT16_2(void*, std::byte src1[16]) {
     alignas(16) uint16_t a[4];
     alignas(16) float b[8];
-    vst1q_u8(a, vld1q_u8(src1));
+
+    // Load NEON registers into a C array by casting to uint8_t*
+    vst1q_u8(reinterpret_cast<uint8_t*>(a),
+             vld1q_u8(reinterpret_cast<const uint8_t*>(src1)));
     std::memset(b, 0, sizeof(b));
 
     for (int i = 0; i < 2; i++) {
-      b[i] = half_float::detail::half2float(a[VEC128_W(6 + i)]);
+      uint16_t h = a[VEC128_W(6 + i)];
+
+      // Xbox 360 sentinel value handling
+      if (h == 0x7FFF) {
+        b[i] = 131008.0f;  // Special positive sentinel (0x47FFE000)
+      } else if (h == 0xFFFF) {
+        b[i] = -131008.0f;  // Special negative sentinel (0xC7FFE000)
+      } else {
+        b[i] = half_float::detail::half2float(h);
+      }
     }
 
     // Constants, or something
     b[2] = 0.f;
     b[3] = 1.f;
 
-    return vld1q_u8(b);
+    // Store the float array into a uint8x16_t NEON register
+    return vld1q_u8(reinterpret_cast<const uint8_t*>(b));
   }
   static void EmitFLOAT16_2(A64Emitter& e, const EmitArgType& i) {
     // 1 bit sign, 5 bit exponent, 10 bit mantissa
     // D3D10 half float format
 
     if (e.IsFeatureEnabled(kA64EmitF16C)) {
-      const QReg src1 = i.src1.is_constant ? Q0 : i.src1;
+      // Load source properly
+      const QReg src = i.src1.is_constant ? Q0 : i.src1;
       if (i.src1.is_constant) {
-        e.LoadConstantV(src1, i.src1.constant());
+        e.LoadConstantV(src, i.src1.constant());
       }
 
-      // Move the upper 4 bytes to the lower 4 bytes, zero the rest
-      e.EOR(Q0.B16(), Q0.B16(), Q0.B16());
-      e.EXT(i.dest.reg().B16(), i.dest.reg().B16(), Q0.B16(), 12);
+      // 1) Put src bytes [12..15] into bytes [0..3] of a temp
+      // EXT(..., #12) copies exactly those 4 bytes; the rest are zero
+      QReg halves = Q1;
+      e.EOR(Q0.B16(), Q0.B16(), Q0.B16());  // Q0 = 0
+      e.EXT(halves.B16(), src.B16(), Q0.B16(),
+            12);  // halves[0..3] = src[12..15]
 
-      e.FCVTL(i.dest.reg().S4(), i.dest.reg().toD().H4());
+      // Keep copy for sentinel detection (before conversion)
+      QReg halves_copy = Q2;
+      e.MOV(halves_copy.B16(), halves.B16());
+
+      // 2) Convert low 4 halfwords -> 4 floats. FCVTL reads H0..H3 (low 64
+      // bits) After the EXT, H0 = low halfword of element 3, H1 = high
+      // halfword, H2 = H3 = 0
+      e.FCVTL(i.dest.reg().S4(), halves.toD().H4());
+
+      // Note: We do NOT swap the order - the natural order from EXT is correct
+
+      // 3) Xbox 360 rule: 0x7FFF → +131008.0f, 0xFFFF → -131008.0f
+
+      // Create sentinel patterns for halfword comparison
+      QReg h_7FFF = Q3;
+      QReg h_FFFF = Q4;
+
+      // Create 0xFFFF - all bytes 0xFF
+      e.MOVI(h_FFFF.B16(), 0xFF);  // All bytes 0xFF = 0xFFFF per halfword
+      // Create 0x7FFF by shifting 0xFFFF right by 1
+      e.USHR(h_7FFF.H8(), h_FFFF.H8(), 1);  // 0xFFFF >> 1 = 0x7FFF
+
+      // Compare only the low 64 bits (H0-H3) with sentinels
+      // After EXT, only H0 and H1 have data, H2 and H3 are zero
+      QReg mask_7FFF_H = Q5;
+      QReg mask_FFFF_H = Q6;
+      // Initialize masks to zero first
+      e.EOR(mask_7FFF_H.B16(), mask_7FFF_H.B16(), mask_7FFF_H.B16());
+      e.EOR(mask_FFFF_H.B16(), mask_FFFF_H.B16(), mask_FFFF_H.B16());
+      // Compare only the low 64 bits
+      e.CMEQ(mask_7FFF_H.toD().H4(), halves_copy.toD().H4(), h_7FFF.toD().H4());
+      e.CMEQ(mask_FFFF_H.toD().H4(), halves_copy.toD().H4(), h_FFFF.toD().H4());
+
+      // Widen halfword masks to word masks for blending with float32 values
+      // Use high-numbered registers to avoid any aliasing
+      QReg mask_7FFF_S = Q13;
+      QReg mask_FFFF_S = Q14;
+      e.SXTL(mask_7FFF_S.S4(), mask_7FFF_H.toD().H4());
+      e.SXTL(mask_FFFF_S.S4(), mask_FFFF_H.toD().H4());
+
+      // Prepare replacement values: ±131008.0f (broadcast to all lanes)
+      QReg f_pos_131008 = Q9;
+      QReg f_neg_131008 = Q10;
+      // Load immediate into S[0] then duplicate
+      e.MOV(W0, 0x47FFE000);
+      e.MOV(f_pos_131008.Selem()[0], W0);
+      e.DUP(f_pos_131008.S4(), f_pos_131008.Selem()[0]);  // +131008.0f
+
+      e.MOV(W0, 0xC7FFE000);
+      e.MOV(f_neg_131008.Selem()[0], W0);
+      e.DUP(f_neg_131008.S4(), f_neg_131008.Selem()[0]);  // -131008.0f
+
+      // 5) Blend using BIT which has clearer semantics
+      // BIT Vd, Vn, Vm => Vd = (Vn & Vm) | (Vd & ~Vm)
+      // When mask==0: result = (replacement & 0) | (original & 0xFFFF) =
+      // original When mask==0xFFFF: result = (replacement & 0xFFFF) | (original
+      // & 0) = replacement This is what we want!
+
+      // Apply sentinel replacements using BIT
+      // BIT Vd, Vn, Vm => Vd = (Vn & Vm) | (Vd & ~Vm)
+      // When mask is 0: keep original, when mask is 0xFFFFFFFF: use replacement
+      e.BIT(i.dest.reg().B16(), f_pos_131008.B16(), mask_7FFF_S.B16());
+      e.BIT(i.dest.reg().B16(), f_neg_131008.B16(), mask_FFFF_S.B16());
+
+      // 6) Swap S0 and S1 to match Xbox 360 halfword read order
+      // The software reads halfword 7 first, then 6, but EXT gives us 6 then 7
       e.REV64(i.dest.reg().S4(), i.dest.reg().S4());
 
       // Write 1.0 to element 3
@@ -2017,13 +2099,17 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
   static uint8x16_t EmulateFLOAT16_4(void*, std::byte src1[16]) {
     alignas(16) uint16_t a[4];
     alignas(16) float b[8];
-    vst1q_u8(a, vld1q_u8(src1));
+
+    // Load NEON registers into a C array by casting to uint8_t*
+    vst1q_u8(reinterpret_cast<uint8_t*>(a),
+             vld1q_u8(reinterpret_cast<const uint8_t*>(src1)));
 
     for (int i = 0; i < 4; i++) {
       b[i] = half_float::detail::half2float(a[VEC128_W(4 + i)]);
     }
 
-    return vld1q_u8(b);
+    // Store the float array into a uint8x16_t NEON register
+    return vld1q_u8(reinterpret_cast<const uint8_t*>(b));
   }
   static void EmitFLOAT16_4(A64Emitter& e, const EmitArgType& i) {
     // src = [(dest.x | dest.y), (dest.z | dest.w), 0, 0]
