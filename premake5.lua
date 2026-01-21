@@ -264,6 +264,32 @@ filter("platforms:Linux")
 filter({"platforms:Linux", "kind:*App"})
   linkgroups("On")
 
+filter("system:macosx")
+  local qt_dir = os.getenv("QT_DIR")
+  if qt_dir then
+    frameworkdirs({
+      path.join(qt_dir, "lib"),
+    })
+    sysincludedirs({
+      path.join(qt_dir, "lib/QtCore.framework/Headers"),
+      path.join(qt_dir, "lib/QtGui.framework/Headers"),
+      path.join(qt_dir, "lib/QtWidgets.framework/Headers"),
+    })
+    buildoptions({
+      "-I" .. path.join(qt_dir, "lib/QtCore.framework/Headers"),
+      "-I" .. path.join(qt_dir, "lib/QtGui.framework/Headers"),
+      "-I" .. path.join(qt_dir, "lib/QtWidgets.framework/Headers"),
+    })
+    links({
+      "Qt6Core",
+      "Qt6Gui",
+      "Qt6Widgets",
+    })
+    linkoptions({
+      "-Wl,-rpath," .. path.join(qt_dir, "lib"),
+    })
+  end
+
 filter({"system:macosx", "toolset:clang"})
   buildoptions({
     "-w",
