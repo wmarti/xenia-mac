@@ -238,6 +238,34 @@ def setup_qt():
     # Determine Qt base directory based on platform
     if sys.platform == "win32":
         qt_base = "C:\\Qt"
+    elif sys.platform == "darwin":
+        # Prefer Homebrew Qt if available.
+        brew_candidates = []
+        if has_bin("brew"):
+            try:
+                brew_candidates.append(subprocess.check_output(
+                    ["brew", "--prefix", "qt@6"],
+                    stderr=subprocess.DEVNULL, text=True).strip())
+            except Exception:
+                pass
+            try:
+                brew_candidates.append(subprocess.check_output(
+                    ["brew", "--prefix", "qt"],
+                    stderr=subprocess.DEVNULL, text=True).strip())
+            except Exception:
+                pass
+        brew_candidates += [
+            "/opt/homebrew/opt/qt",
+            "/opt/homebrew/opt/qt@6",
+            "/usr/local/opt/qt",
+            "/usr/local/opt/qt@6",
+        ]
+        for candidate in brew_candidates:
+            if candidate and os.path.exists(candidate):
+                os.environ["QT_DIR"] = candidate
+                print(f"Found Qt at {candidate}")
+                return True
+        qt_base = "/opt/Qt"
     else:
         qt_base = "/opt/Qt"
 

@@ -266,6 +266,32 @@ filter({"platforms:Linux", "kind:*App"})
 
 filter("system:macosx")
   local qt_dir = os.getenv("QT_DIR")
+  if not qt_dir then
+    local brew_prefix = os.outputof("brew --prefix qt@6 2>/dev/null")
+    if not brew_prefix or brew_prefix == "" then
+      brew_prefix = os.outputof("brew --prefix qt 2>/dev/null")
+    end
+    if brew_prefix then
+      brew_prefix = brew_prefix:gsub("%s+$", "")
+      if #brew_prefix > 0 and os.isdir(brew_prefix) then
+        qt_dir = brew_prefix
+      end
+    end
+  end
+  if not qt_dir then
+    local candidates = {
+      "/opt/homebrew/opt/qt",
+      "/opt/homebrew/opt/qt@6",
+      "/usr/local/opt/qt",
+      "/usr/local/opt/qt@6",
+    }
+    for _, candidate in ipairs(candidates) do
+      if os.isdir(candidate) then
+        qt_dir = candidate
+        break
+      end
+    end
+  end
   if qt_dir then
     frameworkdirs({
       path.join(qt_dir, "lib"),
