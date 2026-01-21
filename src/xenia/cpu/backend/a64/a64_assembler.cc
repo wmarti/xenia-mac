@@ -38,7 +38,7 @@ A64Assembler::A64Assembler(A64Backend* backend)
       CS_ERR_OK) {
     assert_always("Failed to initialize capstone");
   }
-  cs_option(capstone_handle_, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
+  // Remove Intel syntax option as it's not applicable to ARM64
   cs_option(capstone_handle_, CS_OPT_DETAIL, CS_OPT_OFF);
 }
 
@@ -116,7 +116,7 @@ void A64Assembler::DumpMachineCode(
   const uint8_t* code_ptr = reinterpret_cast<uint8_t*>(machine_code);
   size_t remaining_code_size = code_size;
   uint64_t address = uint64_t(machine_code);
-  cs_insn insn = {0};
+  cs_insn insn = {};
   while (remaining_code_size &&
          cs_disasm_iter(capstone_handle_, &code_ptr, &remaining_code_size,
                         &address, &insn)) {
