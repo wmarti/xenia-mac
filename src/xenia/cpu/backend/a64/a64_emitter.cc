@@ -189,7 +189,7 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
   void* new_execute_address;
   void* new_write_address;
 
-  assert_true(func_info.code_size.total == offset());
+  assert_true(func_info.code_size.total == static_cast<size_t>(offset()));
 
   if (function) {
     code_cache_->PlaceGuestCode(function->address(), assembly_buffer.data(),
