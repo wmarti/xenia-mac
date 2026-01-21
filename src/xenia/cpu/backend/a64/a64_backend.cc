@@ -664,7 +664,11 @@ ResolveFunctionThunk A64ThunkEmitter::EmitResolveFunctionThunk() {
 
   // Reload context register
   LDP(ZR, X0, SP, POST_INDEXED, 16);
+  oaknut::Label resolve_failed;
+  CBZ(X16, resolve_failed);
   BR(X16);
+  l(resolve_failed);
+  RET();
 
   code_offsets.tail = offset();
 
