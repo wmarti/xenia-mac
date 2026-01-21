@@ -1643,14 +1643,14 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
                                 0x03'02'01'00 + 0x04'04'04'04 * 3,
                                 0x03'02'01'00 + 0x04'04'04'04 * 0,
                                 0x03'02'01'00 + 0x04'04'04'04 * 1));
-    e.TBL(Q0.B16(), oaknut::List{i.dest.reg().B16()}, Q1.B16());
+    e.TBL(Q0.B16(), List{i.dest.reg().B16()}, Q1.B16());
     e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), Q0.B16());
 
     e.LoadConstantV(Q1, vec128i(0x03'02'01'00 + 0x04'04'04'04 * 1,
                                 0x03'02'01'00 + 0x04'04'04'04 * 0,
                                 0x03'02'01'00 + 0x04'04'04'04 * 3,
                                 0x03'02'01'00 + 0x04'04'04'04 * 2));
-    e.TBL(Q0.B16(), oaknut::List{i.dest.reg().B16()}, Q1.B16());
+    e.TBL(Q0.B16(), List{i.dest.reg().B16()}, Q1.B16());
     e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), Q0.B16());
   }
   static void EmitULONG_4202020(A64Emitter& e, const EmitArgType& i) {
@@ -1681,10 +1681,10 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
 
     // Place XZ where they're supposed to be.
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackULONG_4202020_PermuteXZ));
-    e.TBL(i.dest.reg().B16(), oaknut::List{i.dest.reg().B16()}, Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16()}, Q1.B16());
     // Place YW.
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackULONG_4202020_PermuteYW));
-    e.TBL(Q0.B16(), oaknut::List{Q0.B16()}, Q1.B16());
+    e.TBL(Q0.B16(), List{Q0.B16()}, Q1.B16());
     // Merge XZ and YW.
     e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), Q0.B16());
   }
@@ -1956,12 +1956,14 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     } else {
       src = i.src1;
     }
-    // src = ZZYYXXWW
+    // src = ZZYYXXWW (ARGB packed as bytes)
     // Unpack to 000000ZZ,000000YY,000000XX,000000WW
     e.LDR(Q1, VConstData, e.GetVConstOffset(VUnpackD3DCOLOR));
-    e.TBL(i.dest.reg().B16(), oaknut::List{src.B16()}, Q1.B16());
-    // Add 1.0f to each.
-    e.FMOV(Q1.S4(), FImm8(0, 7, 0));
+    e.TBL(i.dest.reg().B16(), List{src.B16()}, Q1.B16());
+    // Convert to float by adding float bias
+    // XOR with 1.0f (0x3F800000) sets the exponent for values 0-127
+    // For values 128-255, we need to handle differently
+    e.FMOV(Q1.S4(), FImm8(0, 7, 0));  // Load 1.0f (0x3F800000)
     e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), Q1.B16());
     // To convert to 0 to 1, games multiply by 0x47008081 and add 0xC7008081.
   }
@@ -2068,7 +2070,7 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     }
     // Shuffle bytes.
     e.LDR(Q1, VConstData, e.GetVConstOffset(VUnpackSHORT_2));
-    e.TBL(i.dest.reg().B16(), oaknut::List{src.B16()}, Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{src.B16()}, Q1.B16());
 
     // If negative, make smaller than 3 - sign extend before adding.
     e.SHL(i.dest.reg().S4(), i.dest.reg().S4(), 16);
@@ -2110,7 +2112,7 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     }
     // Shuffle bytes.
     e.LDR(Q1, VConstData, e.GetVConstOffset(VUnpackSHORT_4));
-    e.TBL(i.dest.reg().B16(), oaknut::List{src.B16()}, Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{src.B16()}, Q1.B16());
 
     // If negative, make smaller than 3 - sign extend before adding.
     e.SHL(i.dest.reg().S4(), i.dest.reg().S4(), 16);
@@ -2190,7 +2192,7 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     // Extract pairs of nibbles to XZYW. XZ will have excess 4 upper bits, YW
     // will have excess 4 lower bits.
     e.LDR(Q1, VConstData, e.GetVConstOffset(VUnpackULONG_4202020_Permute));
-    e.TBL(i.dest.reg().B16(), oaknut::List{src.B16()}, Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{src.B16()}, Q1.B16());
 
     // Drop the excess nibble of YW.
     e.USHR(Q0.S4(), i.dest.reg().S4(), 4);
@@ -2199,16 +2201,14 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
                                 2 * 0x04'04'04'04 + 0x03'02'01'00,
                                 1 * 0x04'04'04'04 + 0x03'02'01'00,
                                 0 * 0x04'04'04'04 + 0x03'02'01'00));
-    e.TBL(i.dest.reg().B16(), oaknut::List{i.dest.reg().B16(), Q0.B16()},
-          Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16(), Q0.B16()}, Q1.B16());
 
     // Reorder as XYZW.
     e.LoadConstantV(Q1, vec128i(3 * 0x04'04'04'04 + 0x03'02'01'00,
                                 1 * 0x04'04'04'04 + 0x03'02'01'00,
                                 2 * 0x04'04'04'04 + 0x03'02'01'00,
                                 0 * 0x04'04'04'04 + 0x03'02'01'00));
-    e.TBL(i.dest.reg().B16(), oaknut::List{i.dest.reg().B16(), Q0.B16()},
-          Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16(), Q0.B16()}, Q1.B16());
     // Drop the excess upper nibble in XZ and sign-extend XYZ.
     e.SHL(i.dest.reg().S4(), i.dest.reg().S4(), 12);
     e.SSHR(i.dest.reg().S4(), i.dest.reg().S4(), 12);
