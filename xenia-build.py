@@ -364,6 +364,9 @@ def generate_moc_files():
     else:
         moc_path = os.path.join(qt_dir, "libexec", "moc")
         if not os.path.exists(moc_path):
+            # Homebrew Qt places tools under share/qt/libexec.
+            moc_path = os.path.join(qt_dir, "share", "qt", "libexec", "moc")
+        if not os.path.exists(moc_path):
             moc_path = os.path.join(qt_dir, "bin", "moc")
 
     if not os.path.exists(moc_path):
