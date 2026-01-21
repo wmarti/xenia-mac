@@ -24,6 +24,15 @@ project("xenia-gpu")
     })
   filter({})
 
+  -- Include SPIRV-Tools headers from Vulkan SDK for Windows
+  filter("platforms:Windows")
+    includedirs({
+      "$(VULKAN_SDK)/Include",
+    })
+  filter({})
+
+  local_platform_files()
+
   if os.istarget("macosx") then
     removefiles({
       "spirv_shader*.cc",
@@ -33,15 +42,6 @@ project("xenia-gpu")
       flags({ "ExcludeFromBuild" })
     filter({})
   end
-
-  -- Include SPIRV-Tools headers from Vulkan SDK for Windows
-  filter("platforms:Windows")
-    includedirs({
-      "$(VULKAN_SDK)/Include",
-    })
-  filter({})
-
-  local_platform_files()
 
 if enableMiscSubprojects and not os.istarget("macosx") then
   group("src")
