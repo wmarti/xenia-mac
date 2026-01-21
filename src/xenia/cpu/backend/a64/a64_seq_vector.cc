@@ -1524,45 +1524,93 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitSHORT_2(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
+
+    // Check if input is constant zero - special case
+    if (i.src1.is_constant && i.src1.value->IsConstantZero()) {
+      e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16());
+      return;
+    }
+
     QReg src = i.src1;
     if (i.src1.is_constant) {
       src = i.dest;
       e.LoadConstantV(src, i.src1.constant());
+    } else {
+      // Copy src to dest if they're different registers
+      if (src.index() != i.dest.reg().index()) {
+        e.MOV(i.dest.reg().B16(), src.B16());
+      }
     }
+
     const XReg VConstData = X3;
     e.MOV(VConstData, e.GetVConstPtr());
 
-    // Saturate
+    // Check if the value is zero (0x00000000) - if so, skip min/max
+    // Zero is a special case that doesn't use the mantissa trick
+    // Create a mask for zero elements
+    e.CMEQ(Q0.S4(), i.dest.reg().S4(), 0);
+
+    // Save the zero mask
+    e.MOV(Q2.B16(), Q0.B16());
+
+    // Saturate non-zero values - use FMAXNM/FMINNM to handle NaN correctly
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Min));
-    e.FMAX(i.dest.reg().S4(), src.S4(), Q1.S4());
+    e.FMAXNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
 
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Max));
-    e.FMIN(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
+    e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
+
+    // Use BIC to clear values that were originally zero
+    e.BIC(i.dest.reg().B16(), i.dest.reg().B16(), Q2.B16());
 
     // Pack
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_2));
-    e.TBL(i.dest.reg().B16(), oaknut::List{i.dest.reg().B16()}, Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16()}, Q1.B16());
   }
   static void EmitSHORT_4(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
+
+    // Check if input is constant zero - special case
+    if (i.src1.is_constant && i.src1.value->IsConstantZero()) {
+      e.EOR(i.dest.reg().B16(), i.dest.reg().B16(), i.dest.reg().B16());
+      return;
+    }
+
     QReg src = i.src1;
     if (i.src1.is_constant) {
       src = i.dest;
       e.LoadConstantV(src, i.src1.constant());
+    } else {
+      // Copy src to dest if they're different registers
+      if (src.index() != i.dest.reg().index()) {
+        e.MOV(i.dest.reg().B16(), src.B16());
+      }
     }
+
     const XReg VConstData = X3;
     e.MOV(VConstData, e.GetVConstPtr());
 
-    // Saturate
+    // Check if the value is zero (0x00000000) - if so, skip min/max
+    // Zero is a special case that doesn't use the mantissa trick
+    // Create a mask for zero elements
+    e.CMEQ(Q0.S4(), i.dest.reg().S4(), 0);
+
+    // Save the zero mask
+    e.MOV(Q2.B16(), Q0.B16());
+
+    // Saturate non-zero values - use FMAXNM/FMINNM to handle NaN correctly
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Min));
-    e.FMAX(i.dest.reg().S4(), src.S4(), Q1.S4());
+    e.FMAXNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
 
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_Max));
-    e.FMIN(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
+    e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q1.S4());
+
+    // Use BIC to clear values that were originally zero
+    e.BIC(i.dest.reg().B16(), i.dest.reg().B16(), Q2.B16());
 
     // Pack
     e.LDR(Q1, VConstData, e.GetVConstOffset(VPackSHORT_4));
-    e.TBL(i.dest.reg().B16(), oaknut::List{i.dest.reg().B16()}, Q1.B16());
+    e.TBL(i.dest.reg().B16(), List{i.dest.reg().B16()}, Q1.B16());
   }
   static void EmitUINT_2101010(A64Emitter& e, const EmitArgType& i) {
     // https://www.opengl.org/registry/specs/ARB/vertex_type_2_10_10_10_rev.txt
