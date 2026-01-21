@@ -1371,11 +1371,15 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     // are valid - max before min to pack NaN as zero (5454082B is heavily
     // affected by the order - packs 0xFFFFFFFF in matrix code to get a 0
     // constant).
+    // Use FMAXNM/FMINNM (numeric max/min) instead of FMAX/FMIN to handle NaN
+    // correctly. FMAXNM returns the non-NaN value when one operand is NaN,
+    // matching x86 behavior and Windows ARM64 expectations.
     e.LDR(Q0, VConstData, e.GetVConstOffset(V3333));
-    e.FMAX(i.dest.reg().S4(), i.dest.reg().S4(), Q0.S4());
+    e.FMAXNM(i.dest.reg().S4(), src.S4(), Q0.S4());
 
     e.LDR(Q0, VConstData, e.GetVConstOffset(VPackD3DCOLORSat));
-    e.FMIN(i.dest.reg().S4(), src.S4(), Q0.S4());
+    e.FMINNM(i.dest.reg().S4(), i.dest.reg().S4(), Q0.S4());
+
     // Extract bytes.
     // RGBA (XYZW) -> ARGB (WXYZ)
     // w = ((src1.uw & 0xFF) << 24) | ((src1.ux & 0xFF) << 16) |
