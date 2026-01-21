@@ -200,28 +200,28 @@ struct ValueOp : Op<ValueOp<T, KEY_TYPE, REG_TYPE, CONST_TYPE>, KEY_TYPE> {
 
 struct I8Op : ValueOp<I8Op, KEY_TYPE_V_I8, WReg, int8_t> {
   typedef ValueOp<I8Op, KEY_TYPE_V_I8, WReg, int8_t> BASE;
-  const int8_t constant() const {
+  int8_t constant() const {
     assert_true(BASE::is_constant);
     return BASE::value->constant.i8;
   }
 };
 struct I16Op : ValueOp<I16Op, KEY_TYPE_V_I16, WReg, int16_t> {
   typedef ValueOp<I16Op, KEY_TYPE_V_I16, WReg, int16_t> BASE;
-  const int16_t constant() const {
+  int16_t constant() const {
     assert_true(BASE::is_constant);
     return BASE::value->constant.i16;
   }
 };
 struct I32Op : ValueOp<I32Op, KEY_TYPE_V_I32, WReg, int32_t> {
   typedef ValueOp<I32Op, KEY_TYPE_V_I32, WReg, int32_t> BASE;
-  const int32_t constant() const {
+  int32_t constant() const {
     assert_true(BASE::is_constant);
     return BASE::value->constant.i32;
   }
 };
 struct I64Op : ValueOp<I64Op, KEY_TYPE_V_I64, XReg, int64_t> {
   typedef ValueOp<I64Op, KEY_TYPE_V_I64, XReg, int64_t> BASE;
-  const int64_t constant() const {
+  int64_t constant() const {
     assert_true(BASE::is_constant);
     return BASE::value->constant.i64;
   }
@@ -239,14 +239,14 @@ struct I64Op : ValueOp<I64Op, KEY_TYPE_V_I64, XReg, int64_t> {
 };
 struct F32Op : ValueOp<F32Op, KEY_TYPE_V_F32, SReg, float> {
   typedef ValueOp<F32Op, KEY_TYPE_V_F32, SReg, float> BASE;
-  const float constant() const {
+  float constant() const {
     assert_true(BASE::is_constant);
     return BASE::value->constant.f32;
   }
 };
 struct F64Op : ValueOp<F64Op, KEY_TYPE_V_F64, DReg, double> {
   typedef ValueOp<F64Op, KEY_TYPE_V_F64, DReg, double> BASE;
-  const double constant() const {
+  double constant() const {
     assert_true(BASE::is_constant);
     return BASE::value->constant.f64;
   }
@@ -386,11 +386,11 @@ struct I<OPCODE, DEST, SRC1, SRC2, SRC3> : DestField<DEST> {
 template <typename T>
 static const T GetTempReg(A64Emitter& e);
 template <>
-const WReg GetTempReg<WReg>(A64Emitter& e) {
+[[maybe_unused]] const WReg GetTempReg<WReg>(A64Emitter& e) {
   return W0;
 }
 template <>
-const XReg GetTempReg<XReg>(A64Emitter& e) {
+[[maybe_unused]] const XReg GetTempReg<XReg>(A64Emitter& e) {
   return X0;
 }
 
