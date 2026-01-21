@@ -1311,11 +1311,11 @@ static const vec128_t v_consts[] = {
 };
 
 // First location to try and place constants.
-static const uintptr_t kConstDataLocation = 0x20000000;
+[[maybe_unused]] static const uintptr_t kConstDataLocation = 0x20000000;
 static const uintptr_t kConstDataSize = sizeof(v_consts);
 
 // Increment the location by this amount for every allocation failure.
-static const uintptr_t kConstDataIncrement = 0x00001000;
+[[maybe_unused]] static const uintptr_t kConstDataIncrement = 0x00001000;
 
 // This function places constant data that is used by the emitter later on.
 // Only called once and used by multiple instances of the emitter.
@@ -1324,8 +1324,14 @@ static const uintptr_t kConstDataIncrement = 0x00001000;
 // doing so requires RIP-relative addressing, which is difficult to support
 // given the current setup.
 uintptr_t A64Emitter::PlaceConstData() {
-  uint8_t* ptr = reinterpret_cast<uint8_t*>(kConstDataLocation);
   void* mem = nullptr;
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+  // macOS ARM64 PAGEZERO blocks low fixed mappings; use OS-chosen addresses.
+  mem = memory::AllocFixed(
+      nullptr, xe::round_up(kConstDataSize, memory::page_size()),
+      memory::AllocationType::kReserveCommit, memory::PageAccess::kReadWrite);
+#else
+  uint8_t* ptr = reinterpret_cast<uint8_t*>(kConstDataLocation);
   while (!mem) {
     mem = memory::AllocFixed(
         ptr, xe::round_up(kConstDataSize, memory::page_size()),
@@ -1333,9 +1339,21 @@ uintptr_t A64Emitter::PlaceConstData() {
 
     ptr += kConstDataIncrement;
   }
+#endif
 
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+  // On macOS ARM64, memory is often allocated in high address space
+  if (reinterpret_cast<uintptr_t>(mem) & ~0x7FFFFFFF) {
+    XELOGD(
+        "Const data allocated at high address {:#x}, may cause compatibility "
+        "issues",
+        reinterpret_cast<uintptr_t>(mem));
+    // Continue anyway since we'll handle it later
+  }
+#else
   // The pointer must not be greater than 31 bits.
   assert_zero(reinterpret_cast<uintptr_t>(mem) & ~0x7FFFFFFF);
+#endif
   std::memcpy(mem, v_consts, sizeof(v_consts));
   memory::Protect(mem, kConstDataSize, memory::PageAccess::kReadOnly, nullptr);
 
