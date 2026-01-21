@@ -18,13 +18,13 @@ project("xenia-gpu")
   includedirs({
     project_root.."/third_party/glslang",  -- For glslang SPIRV headers
   })
-  filter("system:not macosx")
+  filter("platforms:Linux or Windows or Android-*")
     includedirs({
       project_root.."/third_party/Vulkan-Headers/include",
     })
   filter({})
 
-  filter("system:macosx")
+  filter("platforms:Mac-*")
     removefiles({
       "spirv_shader*.cc",
       "spirv_shader*.h",

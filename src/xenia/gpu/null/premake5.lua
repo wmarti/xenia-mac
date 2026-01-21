@@ -12,7 +12,7 @@ project("xenia-gpu-null")
     "xenia-ui",
     "xxhash",
   })
-  filter("system:not macosx")
+  filter("platforms:Linux or Windows or Android-*")
     links({
       "xenia-ui-vulkan",
     })
