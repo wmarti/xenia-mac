@@ -168,6 +168,8 @@ class A64Emitter : public oaknut::VectorCodeGenerator {
     r = oaknut::QReg(idx);
   }
 
+  void EmitBtiJc();
+
   // Gets(and possibly create) an HIR label with the specified name
   oaknut::Label* lookup_label(const char* label_name) {
     return &label_lookup_[label_name];

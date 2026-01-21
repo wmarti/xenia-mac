@@ -58,6 +58,33 @@ using xe::cpu::hir::Instr;
 using namespace xe::literals;
 using namespace oaknut::util;
 
+namespace {
+
+void AdjustStackPointer(A64Emitter& emitter, size_t stack_size, bool add) {
+  if (!stack_size) {
+    return;
+  }
+  const uint64_t size_u64 = static_cast<uint64_t>(stack_size);
+  const bool imm_valid = size_u64 <= 0xFFF ||
+                         ((size_u64 & 0xFFF) == 0 && (size_u64 >> 12) <= 0xFFF);
+  if (imm_valid) {
+    if (add) {
+      emitter.ADD(SP, SP, size_u64);
+    } else {
+      emitter.SUB(SP, SP, size_u64);
+    }
+    return;
+  }
+  emitter.MOV(X15, size_u64);
+  if (add) {
+    emitter.ADD(SP, SP, X15);
+  } else {
+    emitter.SUB(SP, SP, X15);
+  }
+}
+
+}  // namespace
+
 static const size_t kStashOffset = 32;
 // static const size_t kStashOffsetHigh = 32 + 32;
 
@@ -156,6 +183,8 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
   return new_execute_address;
 }
 
+void A64Emitter::EmitBtiJc() { dw(0xD503241F); }
+
 bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
   oaknut::Label epilog_label;
   epilog_label_ = &epilog_label;
@@ -195,22 +224,17 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // IMPORTANT: any changes to the prolog must be kept in sync with
   //     A64CodeCache, which dynamically generates exception information.
   //     Adding or changing anything here must be matched!
-  size_t stack_size = StackLayout::GUEST_STACK_SIZE + stack_offset;
-
-  // The SUB instruction can only encode immediates withi 0xFFF or 0xFFF000
-  // If the stack size is greater than 0xFFF, then just align it to 0x1000
-  if (stack_size > 0xFFF) {
-    stack_size = xe::align(stack_size, static_cast<size_t>(0x1000));
-  }
-
+  const size_t stack_size = StackLayout::GUEST_STACK_SIZE + stack_offset;
   assert_true(stack_size % 16 == 0);
   func_info.stack_size = stack_size;
   stack_size_ = stack_size;
 
+  EmitBtiJc();
+
   STP(X29, X30, SP, PRE_INDEXED, -16);
   MOV(X29, SP);
 
-  SUB(SP, SP, (uint32_t)stack_size);
+  AdjustStackPointer(*this, stack_size, false);
 
   code_offsets.prolog_stack_alloc = offset();
   code_offsets.body = offset();
@@ -292,7 +316,7 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
 
   code_offsets.epilog = offset();
 
-  ADD(SP, SP, (uint32_t)stack_size);
+  AdjustStackPointer(*this, stack_size, true);
 
   MOV(SP, X29);
   LDP(X29, X30, SP, POST_INDEXED, 16);
@@ -455,7 +479,7 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // Pass the callers return address over.
     LDR(X0, SP, StackLayout::GUEST_RET_ADDR);
 
-    ADD(SP, SP, static_cast<uint32_t>(stack_size()));
+    AdjustStackPointer(*this, stack_size(), true);
 
     MOV(SP, X29);
     LDP(X29, X30, SP, POST_INDEXED, 16);
@@ -505,7 +529,7 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
     // Pass the callers return address over.
     LDR(X0, SP, StackLayout::GUEST_RET_ADDR);
 
-    ADD(SP, SP, static_cast<uint32_t>(stack_size()));
+    AdjustStackPointer(*this, stack_size(), true);
 
     MOV(SP, X29);
     LDP(X29, X30, SP, POST_INDEXED, 16);
