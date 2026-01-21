@@ -831,8 +831,6 @@ void MetalPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
 bool MetalPresenter::RefreshGuestOutputImpl(
     uint32_t mailbox_index, uint32_t frontbuffer_width, uint32_t frontbuffer_height,
     std::function<bool(GuestOutputRefreshContext& context)> refresher, bool& is_8bpc_out_ref) {
-  XELOGI("Metal RefreshGuestOutputImpl: Creating guest output {}x{} at mailbox index {}",
-         frontbuffer_width, frontbuffer_height, mailbox_index);
 
   // Validate mailbox index
   if (mailbox_index >= kGuestOutputMailboxSize) {
@@ -847,8 +845,6 @@ bool MetalPresenter::RefreshGuestOutputImpl(
   // Check if we need to create or recreate the texture
   if (!guest_output_texture || guest_output_texture.width != frontbuffer_width ||
       guest_output_texture.height != frontbuffer_height) {
-    XELOGI("Metal RefreshGuestOutputImpl: Creating new texture {}x{}", frontbuffer_width,
-           frontbuffer_height);
 
     MTLPixelFormat guest_output_format = ::cvars::metal_presenter_force_10bpc
                                              ? MTLPixelFormatRGB10A2Unorm
@@ -891,7 +887,7 @@ bool MetalPresenter::RefreshGuestOutputImpl(
            frontbuffer_width, frontbuffer_height);
   }
 
-  XELOGI("Metal RefreshGuestOutputImpl: Successfully refreshed guest output texture");
+
   return true;
 }
 
