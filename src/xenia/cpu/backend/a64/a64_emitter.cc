@@ -919,20 +919,40 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   if (fn->machine_code()) {
     // TODO(benvanik): is it worth it to do this? It removes the need for
     // a ResolveFunction call, but makes the table less useful.
+#if XE_A64_INDIRECTION_64BIT
+    MOV(X16, reinterpret_cast<uint64_t>(fn->machine_code()));
+#else
     assert_zero(uint64_t(fn->machine_code()) & 0xFFFFFFFF00000000);
     MOV(X16, uint32_t(uint64_t(fn->machine_code())));
+#endif
   } else if (code_cache_->has_indirection_table()) {
     // Load the pointer to the indirection table maintained in A64CodeCache.
     // The target dword will either contain the address of the generated code
     // or a thunk to ResolveAddress.
     MOV(W17, function->address());
-    LDR(W16, X17);
+#if XE_A64_INDIRECTION_64BIT
+    // ARM64 platforms with 64-bit indirection entries must compute an offset.
+    MOV(X16, code_cache_->indirection_table_base_bias());
+    LSL(X15, X17, 1);
+    ADD(X16, X16, X15);
+    LDR(X16, X16);
+#else
+    // Other platforms use 32-bit addresses mapped at guest address space.
+    if (code_cache_->indirection_table_base_address() ==
+        A64CodeCache::kIndirectionTableBase) {
+      LDR(W16, X17);
+    } else {
+      MOV(W16, static_cast<uint32_t>(A64CodeCache::kIndirectionTableBase));
+      SUB(W17, W17, W16);
+      MOV(X16, code_cache_->indirection_table_base_address());
+      ADD(X16, X16, W17, UXTW);
+      LDR(W16, X16);
+    }
+#endif
   } else {
-    // Old-style resolve.
-    // Not too important because indirection table is almost always available.
-    // TODO: Overwrite the call-site with a straight call.
-    CallNative(&ResolveFunction, function->address());
-    MOV(X16, X0);
+    XELOGE("A64 indirection table missing; ResolveFunction fallback removed");
+    BRK(0xF000);
+    B(epilog_label());
   }
 
   // Actually jump/call to X16.
@@ -973,16 +993,29 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
     if (reg.toW().index() != W17.index()) {
       MOV(W17, reg.toW());
     }
-    LDR(W16, X17);
+#if XE_A64_INDIRECTION_64BIT
+    // ARM64 platforms with 64-bit indirection entries must compute an offset.
+    MOV(X16, code_cache_->indirection_table_base_bias());
+    LSL(X15, X17, 1);
+    ADD(X16, X16, X15);
+    LDR(X16, X16);
+#else
+    // Other platforms use 32-bit addresses mapped at guest address space.
+    if (code_cache_->indirection_table_base_address() ==
+        A64CodeCache::kIndirectionTableBase) {
+      LDR(W16, X17);
+    } else {
+      MOV(W16, static_cast<uint32_t>(A64CodeCache::kIndirectionTableBase));
+      SUB(W17, W17, W16);
+      MOV(X16, code_cache_->indirection_table_base_address());
+      ADD(X16, X16, W17, UXTW);
+      LDR(W16, X16);
+    }
+#endif
   } else {
-    // Old-style resolve.
-    // Not too important because indirection table is almost always available.
-    MOV(X0, GetContextReg());
-    MOV(W1, reg.toW());
-
-    MOV(X16, reinterpret_cast<uint64_t>(ResolveFunction));
-    BLR(X16);
-    MOV(X16, X0);
+    XELOGE("A64 indirection table missing; ResolveFunction fallback removed");
+    BRK(0xF000);
+    B(epilog_label());
   }
 
   // Actually jump/call to X16.
