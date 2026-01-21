@@ -44,10 +44,10 @@ std::vector<std::string> ParseAllowedExtensions(std::string_view patterns) {
       token.remove_suffix(1);
     }
 
-    // Ignore wildcard matches.
+    // If wildcard is present, return empty to allow all files
+    // (including extension-less files like game dump content).
     if (token == "*" || token == "*.*") {
-      start = end + 1;
-      continue;
+      return {};
     }
 
     // Convert "*.ext" to "ext".
