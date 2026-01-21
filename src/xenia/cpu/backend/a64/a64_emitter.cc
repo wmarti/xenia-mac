@@ -11,12 +11,14 @@
 
 #include <cstddef>
 
+#include <cctype>
 #include <climits>
 #include <cstring>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/atomic.h"
+#include "xenia/base/byte_order.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
@@ -32,6 +34,7 @@
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/function_debug_info.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
@@ -394,8 +397,316 @@ uint64_t TrapDebugPrint(void* raw_context, uint64_t address) {
   return 0;
 }
 
+uint64_t TrapLogRegs(void* raw_context, uint64_t address) {
+  static volatile int32_t log_count = 0;
+  if (xe::atomic_inc(&log_count) > 8) {
+    return 0;
+  }
+  auto guest_context = reinterpret_cast<ppc::PPCContext*>(raw_context);
+  if (!guest_context) {
+    return 0;
+  }
+  auto thread_state = guest_context->thread_state;
+  XELOGI(
+      "TraceOnInstruction 0x{:08X}: r3=0x{:016X} r4=0x{:016X} r11=0x{:016X} "
+      "r30=0x{:016X} r31=0x{:016X} lr=0x{:016X} ctr=0x{:016X}",
+      static_cast<uint32_t>(cvars::break_on_instruction), guest_context->r[3],
+      guest_context->r[4], guest_context->r[11], guest_context->r[30],
+      guest_context->r[31], guest_context->lr, guest_context->ctr);
+  if (thread_state) {
+    auto memory = thread_state->memory();
+    if (memory) {
+      auto page_access_to_string = [](xe::memory::PageAccess access) {
+        switch (access) {
+          case xe::memory::PageAccess::kNoAccess:
+            return "no-access";
+          case xe::memory::PageAccess::kReadOnly:
+            return "read-only";
+          case xe::memory::PageAccess::kReadWrite:
+            return "read-write";
+          case xe::memory::PageAccess::kExecuteReadOnly:
+            return "exec-read";
+          case xe::memory::PageAccess::kExecuteReadWrite:
+            return "exec-read-write";
+        }
+        return "unknown";
+      };
+      auto heap_type_to_string = [](HeapType type) {
+        switch (type) {
+          case HeapType::kGuestVirtual:
+            return "guest-virtual";
+          case HeapType::kGuestXex:
+            return "guest-xex";
+          case HeapType::kGuestPhysical:
+            return "guest-physical";
+          case HeapType::kHostPhysical:
+            return "host-physical";
+        }
+        return "unknown";
+      };
+      auto can_read_guest = [&](uint32_t addr) -> bool {
+        if (!addr) {
+          return false;
+        }
+        auto* heap = memory->LookupHeap(addr);
+        if (!heap) {
+          return false;
+        }
+        return heap->QueryRangeAccess(addr, addr) !=
+               xe::memory::PageAccess::kNoAccess;
+      };
+      auto log_guest_bytes = [&](uint32_t addr, const char* label) {
+        if (!can_read_guest(addr)) {
+          auto* heap = memory->LookupHeap(addr);
+          XELOGI(
+              "TraceOnInstruction {}: addr=0x{:08X} unreadable heap={} "
+              "access={}",
+              label, addr,
+              heap ? heap_type_to_string(heap->heap_type()) : "none",
+              heap ? page_access_to_string(heap->QueryRangeAccess(addr, addr))
+                   : "no-access");
+          return;
+        }
+        const auto* heap = memory->LookupHeap(addr);
+        const uint8_t* host_ptr = nullptr;
+        if (heap && heap->heap_type() == HeapType::kGuestPhysical) {
+          uint32_t physical_address = memory->GetPhysicalAddress(addr);
+          host_ptr = memory->TranslatePhysical(physical_address);
+        } else {
+          host_ptr = memory->TranslateVirtual<const uint8_t*>(addr);
+        }
+        if (!host_ptr) {
+          XELOGI("TraceOnInstruction {}: addr=0x{:08X} null", label, addr);
+          return;
+        }
+        uint8_t bytes[16] = {};
+        std::memcpy(bytes, host_ptr, sizeof(bytes));
+        char ascii[sizeof(bytes) + 1] = {};
+        for (size_t i = 0; i < sizeof(bytes); ++i) {
+          uint8_t ch = bytes[i];
+          ascii[i] = (ch >= 0x20 && ch <= 0x7E) ? static_cast<char>(ch) : '.';
+        }
+        XELOGI(
+            "TraceOnInstruction {}: addr=0x{:08X} {:02X} {:02X} {:02X} "
+            "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} "
+            "{:02X} {:02X} {:02X} {:02X} {:02X} ascii={}",
+            label, addr, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
+            bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
+            bytes[11], bytes[12], bytes[13], bytes[14], bytes[15], ascii);
+      };
+      auto log_guest_string = [&](uint32_t addr, const char* label) {
+        if (!can_read_guest(addr)) {
+          return;
+        }
+        const uint8_t* ptr = memory->TranslateVirtual<const uint8_t*>(addr);
+        if (!ptr) {
+          return;
+        }
+        char buffer[129] = {};
+        size_t len = 0;
+        for (; len < sizeof(buffer) - 1; ++len) {
+          char ch = static_cast<char>(ptr[len]);
+          if (!ch) {
+            break;
+          }
+          if (!std::isprint(static_cast<unsigned char>(ch))) {
+            return;
+          }
+          buffer[len] = ch;
+        }
+        if (len > 0) {
+          XELOGI("TraceOnInstruction {}: {}", label, buffer);
+        }
+      };
+      const uint32_t guest_address = static_cast<uint32_t>(guest_context->r[4]);
+      const auto* heap = memory->LookupHeap(guest_address);
+      if (heap) {
+        const uint8_t* host_ptr = nullptr;
+        if (heap->heap_type() == HeapType::kGuestPhysical) {
+          uint32_t physical_address = memory->GetPhysicalAddress(guest_address);
+          host_ptr = memory->TranslatePhysical(physical_address);
+        } else {
+          host_ptr = memory->TranslateVirtual<const uint8_t*>(guest_address);
+        }
+        if (host_ptr) {
+          uint8_t bytes[16] = {};
+          std::memcpy(bytes, host_ptr, sizeof(bytes));
+          char ascii[sizeof(bytes) + 1] = {};
+          for (size_t i = 0; i < sizeof(bytes); ++i) {
+            uint8_t ch = bytes[i];
+            ascii[i] = (ch >= 0x20 && ch <= 0x7E) ? static_cast<char>(ch) : '.';
+          }
+          XELOGI(
+              "TraceOnInstruction mem[r4]=0x{:08X}: {:02X} {:02X} {:02X} "
+              "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} "
+              "{:02X} {:02X} {:02X} {:02X} {:02X} ascii={}",
+              guest_address, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
+              bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
+              bytes[11], bytes[12], bytes[13], bytes[14], bytes[15], ascii);
+        }
+      }
+
+      auto read_u32 = [&](uint32_t addr, uint32_t* out) -> bool {
+        if (!can_read_guest(addr)) {
+          return false;
+        }
+        const auto* heap = memory->LookupHeap(addr);
+        if (heap->heap_type() == HeapType::kGuestPhysical) {
+          uint32_t physical_address = memory->GetPhysicalAddress(addr);
+          auto ptr =
+              memory->TranslatePhysical<const uint32_t*>(physical_address);
+          if (!ptr) {
+            return false;
+          }
+          *out = xe::load_and_swap<uint32_t>(ptr);
+          return true;
+        }
+        auto ptr = memory->TranslateVirtual<const uint32_t*>(addr);
+        if (!ptr) {
+          return false;
+        }
+        *out = xe::load_and_swap<uint32_t>(ptr);
+        return true;
+      };
+
+      const uint32_t trace_pc =
+          static_cast<uint32_t>(cvars::break_on_instruction);
+      auto log_trace_instr = [&](uint32_t pc, const char* label) {
+        if (!can_read_guest(pc)) {
+          auto* heap = memory->LookupHeap(pc);
+          XELOGI(
+              "TraceOnInstruction {}: pc=0x{:08X} unreadable heap={} "
+              "access={}",
+              label, pc, heap ? heap_type_to_string(heap->heap_type()) : "none",
+              heap ? page_access_to_string(heap->QueryRangeAccess(pc, pc))
+                   : "no-access");
+          return;
+        }
+        uint32_t instr = 0;
+        if (!read_u32(pc, &instr)) {
+          XELOGI("TraceOnInstruction {}: pc=0x{:08X} unreadable", label, pc);
+          return;
+        }
+        xe::StringBuffer disasm;
+        if (cpu::ppc::DisasmPPC(pc, instr, &disasm)) {
+          XELOGI("TraceOnInstruction {}: pc=0x{:08X} instr=0x{:08X} {}", label,
+                 pc, instr, disasm.to_string_view());
+        } else {
+          XELOGI("TraceOnInstruction {}: pc=0x{:08X} instr=0x{:08X}", label, pc,
+                 instr);
+        }
+      };
+      if (trace_pc) {
+        log_trace_instr(trace_pc - 4, "target-4");
+        log_trace_instr(trace_pc, "target");
+        log_trace_instr(trace_pc + 4, "target+4");
+      }
+      if (memory->LookupHeap(trace_pc)) {
+        for (int offset = -4; offset <= 4; ++offset) {
+          uint32_t pc = trace_pc + offset * 4;
+          if (!memory->LookupHeap(pc)) {
+            continue;
+          }
+          uint32_t instr = 0;
+          if (!read_u32(pc, &instr)) {
+            XELOGI("TraceOnInstruction window: pc=0x{:08X} unreadable", pc);
+            continue;
+          }
+          xe::StringBuffer disasm_window;
+          if (cpu::ppc::DisasmPPC(pc, instr, &disasm_window)) {
+            XELOGI("TraceOnInstruction window: pc=0x{:08X} instr=0x{:08X} {}",
+                   pc, instr, disasm_window.to_string_view());
+          } else {
+            XELOGI("TraceOnInstruction window: pc=0x{:08X} instr=0x{:08X}", pc,
+                   instr);
+          }
+        }
+      }
+
+      const uint32_t obj_address = static_cast<uint32_t>(guest_context->r[3]);
+      if (!obj_address) {
+        XELOGI("TraceOnInstruction r3 fields: base=0x00000000");
+      } else {
+        const auto* obj_heap = memory->LookupHeap(obj_address);
+        if (obj_heap) {
+          uint32_t value_4 = 0;
+          uint32_t value_8 = 0;
+          uint32_t value_c = 0;
+          uint32_t value_20 = 0;
+          uint32_t value_470 = 0;
+          bool have_any = false;
+          have_any |= read_u32(obj_address + 0x4, &value_4);
+          have_any |= read_u32(obj_address + 0x8, &value_8);
+          have_any |= read_u32(obj_address + 0xC, &value_c);
+          have_any |= read_u32(obj_address + 0x20, &value_20);
+          have_any |= read_u32(obj_address + 0x470, &value_470);
+          if (have_any) {
+            XELOGI(
+                "TraceOnInstruction r3 fields: base=0x{:08X} +0x4=0x{:08X} "
+                "+0x8=0x{:08X} +0xC=0x{:08X} +0x20=0x{:08X} +0x470=0x{:08X}",
+                obj_address, value_4, value_8, value_c, value_20, value_470);
+            if (value_20) {
+              log_guest_bytes(value_20, "r3+0x20");
+            }
+            if (value_470) {
+              log_guest_bytes(value_470, "r3+0x470");
+            }
+          } else {
+            XELOGI("TraceOnInstruction r3 fields: base=0x{:08X} unmapped",
+                   obj_address);
+          }
+        } else {
+          XELOGI("TraceOnInstruction r3 fields: base=0x{:08X} heap=null",
+                 obj_address);
+        }
+        log_guest_string(obj_address, "r3 string");
+      }
+
+      const uint32_t r31_address = static_cast<uint32_t>(guest_context->r[31]);
+      if (!r31_address) {
+        XELOGI("TraceOnInstruction r31 fields: base=0x00000000");
+      } else {
+        const auto* r31_heap = memory->LookupHeap(r31_address);
+        if (r31_heap) {
+          uint32_t value_4 = 0;
+          uint32_t value_8 = 0;
+          uint32_t value_c = 0;
+          uint32_t value_20 = 0;
+          uint32_t value_470 = 0;
+          bool have_any = false;
+          have_any |= read_u32(r31_address + 0x4, &value_4);
+          have_any |= read_u32(r31_address + 0x8, &value_8);
+          have_any |= read_u32(r31_address + 0xC, &value_c);
+          have_any |= read_u32(r31_address + 0x20, &value_20);
+          have_any |= read_u32(r31_address + 0x470, &value_470);
+          if (have_any) {
+            XELOGI(
+                "TraceOnInstruction r31 fields: base=0x{:08X} +0x4=0x{:08X} "
+                "+0x8=0x{:08X} +0xC=0x{:08X} +0x20=0x{:08X} +0x470=0x{:08X}",
+                r31_address, value_4, value_8, value_c, value_20, value_470);
+            if (value_20) {
+              log_guest_bytes(value_20, "r31+0x20");
+            }
+            if (value_470) {
+              log_guest_bytes(value_470, "r31+0x470");
+            }
+          } else {
+            XELOGI("TraceOnInstruction r31 fields: base=0x{:08X} unmapped",
+                   r31_address);
+          }
+        } else {
+          XELOGI("TraceOnInstruction r31 fields: base=0x{:08X} heap=null",
+                 r31_address);
+        }
+      }
+    }
+  }
+  return 0;
+}
+
 uint64_t TrapDebugBreak(void* raw_context, uint64_t address) {
-  auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
+  [[maybe_unused]] auto thread_state =
+      *reinterpret_cast<ThreadState**>(raw_context);
   XELOGE("tw/td forced trap hit! This should be a crash!");
   if (cvars::break_on_debugbreak) {
     xe::debugging::Break();
@@ -409,6 +720,9 @@ void A64Emitter::Trap(uint16_t trap_type) {
     case 26:
       // 0x0FE00014 is a 'debug print' where r3 = buffer r4 = length
       CallNative(TrapDebugPrint, 0);
+      break;
+    case 27:
+      CallNative(TrapLogRegs, 0);
       break;
     case 0:
     case 22:
