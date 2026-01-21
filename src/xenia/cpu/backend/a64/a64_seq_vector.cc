@@ -32,10 +32,14 @@ struct VECTOR_CONVERT_I2F
     : Sequence<VECTOR_CONVERT_I2F,
                I<OPCODE_VECTOR_CONVERT_I2F, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const QReg src = i.src1.is_constant ? Q0 : i.src1;
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src, i.src1.constant());
+    }
     if (i.instr->flags & ARITHMETIC_UNSIGNED) {
-      e.UCVTF(i.dest.reg().S4(), i.src1.reg().S4());
+      e.UCVTF(i.dest.reg().S4(), src.S4());
     } else {
-      e.SCVTF(i.dest.reg().S4(), i.src1.reg().S4());
+      e.SCVTF(i.dest.reg().S4(), src.S4());
     }
   }
 };
@@ -48,10 +52,14 @@ struct VECTOR_CONVERT_F2I
     : Sequence<VECTOR_CONVERT_F2I,
                I<OPCODE_VECTOR_CONVERT_F2I, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const QReg src = i.src1.is_constant ? Q0 : i.src1;
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src, i.src1.constant());
+    }
     if (i.instr->flags & ARITHMETIC_UNSIGNED) {
-      e.FCVTZU(i.dest.reg().S4(), i.src1.reg().S4());
+      e.FCVTZU(i.dest.reg().S4(), src.S4());
     } else {
-      e.FCVTZS(i.dest.reg().S4(), i.src1.reg().S4());
+      e.FCVTZS(i.dest.reg().S4(), src.S4());
     }
   }
 };
@@ -83,7 +91,7 @@ struct LOAD_VECTOR_SHL_I8
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
       auto sh = i.src1.constant();
-      assert_true(sh < xe::countof(lvsl_table));
+      assert_true(static_cast<size_t>(sh) < xe::countof(lvsl_table));
       e.MOV(X0, reinterpret_cast<uintptr_t>(&lvsl_table[sh]));
       e.LDR(i.dest, X0);
     } else {
@@ -121,7 +129,7 @@ struct LOAD_VECTOR_SHR_I8
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
       auto sh = i.src1.constant();
-      assert_true(sh < xe::countof(lvsr_table));
+      assert_true(static_cast<size_t>(sh) < xe::countof(lvsr_table));
       e.MOV(X0, reinterpret_cast<uintptr_t>(&lvsr_table[sh]));
       e.LDR(i.dest, X0);
     } else {
