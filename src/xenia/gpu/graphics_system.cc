@@ -154,8 +154,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
     // Linux uses full sleep duration due to scheduler quantum issues
 #if XE_PLATFORM_WIN32
             constexpr double duration_scalar = 0.90;
-#endif
-#if XE_PLATFORM_LINUX
+#else
             constexpr double duration_scalar = 1.0;
 #endif
 
