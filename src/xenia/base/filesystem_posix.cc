@@ -11,6 +11,7 @@
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
+#include "xenia/xbox.h"
 
 #include <assert.h>
 #include <dirent.h>
@@ -69,7 +70,7 @@ std::filesystem::path GetExecutablePath() {
       return std::string();
     }
   }
-#else
+#elif XE_PLATFORM_LINUX
   char buff[FILENAME_MAX] = "";
   ssize_t len = readlink("/proc/self/exe", buff, sizeof(buff) - 1);
   if (len != -1) {
@@ -80,7 +81,7 @@ std::filesystem::path GetExecutablePath() {
     return std::string();
   }
 #else
-  // Other platforms
+  // Other platforms.
   return std::string();
 #endif
 }

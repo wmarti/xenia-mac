@@ -7,13 +7,14 @@
  ******************************************************************************
  */
 
+#include "xenia/base/assert.h"
+#include "xenia/base/clock.h"
+#include "xenia/base/platform.h"
+
 #include <sys/time.h>
 #if XE_PLATFORM_MAC
 #include <mach/mach_time.h>
 #endif
-
-#include "xenia/base/assert.h"
-#include "xenia/base/clock.h"
 
 namespace xe {
 
