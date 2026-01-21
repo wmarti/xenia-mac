@@ -24,12 +24,12 @@ project("xenia-gpu")
     })
   filter({})
 
-  filter("platforms:Mac-*")
+  if os.istarget("macosx") then
     removefiles({
       "spirv_shader*.cc",
       "spirv_shader*.h",
     })
-  filter({})
+  end
 
   -- Include SPIRV-Tools headers from Vulkan SDK for Windows
   filter("platforms:Windows")
