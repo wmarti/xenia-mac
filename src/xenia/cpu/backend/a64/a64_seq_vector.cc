@@ -1390,14 +1390,30 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   static uint8x16_t EmulateFLOAT16_2(void*, std::byte src1[16]) {
     alignas(16) float a[4];
     alignas(16) uint16_t b[8];
-    vst1q_u8(a, vld1q_u8(src1));
+
+    // Load NEON registers into a C array by casting to uint8_t*
+    vst1q_u8(reinterpret_cast<uint8_t*>(a),
+             vld1q_u8(reinterpret_cast<const uint8_t*>(src1)));
     std::memset(b, 0, sizeof(b));
 
     for (int i = 0; i < 2; i++) {
-      b[7 - i] = half_float::detail::float2half<std::round_toward_zero>(a[i]);
+      float x = a[i];
+      uint16_t h;
+
+      // Xbox 360 saturation behavior
+      if (x >= 65504.0f) {
+        h = 0x7FFF;  // Positive saturation sentinel
+      } else if (x <= -65504.0f) {
+        h = 0xFFFF;  // Negative saturation sentinel
+      } else {
+        h = half_float::detail::float2half<std::round_toward_zero>(x);
+      }
+
+      b[7 - i] = h;
     }
 
-    return vld1q_u8(b);
+    // Store the uint16_t array into a uint8x16_t NEON register
+    return vld1q_u8(reinterpret_cast<const uint8_t*>(b));
   }
   static void EmitFLOAT16_2(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
@@ -1409,7 +1425,48 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       if (i.src1.is_constant) {
         e.LoadConstantV(src1, i.src1.constant());
       }
+
+      // Perform IEEE conversion first
       e.FCVTN(i.dest.reg().toD().H4(), src1.S4());
+
+      // Xbox 360 rule: infinity values should be replaced with 0x7FFF/0xFFFF
+      // After FCVTN, +inf becomes 0x7C00, -inf becomes 0xFC00
+      // We need to detect these and replace them
+
+      // Create masks for infinity detection
+      QReg abs_mask = Q1;
+      QReg inf_pattern = Q2;
+      QReg is_inf = Q3;
+      QReg sign_mask = Q4;
+      QReg sentinel = Q5;
+
+      // Get absolute value of halfwords (clear sign bit)
+      e.MOVI(abs_mask.B16(), 0xFF);             // 0xFFFF
+      e.USHR(abs_mask.H8(), abs_mask.H8(), 1);  // 0x7FFF
+      e.AND(is_inf.toD().B8(), i.dest.reg().toD().B8(), abs_mask.toD().B8());
+
+      // Check if abs value == 0x7C00 (infinity)
+      e.MOVI(inf_pattern.H8(), 0x7C, oaknut::LslSymbol{}, 8);  // 0x7C00
+      e.CMEQ(is_inf.toD().H4(), is_inf.toD().H4(), inf_pattern.toD().H4());
+
+      // Get sign bits
+      e.MOVI(sign_mask.H8(), 0x80, oaknut::LslSymbol{}, 8);  // 0x8000
+      e.AND(sign_mask.toD().B8(), i.dest.reg().toD().B8(),
+            sign_mask.toD().B8());
+
+      // Create sentinel value: sign | 0x7FFF
+      e.MOVI(sentinel.B16(), 0xFF);             // 0xFFFF
+      e.USHR(sentinel.H8(), sentinel.H8(), 1);  // 0x7FFF
+      e.ORR(sentinel.toD().B8(), sentinel.toD().B8(), sign_mask.toD().B8());
+
+      // Apply replacement where infinity was detected
+      // Use BSL to replace infinities with sentinels
+      // BSL: result = (mask & src1) | (~mask & src2)
+      // We want: where is_inf is true, use sentinel; else use original
+      e.BSL(is_inf.toD().B8(), sentinel.toD().B8(), i.dest.reg().toD().B8());
+      e.MOV(i.dest.reg().toD().B8(), is_inf.toD().B8());
+
+      // Keep existing layout adjustments
       e.MOVI(Q0.B16(), 0);
       e.EXT(i.dest.reg().B16(), Q0.B16(), i.dest.reg().B16(), 4);
       e.REV32(i.dest.reg().H8(), i.dest.reg().H8());
@@ -1427,7 +1484,10 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   static uint8x16_t EmulateFLOAT16_4(void*, std::byte src1[16]) {
     alignas(16) float a[4];
     alignas(16) uint16_t b[8];
-    vst1q_u8(a, vld1q_u8(src1));
+
+    // Load NEON registers into a C array by casting to uint8_t*
+    vst1q_u8(reinterpret_cast<uint8_t*>(a),
+             vld1q_u8(reinterpret_cast<const uint8_t*>(src1)));
     std::memset(b, 0, sizeof(b));
 
     for (int i = 0; i < 4; i++) {
@@ -1435,7 +1495,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
           half_float::detail::float2half<std::round_toward_zero>(a[i]);
     }
 
-    return vld1q_u8(b);
+    // Store the uint16_t array into a uint8x16_t NEON register
+    return vld1q_u8(reinterpret_cast<const uint8_t*>(b));
   }
   static void EmitFLOAT16_4(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
