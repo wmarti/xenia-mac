@@ -499,15 +499,17 @@ static uint8x16_t EmulateVectorShl(void*, std::byte src1[16],
   alignas(16) T shamt[16 / sizeof(T)];
 
   // Load NEON registers into a C array.
-  vst1q_u8(reinterpret_cast<T*>(value), vld1q_u8(src1));
-  vst1q_u8(reinterpret_cast<T*>(shamt), vld1q_u8(src2));
+  vst1q_u8(reinterpret_cast<uint8_t*>(value),
+           vld1q_u8(reinterpret_cast<const uint8_t*>(src1)));
+  vst1q_u8(reinterpret_cast<uint8_t*>(shamt),
+           vld1q_u8(reinterpret_cast<const uint8_t*>(src2)));
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     value[i] = value[i] << (shamt[i] & ((sizeof(T) * 8) - 1));
   }
 
   // Store result and return it.
-  return vld1q_u8(value);
+  return vld1q_u8(reinterpret_cast<const uint8_t*>(value));
 }
 struct VECTOR_SHL_V128
     : Sequence<VECTOR_SHL_V128, I<OPCODE_VECTOR_SHL, V128Op, V128Op, V128Op>> {
@@ -611,16 +613,18 @@ static uint8x16_t EmulateVectorShr(void*, std::byte src1[16],
   alignas(16) T value[16 / sizeof(T)];
   alignas(16) T shamt[16 / sizeof(T)];
 
-  // Load NEON registers into a C array.
-  vst1q_u8(reinterpret_cast<T*>(value), vld1q_u8(src1));
-  vst1q_u8(reinterpret_cast<T*>(shamt), vld1q_u8(src2));
+  // Load NEON registers into a C array by casting to uint8_t*
+  vst1q_u8(reinterpret_cast<uint8_t*>(value),
+           vld1q_u8(reinterpret_cast<const uint8_t*>(src1)));
+  vst1q_u8(reinterpret_cast<uint8_t*>(shamt),
+           vld1q_u8(reinterpret_cast<const uint8_t*>(src2)));
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     value[i] = value[i] >> (shamt[i] & ((sizeof(T) * 8) - 1));
   }
 
-  // Store result and return it.
-  return vld1q_u8(value);
+  // Store result and return it by casting to uint8_t*
+  return vld1q_u8(reinterpret_cast<const uint8_t*>(value));
 }
 struct VECTOR_SHR_V128
     : Sequence<VECTOR_SHR_V128, I<OPCODE_VECTOR_SHR, V128Op, V128Op, V128Op>> {
@@ -820,16 +824,18 @@ static uint8x16_t EmulateVectorRotateLeft(void*, std::byte src1[16],
   alignas(16) T value[16 / sizeof(T)];
   alignas(16) T shamt[16 / sizeof(T)];
 
-  // Load NEON registers into a C array.
-  vst1q_u8(reinterpret_cast<T*>(value), vld1q_u8(src1));
-  vst1q_u8(reinterpret_cast<T*>(shamt), vld1q_u8(src2));
+  // Load NEON registers into a C array by casting to uint8_t*
+  vst1q_u8(reinterpret_cast<uint8_t*>(value),
+           vld1q_u8(reinterpret_cast<const uint8_t*>(src1)));
+  vst1q_u8(reinterpret_cast<uint8_t*>(shamt),
+           vld1q_u8(reinterpret_cast<const uint8_t*>(src2)));
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     value[i] = xe::rotate_left<T>(value[i], shamt[i] & ((sizeof(T) * 8) - 1));
   }
 
-  // Store result and return it.
-  return vld1q_u8(value);
+  // Store result and return it by casting to uint8_t*
+  return vld1q_u8(reinterpret_cast<const uint8_t*>(value));
 }
 struct VECTOR_ROTATE_LEFT_V128
     : Sequence<VECTOR_ROTATE_LEFT_V128,
