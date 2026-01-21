@@ -264,8 +264,11 @@ filter("platforms:Linux")
 filter({"platforms:Linux", "kind:*App"})
   linkgroups("On")
 
-filter("system:macosx")
+filter("platforms:Mac-*")
   local qt_dir = os.getenv("QT_DIR")
+  if os.getenv("XE_PREMAKE_DEBUG_QT") then
+    print("premake macosx: QT_DIR env = " .. tostring(qt_dir))
+  end
   if not qt_dir then
     local brew_prefix = os.outputof("brew --prefix qt@6 2>/dev/null")
     if not brew_prefix or brew_prefix == "" then
@@ -292,6 +295,9 @@ filter("system:macosx")
       end
     end
   end
+  if os.getenv("XE_PREMAKE_DEBUG_QT") then
+    print("premake macosx: resolved qt_dir = " .. tostring(qt_dir))
+  end
   if qt_dir then
     frameworkdirs({
       path.join(qt_dir, "lib"),
@@ -316,12 +322,12 @@ filter("system:macosx")
     })
   end
 
-filter({"system:macosx", "toolset:clang"})
+filter({"platforms:Mac-*", "toolset:clang"})
   buildoptions({
     "-w",
   })
   removefatalwarnings("All")
-filter({"system:macosx", "platforms:Mac-x86_64", "toolset:clang"})
+filter({"platforms:Mac-x86_64", "toolset:clang"})
   buildoptions({
     "-mavx",
   })
