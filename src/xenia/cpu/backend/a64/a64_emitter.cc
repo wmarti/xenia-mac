@@ -306,6 +306,7 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
 
   // Body.
   auto block = builder->first_block();
+  [[maybe_unused]] int block_count = 0;
   while (block) {
     // Mark block labels.
     auto label = block->label_head;
@@ -316,6 +317,7 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
 
     // Process instructions.
     const Instr* instr = block->instr_head;
+    [[maybe_unused]] int instr_count = 0;
     while (instr) {
       const Instr* new_tail = instr;
       if (!SelectSequence(this, instr, &new_tail)) {
