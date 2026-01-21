@@ -93,13 +93,19 @@ bool A64Assembler::Assemble(GuestFunction* function, HIRBuilder* builder,
   function->set_debug_info(std::move(debug_info));
   static_cast<A64Function*>(function)->Setup(
       reinterpret_cast<uint8_t*>(machine_code), code_size);
-
   // Install into indirection table.
   const uint64_t host_address = reinterpret_cast<uint64_t>(machine_code);
+#if XE_A64_INDIRECTION_64BIT
+  // On ARM64 platforms, machine code might be allocated in high address space.
+  // Use the 64-bit version of AddIndirection to store the full address.
+  reinterpret_cast<A64CodeCache*>(backend_->code_cache())
+      ->AddIndirection64(function->address(), host_address);
+#else
   assert_true((host_address >> 32) == 0);
   reinterpret_cast<A64CodeCache*>(backend_->code_cache())
       ->AddIndirection(function->address(),
                        static_cast<uint32_t>(host_address));
+#endif
 
   return true;
 }
