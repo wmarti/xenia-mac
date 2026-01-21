@@ -29,6 +29,9 @@ project("xenia-gpu")
       "spirv_shader*.cc",
       "spirv_shader*.h",
     })
+    filter("files:**/spirv_shader*.cc")
+      flags({ "ExcludeFromBuild" })
+    filter({})
   end
 
   -- Include SPIRV-Tools headers from Vulkan SDK for Windows
