@@ -36,13 +36,20 @@ enum KeyType {
   KEY_TYPE_L = OPCODE_SIG_TYPE_L,
   KEY_TYPE_O = OPCODE_SIG_TYPE_O,
   KEY_TYPE_S = OPCODE_SIG_TYPE_S,
-  KEY_TYPE_V_I8 = OPCODE_SIG_TYPE_V + INT8_TYPE,
-  KEY_TYPE_V_I16 = OPCODE_SIG_TYPE_V + INT16_TYPE,
-  KEY_TYPE_V_I32 = OPCODE_SIG_TYPE_V + INT32_TYPE,
-  KEY_TYPE_V_I64 = OPCODE_SIG_TYPE_V + INT64_TYPE,
-  KEY_TYPE_V_F32 = OPCODE_SIG_TYPE_V + FLOAT32_TYPE,
-  KEY_TYPE_V_F64 = OPCODE_SIG_TYPE_V + FLOAT64_TYPE,
-  KEY_TYPE_V_V128 = OPCODE_SIG_TYPE_V + VEC128_TYPE,
+  KEY_TYPE_V_I8 =
+      static_cast<int>(OPCODE_SIG_TYPE_V) + static_cast<int>(INT8_TYPE),
+  KEY_TYPE_V_I16 =
+      static_cast<int>(OPCODE_SIG_TYPE_V) + static_cast<int>(INT16_TYPE),
+  KEY_TYPE_V_I32 =
+      static_cast<int>(OPCODE_SIG_TYPE_V) + static_cast<int>(INT32_TYPE),
+  KEY_TYPE_V_I64 =
+      static_cast<int>(OPCODE_SIG_TYPE_V) + static_cast<int>(INT64_TYPE),
+  KEY_TYPE_V_F32 =
+      static_cast<int>(OPCODE_SIG_TYPE_V) + static_cast<int>(FLOAT32_TYPE),
+  KEY_TYPE_V_F64 =
+      static_cast<int>(OPCODE_SIG_TYPE_V) + static_cast<int>(FLOAT64_TYPE),
+  KEY_TYPE_V_V128 =
+      static_cast<int>(OPCODE_SIG_TYPE_V) + static_cast<int>(VEC128_TYPE),
 };
 
 #pragma pack(push, 1)
@@ -64,19 +71,20 @@ union InstrKey {
   InstrKey(const Instr* i) : value(0) {
     opcode = i->opcode->num;
     uint32_t sig = i->opcode->signature;
-    dest =
-        GET_OPCODE_SIG_TYPE_DEST(sig) ? OPCODE_SIG_TYPE_V + i->dest->type : 0;
+    dest = GET_OPCODE_SIG_TYPE_DEST(sig) ? static_cast<int>(OPCODE_SIG_TYPE_V) +
+                                               static_cast<int>(i->dest->type)
+                                         : 0;
     src1 = GET_OPCODE_SIG_TYPE_SRC1(sig);
     if (src1 == OPCODE_SIG_TYPE_V) {
-      src1 += i->src1.value->type;
+      src1 += static_cast<uint32_t>(i->src1.value->type);
     }
     src2 = GET_OPCODE_SIG_TYPE_SRC2(sig);
     if (src2 == OPCODE_SIG_TYPE_V) {
-      src2 += i->src2.value->type;
+      src2 += static_cast<uint32_t>(i->src2.value->type);
     }
     src3 = GET_OPCODE_SIG_TYPE_SRC3(sig);
     if (src3 == OPCODE_SIG_TYPE_V) {
-      src3 += i->src3.value->type;
+      src3 += static_cast<uint32_t>(i->src3.value->type);
     }
   }
 
