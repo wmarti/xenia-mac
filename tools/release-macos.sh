@@ -15,6 +15,9 @@ SKIP_BUILD=false
 TAG=""
 TAG_UPDATE=false
 
+# Enforce macOS 15.0+
+export MACOSX_DEPLOYMENT_TARGET=15.0
+
 APP_NAME="Xenia-Canary"
 VOLUME_NAME="Xenia-Canary"
 
