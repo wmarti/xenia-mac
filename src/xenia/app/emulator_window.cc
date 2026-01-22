@@ -54,6 +54,11 @@ DECLARE_string(readback_resolve);
 
 DECLARE_bool(readback_memexport);
 
+#if XE_PLATFORM_MAC
+DECLARE_bool(metal_presenter_use_metalfx);
+DECLARE_int32(metal_presenter_metalfx_color_processing);
+#endif
+
 DEFINE_bool(fullscreen, false, "Whether to launch the emulator in fullscreen.",
             "Display");
 
@@ -521,6 +526,31 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
 
       ImGui::TreePop();
     }
+
+#if XE_PLATFORM_MAC
+    if (ImGui::TreeNodeEx("MetalFX Upscaling (macOS)",
+                          ImGuiTreeNodeFlags_Framed |
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+      bool enable_metalfx = cvars::metal_presenter_use_metalfx;
+      if (ImGui::Checkbox("Enable MetalFX Upscaling", &enable_metalfx)) {
+        cvars::metal_presenter_use_metalfx = enable_metalfx;
+      }
+
+      if (enable_metalfx) {
+        int color_mode = cvars::metal_presenter_metalfx_color_processing;
+        ImGui::Text("Color Processing Mode:");
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Perceptual", &color_mode, 0)) {
+          cvars::metal_presenter_metalfx_color_processing = 0;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Linear", &color_mode, 1)) {
+          cvars::metal_presenter_metalfx_color_processing = 1;
+        }
+      }
+      ImGui::TreePop();
+    }
+#endif
 
     presenter->SetGuestOutputPaintConfigFromUIThread(new_presenter_config);
 
