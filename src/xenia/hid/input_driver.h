@@ -46,6 +46,10 @@ class InputDriver {
 
   virtual InputType GetInputType() const = 0;
 
+  void set_is_active_callback(std::function<bool()> is_active_callback) {
+    is_active_callback_ = is_active_callback;
+  }
+
  protected:
   explicit InputDriver(xe::ui::Window* window, size_t window_z_order)
       : window_(window), window_z_order_(window_z_order) {}
@@ -53,9 +57,14 @@ class InputDriver {
   xe::ui::Window* window() const { return window_; }
   size_t window_z_order() const { return window_z_order_; }
 
+  bool is_active() const {
+    return !is_active_callback_ || is_active_callback_();
+  }
+
  private:
   xe::ui::Window* window_;
   size_t window_z_order_;
+  std::function<bool()> is_active_callback_ = nullptr;
 };
 
 }  // namespace hid

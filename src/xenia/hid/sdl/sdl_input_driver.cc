@@ -9,6 +9,10 @@
 
 #include "xenia/hid/sdl/sdl_input_driver.h"
 
+#include <array>
+#include <cstring>
+#include <limits>
+
 #if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
 #endif  // XE_PLATFORM_WIN32
@@ -26,6 +30,64 @@
 DEFINE_path(mappings_file, "gamecontrollerdb.txt",
             "Filename of a database with custom game controller mappings.",
             "SDL");
+DEFINE_bool(sdl_keyboard_fallback, true,
+            "Use keyboard input as a fallback controller when no SDL "
+            "gamepads are connected.",
+            "SDL");
+DEFINE_bool(log_sdl_keyboard_fallback, false,
+            "Log when SDL keyboard fallback is active.", "SDL");
+DEFINE_bool(sdl_keyboard_autostart, false,
+            "Hold Start for a short time when SDL keyboard fallback is active.",
+            "SDL");
+DEFINE_int32(
+    sdl_keyboard_autostart_ms, 1000,
+    "Duration (ms) to hold Start when sdl_keyboard_autostart is enabled.",
+    "SDL");
+
+namespace {
+
+static constexpr std::array<xe::ui::VirtualKey, 34> kVkLookup = {
+    // 00 - True buttons from xinput button field
+    xe::ui::VirtualKey::kXInputPadDpadUp,
+    xe::ui::VirtualKey::kXInputPadDpadDown,
+    xe::ui::VirtualKey::kXInputPadDpadLeft,
+    xe::ui::VirtualKey::kXInputPadDpadRight,
+    xe::ui::VirtualKey::kXInputPadStart,
+    xe::ui::VirtualKey::kXInputPadBack,
+    xe::ui::VirtualKey::kXInputPadLThumbPress,
+    xe::ui::VirtualKey::kXInputPadRThumbPress,
+    xe::ui::VirtualKey::kXInputPadLShoulder,
+    xe::ui::VirtualKey::kXInputPadRShoulder,
+    xe::ui::VirtualKey::kNone, /* Guide has no VK */
+    xe::ui::VirtualKey::kNone, /* Unknown */
+    xe::ui::VirtualKey::kXInputPadA,
+    xe::ui::VirtualKey::kXInputPadB,
+    xe::ui::VirtualKey::kXInputPadX,
+    xe::ui::VirtualKey::kXInputPadY,
+    // 16 - Fake buttons generated from analog inputs
+    xe::ui::VirtualKey::kXInputPadLTrigger,
+    xe::ui::VirtualKey::kXInputPadRTrigger,
+    // 18
+    xe::ui::VirtualKey::kXInputPadLThumbUp,
+    xe::ui::VirtualKey::kXInputPadLThumbDown,
+    xe::ui::VirtualKey::kXInputPadLThumbRight,
+    xe::ui::VirtualKey::kXInputPadLThumbLeft,
+    xe::ui::VirtualKey::kXInputPadLThumbUpLeft,
+    xe::ui::VirtualKey::kXInputPadLThumbUpRight,
+    xe::ui::VirtualKey::kXInputPadLThumbDownRight,
+    xe::ui::VirtualKey::kXInputPadLThumbDownLeft,
+    // 26
+    xe::ui::VirtualKey::kXInputPadRThumbUp,
+    xe::ui::VirtualKey::kXInputPadRThumbDown,
+    xe::ui::VirtualKey::kXInputPadRThumbRight,
+    xe::ui::VirtualKey::kXInputPadRThumbLeft,
+    xe::ui::VirtualKey::kXInputPadRThumbUpLeft,
+    xe::ui::VirtualKey::kXInputPadRThumbUpRight,
+    xe::ui::VirtualKey::kXInputPadRThumbDownRight,
+    xe::ui::VirtualKey::kXInputPadRThumbDownLeft,
+};
+
+}  // namespace
 
 namespace xe {
 namespace hid {
@@ -35,12 +97,19 @@ SDLInputDriver::SDLInputDriver(xe::ui::Window* window, size_t window_z_order)
     : InputDriver(window, window_z_order),
       sdl_events_initialized_(false),
       sdl_gamecontroller_initialized_(false),
-      sdl_events_unflushed_(0),
       sdl_pumpevents_queued_(false),
       controllers_(),
-      keystroke_states_() {}
+      controllers_mutex_(),
+      keystroke_states_() {
+  keyboard_state_.packet_number = 1;
+  keyboard_state_.is_active = false;
+}
 
 SDLInputDriver::~SDLInputDriver() {
+  if (input_listener_added_ && window()) {
+    window()->RemoveInputListener(this);
+    input_listener_added_ = false;
+  }
   // Make sure the CallInUIThread is executed before destroying the references.
   if (sdl_pumpevents_queued_) {
     window()->app_context().CallInUIThreadSynchronous([this]() {
@@ -82,111 +151,41 @@ X_STATUS SDLInputDriver::Setup() {
     }
     sdl_events_initialized_ = true;
 
-    // With an event watch we will always get notified, even if the event queue
-    // is full, which can happen if another subsystem does not clear its events.
-    SDL_AddEventWatch(
-        [](void* userdata, SDL_Event* event) -> int {
-          if (!userdata || !event) {
-            assert_always();
-            return 0;
-          }
-
-          const auto type = event->type;
-          if (type < SDL_JOYAXISMOTION || type >= SDL_FINGERDOWN) {
-            return 0;
-          }
-
-          // If another part of xenia uses another SDL subsystem that generates
-          // events, this may seem like a bad idea. They will however not
-          // subscribe to controller events so we get away with that.
-          const auto driver = static_cast<SDLInputDriver*>(userdata);
-          driver->HandleEvent(*event);
-
-          return 0;
-        },
-        this);
-
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
       return;
     }
-
     sdl_gamecontroller_initialized_ = true;
 
-    LoadGameControllerDB();
+    if (!cvars::mappings_file.empty()) {
+      if (!std::filesystem::exists(cvars::mappings_file)) {
+        XELOGW("SDL GameControllerDB: file '{}' does not exist.",
+               xe::path_to_utf8(cvars::mappings_file));
+      } else {
+        auto mappings_file = filesystem::OpenFile(cvars::mappings_file, "rb");
+        if (!mappings_file) {
+          XELOGE("SDL GameControllerDB: failed to open file '{}'.",
+                 xe::path_to_utf8(cvars::mappings_file));
+        } else {
+          auto mappings_result = SDL_GameControllerAddMappingsFromRW(
+              SDL_RWFromFP(mappings_file, SDL_TRUE), 1);
+          if (mappings_result < 0) {
+            XELOGE("SDL GameControllerDB: error loading file '{}': {}.",
+                   xe::path_to_utf8(cvars::mappings_file), mappings_result);
+          } else {
+            XELOGI("SDL GameControllerDB: loaded {} mappings.",
+                   mappings_result);
+          }
+        }
+      }
+    }
   });
-
+  if (sdl_events_initialized_ && !input_listener_added_) {
+    window()->AddInputListener(this, window_z_order());
+    input_listener_added_ = true;
+  }
   return (sdl_events_initialized_ && sdl_gamecontroller_initialized_)
              ? X_STATUS_SUCCESS
              : X_STATUS_UNSUCCESSFUL;
-}
-
-void SDLInputDriver::LoadGameControllerDB() {
-  if (cvars::mappings_file.empty()) {
-    return;
-  }
-
-  if (!std::filesystem::exists(cvars::mappings_file)) {
-    XELOGW("SDL GameControllerDB: file '{}' does not exist.",
-           cvars::mappings_file);
-    return;
-  }
-
-  XELOGI("SDL GameControllerDB: Loading {}", cvars::mappings_file);
-
-  uint32_t updated_mappings = 0;
-  uint32_t added_mappings = 0;
-
-  rapidcsv::Document mappings(
-      xe::path_to_utf8(cvars::mappings_file), rapidcsv::LabelParams(-1, -1),
-      rapidcsv::SeparatorParams(), rapidcsv::ConverterParams(),
-      rapidcsv::LineReaderParams(true /* pSkipCommentLines */,
-                                 '#' /* pCommentPrefix */,
-                                 true /* pSkipEmptyLines */));
-
-  for (size_t i = 0; i < mappings.GetRowCount(); i++) {
-    std::vector<std::string> row = mappings.GetRow<std::string>(i);
-
-    if (row.size() < 2) {
-      continue;
-    }
-
-    std::string guid = row[0];
-    std::string controller_name = row[1];
-
-    auto format = [](std::string ss, const std::string& s) {
-      return ss.empty() ? s : ss + "," + s;
-    };
-
-    std::string mapping_str =
-        std::accumulate(row.begin(), row.end(), std::string{}, format);
-
-    int updated = SDL_GameControllerAddMapping(mapping_str.c_str());
-
-    switch (updated) {
-      case 0: {
-        XELOGI("SDL GameControllerDB: Updated {}, {}", controller_name, guid);
-        updated_mappings++;
-      } break;
-      case 1: {
-        added_mappings++;
-      } break;
-      default:
-        XELOGW("SDL GameControllerDB: error loading mapping '{}'", mapping_str);
-        break;
-    }
-  }
-
-  for (uint32_t i = 0; i < HID_SDL_USER_COUNT; i++) {
-    auto controller = GetControllerState(i);
-
-    if (controller) {
-      XELOGI("SDL Controller {}: {}", i,
-             SDL_GameControllerMapping(controller->sdl));
-    }
-  }
-
-  XELOGI("SDL GameControllerDB: Updated {} mappings.", updated_mappings);
-  XELOGI("SDL GameControllerDB: Added {} mappings.", added_mappings);
 }
 
 X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
@@ -198,9 +197,26 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 
   QueueControllerUpdate();
 
+  bool use_keyboard_fallback = false;
+  std::unique_lock<std::mutex> guard(controllers_mutex_);
+
   auto controller = GetControllerState(user_index);
   if (!controller) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
+    use_keyboard_fallback = cvars::sdl_keyboard_fallback && user_index == 0 &&
+                            !HasAnyControllerLocked();
+    if (!use_keyboard_fallback) {
+      return X_ERROR_DEVICE_NOT_CONNECTED;
+    }
+  }
+
+  if (use_keyboard_fallback) {
+    guard.unlock();
+    if (cvars::log_sdl_keyboard_fallback && !logged_keyboard_fallback_) {
+      XELOGI("SDL HID: keyboard fallback active (user 0).");
+      logged_keyboard_fallback_ = true;
+    }
+    UpdateKeyboardCapabilities(out_caps);
+    return X_ERROR_SUCCESS;
   }
 
   // Unfortunately drivers can't present all information immediately (e.g.
@@ -219,18 +235,48 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index,
     return X_ERROR_BAD_ARGUMENTS;
   }
 
-  QueueControllerUpdate();
+  auto is_active = this->is_active();
+
+  if (is_active) {
+    QueueControllerUpdate();
+  }
+
+  bool use_keyboard_fallback = false;
+  std::unique_lock<std::mutex> guard(controllers_mutex_);
 
   auto controller = GetControllerState(user_index);
   if (!controller) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
+    use_keyboard_fallback = cvars::sdl_keyboard_fallback && user_index == 0 &&
+                            !HasAnyControllerLocked();
+    if (!use_keyboard_fallback) {
+      return X_ERROR_DEVICE_NOT_CONNECTED;
+    }
   }
 
-  if (controller->state_changed) {
+  if (use_keyboard_fallback) {
+    guard.unlock();
+    if (cvars::log_sdl_keyboard_fallback && !logged_keyboard_fallback_) {
+      XELOGI("SDL HID: keyboard fallback active (user 0).");
+      logged_keyboard_fallback_ = true;
+    }
+    return GetStateFromKeyboard(out_state);
+  }
+
+  // Make sure packet_number is only incremented by 1, even if there have been
+  // multiple updates between GetState calls. Also track `is_active` to
+  // increment the packet number if it changed.
+  if ((is_active != controller->is_active) ||
+      (is_active && controller->state_changed)) {
     controller->state.packet_number++;
+    controller->is_active = is_active;
     controller->state_changed = false;
   }
   std::memcpy(out_state, &controller->state, sizeof(*out_state));
+  if (!is_active) {
+    // Simulate an "untouched" controller. When we become active again the
+    // pressed buttons aren't lost and will be visible again.
+    std::memset(&out_state->gamepad, 0, sizeof(out_state->gamepad));
+  }
   return X_ERROR_SUCCESS;
 }
 
@@ -243,9 +289,21 @@ X_RESULT SDLInputDriver::SetState(uint32_t user_index,
 
   QueueControllerUpdate();
 
+  bool use_keyboard_fallback = false;
+  std::unique_lock<std::mutex> guard(controllers_mutex_);
+
   auto controller = GetControllerState(user_index);
   if (!controller) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
+    use_keyboard_fallback = cvars::sdl_keyboard_fallback && user_index == 0 &&
+                            !HasAnyControllerLocked();
+    if (!use_keyboard_fallback) {
+      return X_ERROR_DEVICE_NOT_CONNECTED;
+    }
+  }
+
+  if (use_keyboard_fallback) {
+    // No vibration support for keyboard fallback.
+    return X_ERROR_SUCCESS;
   }
 
 #if SDL_VERSION_ATLEAST(2, 0, 9)
@@ -265,7 +323,7 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
   // TODO(JoelLinn): Figure out the flags
   // https://github.com/evilC/UCR/blob/0489929e2a8e39caa3484c67f3993d3fba39e46f/Libraries/XInput.ahk#L85-L98
   assert(sdl_events_initialized_ && sdl_gamecontroller_initialized_);
-  bool user_any = users == XUserIndexAny;
+  bool user_any = users == 0xFF;
   if (users >= HID_SDL_USER_COUNT && !user_any) {
     return X_ERROR_BAD_ARGUMENTS;
   }
@@ -276,49 +334,36 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
   // The order of this list is also the order in which events are send if
   // multiple buttons change at once.
   static_assert(sizeof(X_INPUT_GAMEPAD::buttons) == 2);
-  static constexpr std::array<ui::VirtualKey, 35> kVkLookup = {
-      // 00 - True buttons from xinput button field
-      ui::VirtualKey::kXInputPadDpadUp,
-      ui::VirtualKey::kXInputPadDpadDown,
-      ui::VirtualKey::kXInputPadDpadLeft,
-      ui::VirtualKey::kXInputPadDpadRight,
-      ui::VirtualKey::kXInputPadStart,
-      ui::VirtualKey::kXInputPadBack,
-      ui::VirtualKey::kXInputPadLThumbPress,
-      ui::VirtualKey::kXInputPadRThumbPress,
-      ui::VirtualKey::kXInputPadLShoulder,
-      ui::VirtualKey::kXInputPadRShoulder,
-      // Guide has no VK (kNone), however using kXInputPadGuide.
-      ui::VirtualKey::kXInputPadGuide,
-      ui::VirtualKey::kNone, /* Unknown */
-      ui::VirtualKey::kXInputPadA,
-      ui::VirtualKey::kXInputPadB,
-      ui::VirtualKey::kXInputPadX,
-      ui::VirtualKey::kXInputPadY,
-      // 16 - Fake buttons generated from analog inputs
-      ui::VirtualKey::kXInputPadLTrigger,
-      ui::VirtualKey::kXInputPadRTrigger,
-      // 18
-      ui::VirtualKey::kXInputPadLThumbUp,
-      ui::VirtualKey::kXInputPadLThumbDown,
-      ui::VirtualKey::kXInputPadLThumbRight,
-      ui::VirtualKey::kXInputPadLThumbLeft,
-      ui::VirtualKey::kXInputPadLThumbUpLeft,
-      ui::VirtualKey::kXInputPadLThumbUpRight,
-      ui::VirtualKey::kXInputPadLThumbDownRight,
-      ui::VirtualKey::kXInputPadLThumbDownLeft,
-      // 26
-      ui::VirtualKey::kXInputPadRThumbUp,
-      ui::VirtualKey::kXInputPadRThumbDown,
-      ui::VirtualKey::kXInputPadRThumbRight,
-      ui::VirtualKey::kXInputPadRThumbLeft,
-      ui::VirtualKey::kXInputPadRThumbUpLeft,
-      ui::VirtualKey::kXInputPadRThumbUpRight,
-      ui::VirtualKey::kXInputPadRThumbDownRight,
-      ui::VirtualKey::kXInputPadRThumbDownLeft,
-  };
 
-  QueueControllerUpdate();
+  auto is_active = this->is_active();
+
+  if (is_active) {
+    QueueControllerUpdate();
+  }
+
+  bool use_keyboard_fallback = false;
+  if (cvars::sdl_keyboard_fallback) {
+    std::unique_lock<std::mutex> guard(controllers_mutex_);
+    bool has_controller = HasAnyControllerLocked();
+    guard.unlock();
+    if (!has_controller) {
+      if (user_any || users == 0) {
+        use_keyboard_fallback = true;
+      } else {
+        return X_ERROR_DEVICE_NOT_CONNECTED;
+      }
+    }
+  }
+
+  if (use_keyboard_fallback) {
+    if (cvars::log_sdl_keyboard_fallback && !logged_keyboard_fallback_) {
+      XELOGI("SDL HID: keyboard fallback active (user 0).");
+      logged_keyboard_fallback_ = true;
+    }
+    return GetKeystrokeFromKeyboard(users, out_keystroke, user_any);
+  }
+
+  std::unique_lock<std::mutex> guard(controllers_mutex_);
 
   for (uint32_t user_index = (user_any ? 0 : users);
        user_index < (user_any ? HID_SDL_USER_COUNT : users + 1); user_index++) {
@@ -334,8 +379,10 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
     // If input is not active (e.g. due to a dialog overlay), force buttons to
     // "unpressed". The algorithm will automatically send UP events when
     // `is_active()` goes low and DOWN events when it goes high again.
-    const uint64_t curr_butts = controller->state.gamepad.buttons |
-                                AnalogToKeyfield(controller->state.gamepad);
+    const uint64_t curr_butts =
+        is_active ? (controller->state.gamepad.buttons |
+                     AnalogToKeyfield(controller->state.gamepad))
+                  : uint64_t(0);
     KeystrokeState& last = keystroke_states_.at(user_index);
 
     // Handle repeating
@@ -410,18 +457,6 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
 InputType SDLInputDriver::GetInputType() const { return InputType::Controller; }
 
 void SDLInputDriver::HandleEvent(const SDL_Event& event) {
-  // This callback will likely run on the thread that posts the event, which
-  // may be a dedicated thread SDL has created for the joystick subsystem.
-
-  // Event queue should never be (this) full
-  assert(SDL_PeepEvents(nullptr, 0, SDL_PEEKEVENT, SDL_FIRSTEVENT,
-                        SDL_LASTEVENT) < 0xFFFF);
-
-  // The queue could grow up to 3.5MB since it is never polled.
-  if (++sdl_events_unflushed_ > 64) {
-    SDL_FlushEvents(SDL_JOYAXISMOTION, SDL_FINGERDOWN - 1);
-    sdl_events_unflushed_ = 0;
-  }
   switch (event.type) {
     case SDL_CONTROLLERDEVICEADDED:
       OnControllerDeviceAdded(event);
@@ -443,26 +478,20 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
 }
 
 void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
+  std::unique_lock<std::mutex> guard(controllers_mutex_);
+
   // Open the controller.
   const auto controller = SDL_GameControllerOpen(event.cdevice.which);
   if (!controller) {
     assert_always();
     return;
   }
-
-  char guid_str[33];
-
-  SDL_JoystickGetGUIDString(
-      SDL_JoystickGetGUID(SDL_GameControllerGetJoystick(controller)), guid_str,
-      33);
-
   XELOGI(
       "SDL OnControllerDeviceAdded: \"{}\", "
       "JoystickType({}), "
       "GameControllerType({}), "
       "VendorID(0x{:04X}), "
-      "ProductID(0x{:04X}), "
-      "GUID({})",
+      "ProductID(0x{:04X})",
       SDL_GameControllerName(controller),
       static_cast<uint32_t>(
           SDL_JoystickGetType(SDL_GameControllerGetJoystick(controller))),
@@ -473,11 +502,10 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
 #endif
 #if SDL_VERSION_ATLEAST(2, 0, 6)
       SDL_GameControllerGetVendor(controller),
-      SDL_GameControllerGetProduct(controller),
+      SDL_GameControllerGetProduct(controller));
 #else
-      "?", "?",
+      "?", "?");
 #endif
-      guid_str);
   int user_id = -1;
 #if SDL_VERSION_ATLEAST(2, 0, 9)
   // Check if the controller has a player index LED.
@@ -502,14 +530,15 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
   }
   if (user_id >= 0) {
     auto& state = controllers_.at(user_id);
-    state = {controller, {}};
+    state = {};
+    state.sdl = controller;
+    auto joystick = SDL_GameControllerGetJoystick(controller);
+    state.instance_id = joystick ? SDL_JoystickInstanceID(joystick) : -1;
     // XInput seems to start with packet_number = 1 .
     state.state_changed = true;
     UpdateXCapabilities(state);
 
     XELOGI("SDL OnControllerDeviceAdded: Added at index {}.", user_id);
-    XELOGI("SDL Controller {}: {}", user_id,
-           SDL_GameControllerMapping(controller));
   } else {
     // No more controllers needed, close it.
     SDL_GameControllerClose(controller);
@@ -518,6 +547,8 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
 }
 
 void SDLInputDriver::OnControllerDeviceRemoved(const SDL_Event& event) {
+  std::unique_lock<std::mutex> guard(controllers_mutex_);
+
   // Find the disconnected gamecontroller and close it.
   auto idx = GetControllerIndexFromInstanceID(event.cdevice.which);
   if (idx) {
@@ -532,6 +563,8 @@ void SDLInputDriver::OnControllerDeviceRemoved(const SDL_Event& event) {
 }
 
 void SDLInputDriver::OnControllerDeviceAxisMotion(const SDL_Event& event) {
+  std::unique_lock<std::mutex> guard(controllers_mutex_);
+
   auto idx = GetControllerIndexFromInstanceID(event.caxis.which);
   assert(idx);
   auto& pad = controllers_.at(*idx).state.gamepad;
@@ -562,6 +595,8 @@ void SDLInputDriver::OnControllerDeviceAxisMotion(const SDL_Event& event) {
 }
 
 void SDLInputDriver::OnControllerDeviceButtonChanged(const SDL_Event& event) {
+  std::unique_lock<std::mutex> guard(controllers_mutex_);
+
   // Define a lookup table to map between SDL and XInput button codes.
   // These need to be in the order of the SDL_GameControllerButton enum.
   static constexpr std::array<
@@ -627,15 +662,11 @@ std::optional<size_t> SDLInputDriver::GetControllerIndexFromInstanceID(
     SDL_JoystickID instance_id) {
   // Loop through our controllers and try to match the given ID.
   for (size_t i = 0; i < controllers_.size(); i++) {
-    auto controller = controllers_.at(i).sdl;
-    if (!controller) {
+    const auto& controller = controllers_.at(i);
+    if (!controller.sdl) {
       continue;
     }
-    auto joystick = SDL_GameControllerGetJoystick(controller);
-    assert(joystick);
-    auto joy_instance_id = SDL_JoystickInstanceID(joystick);
-    assert(joy_instance_id >= 0);
-    if (joy_instance_id == instance_id) {
+    if (controller.instance_id == instance_id) {
       return i;
     }
   }
@@ -654,15 +685,298 @@ SDLInputDriver::ControllerState* SDLInputDriver::GetControllerState(
   return controller;
 }
 
+bool SDLInputDriver::HasAnyControllerLocked() const {
+  for (const auto& controller : controllers_) {
+    if (controller.sdl) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void SDLInputDriver::UpdateKeyboardCapabilities(X_INPUT_CAPABILITIES* out_caps) {
+  std::memset(out_caps, 0, sizeof(*out_caps));
+  out_caps->type = 0x01;      // XINPUT_DEVTYPE_GAMEPAD
+  out_caps->sub_type = 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
+  out_caps->flags = 0;
+  out_caps->gamepad.buttons = 0xFFFF;
+  out_caps->gamepad.left_trigger = 0xFF;
+  out_caps->gamepad.right_trigger = 0xFF;
+  out_caps->gamepad.thumb_lx = static_cast<int16_t>(0xFFFFu);
+  out_caps->gamepad.thumb_ly = static_cast<int16_t>(0xFFFFu);
+  out_caps->gamepad.thumb_rx = static_cast<int16_t>(0xFFFFu);
+  out_caps->gamepad.thumb_ry = static_cast<int16_t>(0xFFFFu);
+  out_caps->vibration.left_motor_speed = 0;
+  out_caps->vibration.right_motor_speed = 0;
+}
+
+void SDLInputDriver::UpdateKeyboardKeyState(xe::ui::VirtualKey key,
+                                            bool is_down) {
+  uint16_t key_value = static_cast<uint16_t>(key);
+  if (key_value >= keyboard_key_state_.size()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(keyboard_mutex_);
+  keyboard_key_state_[key_value] = is_down ? 1 : 0;
+}
+
+bool SDLInputDriver::ReadKeyboardGamepad(X_INPUT_GAMEPAD* out_gamepad) {
+  if (!out_gamepad) {
+    return false;
+  }
+
+  std::array<uint8_t, 256> keys{};
+  {
+    std::lock_guard<std::mutex> lock(keyboard_mutex_);
+    keys = keyboard_key_state_;
+  }
+
+  auto key_down = [&](xe::ui::VirtualKey key) -> bool {
+    uint16_t key_value = static_cast<uint16_t>(key);
+    return key_value < keys.size() && keys[key_value] != 0;
+  };
+
+  X_INPUT_GAMEPAD gamepad = {};
+  uint16_t buttons = 0;
+  // D-pad (arrows)
+  if (key_down(xe::ui::VirtualKey::kUp)) {
+    buttons |= X_INPUT_GAMEPAD_DPAD_UP;
+  }
+  if (key_down(xe::ui::VirtualKey::kDown)) {
+    buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
+  }
+  if (key_down(xe::ui::VirtualKey::kLeft)) {
+    buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
+  }
+  if (key_down(xe::ui::VirtualKey::kRight)) {
+    buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
+  }
+
+  // Start/Back
+  if (key_down(xe::ui::VirtualKey::kReturn)) {
+    buttons |= X_INPUT_GAMEPAD_START;
+  }
+  if (key_down(xe::ui::VirtualKey::kBack) ||
+      key_down(xe::ui::VirtualKey::kEscape)) {
+    buttons |= X_INPUT_GAMEPAD_BACK;
+  }
+
+  // Face buttons
+  if (key_down(xe::ui::VirtualKey::kSpace)) {
+    buttons |= X_INPUT_GAMEPAD_A;
+  }
+  if (key_down(xe::ui::VirtualKey::kControl)) {
+    buttons |= X_INPUT_GAMEPAD_B;
+  }
+  if (key_down(xe::ui::VirtualKey::kMenu)) {
+    buttons |= X_INPUT_GAMEPAD_X;
+  }
+  if (key_down(xe::ui::VirtualKey::kShift)) {
+    buttons |= X_INPUT_GAMEPAD_Y;
+  }
+
+  // Shoulders
+  if (key_down(xe::ui::VirtualKey::kQ)) {
+    buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  }
+  if (key_down(xe::ui::VirtualKey::kE)) {
+    buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+  }
+
+  // Triggers
+  gamepad.left_trigger = key_down(xe::ui::VirtualKey::kZ) ? 0xFF : 0;
+  gamepad.right_trigger = key_down(xe::ui::VirtualKey::kC) ? 0xFF : 0;
+
+  // Thumb presses
+  if (key_down(xe::ui::VirtualKey::kF)) {
+    buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
+  }
+  if (key_down(xe::ui::VirtualKey::kG)) {
+    buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
+  }
+
+  auto axis_value = [&](bool negative, bool positive) -> int16_t {
+    if (negative == positive) {
+      return 0;
+    }
+    return negative ? std::numeric_limits<int16_t>::min()
+                    : std::numeric_limits<int16_t>::max();
+  };
+
+  // Left stick (WASD)
+  gamepad.thumb_lx = axis_value(key_down(xe::ui::VirtualKey::kA),
+                                key_down(xe::ui::VirtualKey::kD));
+  gamepad.thumb_ly = axis_value(key_down(xe::ui::VirtualKey::kS),
+                                key_down(xe::ui::VirtualKey::kW));
+  // Right stick (IJKL)
+  gamepad.thumb_rx = axis_value(key_down(xe::ui::VirtualKey::kJ),
+                                key_down(xe::ui::VirtualKey::kL));
+  gamepad.thumb_ry = axis_value(key_down(xe::ui::VirtualKey::kK),
+                                key_down(xe::ui::VirtualKey::kI));
+
+  gamepad.buttons = buttons;
+  *out_gamepad = gamepad;
+  return true;
+}
+
+void SDLInputDriver::OnKeyDown(xe::ui::KeyEvent& e) {
+  UpdateKeyboardKeyState(e.virtual_key(), true);
+}
+
+void SDLInputDriver::OnKeyUp(xe::ui::KeyEvent& e) {
+  UpdateKeyboardKeyState(e.virtual_key(), false);
+}
+
+X_RESULT SDLInputDriver::GetStateFromKeyboard(X_INPUT_STATE* out_state) {
+  if (!out_state) {
+    return X_ERROR_BAD_ARGUMENTS;
+  }
+
+  X_INPUT_GAMEPAD gamepad = {};
+  if (is_active()) {
+    ReadKeyboardGamepad(&gamepad);
+    if (cvars::sdl_keyboard_autostart) {
+      auto guest_now = Clock::QueryGuestUptimeMillis();
+      if (!keyboard_autostart_deadline_ms_) {
+        int32_t duration_ms = cvars::sdl_keyboard_autostart_ms;
+        if (duration_ms < 0) {
+          duration_ms = 0;
+        }
+        keyboard_autostart_deadline_ms_ =
+            guest_now + static_cast<uint64_t>(duration_ms);
+        if (cvars::log_sdl_keyboard_fallback && !logged_keyboard_autostart_) {
+          XELOGI("SDL HID: keyboard autostart active for {} ms", duration_ms);
+          logged_keyboard_autostart_ = true;
+        }
+      }
+      if (guest_now < keyboard_autostart_deadline_ms_) {
+        gamepad.buttons =
+            static_cast<uint16_t>(uint16_t(gamepad.buttons) |
+                                  X_INPUT_GAMEPAD_START);
+      }
+    }
+  } else {
+    keyboard_autostart_deadline_ms_ = 0;
+  }
+
+  if (keyboard_state_.is_active != is_active() ||
+      std::memcmp(&keyboard_state_.gamepad, &gamepad, sizeof(gamepad)) != 0) {
+    keyboard_state_.packet_number++;
+    keyboard_state_.gamepad = gamepad;
+    keyboard_state_.is_active = is_active();
+  }
+
+  out_state->packet_number = keyboard_state_.packet_number;
+  out_state->gamepad = gamepad;
+  if (!is_active()) {
+    std::memset(&out_state->gamepad, 0, sizeof(out_state->gamepad));
+  }
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT SDLInputDriver::GetKeystrokeFromKeyboard(
+    uint32_t user_index, X_INPUT_KEYSTROKE* out_keystroke, bool user_any) {
+  if (!out_keystroke) {
+    return X_ERROR_BAD_ARGUMENTS;
+  }
+
+  X_INPUT_GAMEPAD gamepad = {};
+  if (is_active()) {
+    ReadKeyboardGamepad(&gamepad);
+  }
+  uint32_t resolved_user = user_any ? 0 : user_index;
+  return GetKeystrokeFromGamepad(resolved_user, gamepad, is_active(),
+                                 out_keystroke);
+}
+
+X_RESULT SDLInputDriver::GetKeystrokeFromGamepad(
+    uint32_t user_index, const X_INPUT_GAMEPAD& gamepad, bool is_active,
+    X_INPUT_KEYSTROKE* out_keystroke) {
+  // If input is not active (e.g. due to a dialog overlay), force buttons to
+  // "unpressed". The algorithm will automatically send UP events when
+  // `is_active()` goes low and DOWN events when it goes high again.
+  const uint64_t curr_butts =
+      is_active ? (gamepad.buttons | AnalogToKeyfield(gamepad)) : uint64_t(0);
+  KeystrokeState& last = keystroke_states_.at(user_index);
+
+  // Handle repeating
+  auto guest_now = Clock::QueryGuestUptimeMillis();
+  static_assert(HID_SDL_REPEAT_DELAY >= HID_SDL_REPEAT_RATE);
+  if (last.repeat_state == RepeatState::Waiting &&
+      (last.repeat_time + HID_SDL_REPEAT_DELAY < guest_now)) {
+    last.repeat_state = RepeatState::Repeating;
+  }
+  if (last.repeat_state == RepeatState::Repeating &&
+      (last.repeat_time + HID_SDL_REPEAT_RATE < guest_now)) {
+    last.repeat_time = guest_now;
+    xe::ui::VirtualKey vk = kVkLookup.at(last.repeat_butt_idx);
+    assert_true(vk != xe::ui::VirtualKey::kNone);
+    out_keystroke->virtual_key = uint16_t(vk);
+    out_keystroke->unicode = 0;
+    out_keystroke->user_index = user_index;
+    out_keystroke->hid_code = 0;
+    out_keystroke->flags =
+        X_INPUT_KEYSTROKE_KEYDOWN | X_INPUT_KEYSTROKE_REPEAT;
+    return X_ERROR_SUCCESS;
+  }
+
+  auto butts_changed = curr_butts ^ last.buttons;
+  if (!butts_changed) {
+    return X_ERROR_EMPTY;
+  }
+
+  // First try to clear buttons with up events. This is to match xinput
+  // behaviour when transitioning thumb sticks, e.g. so that THUMB_UPLEFT is
+  // up before THUMB_LEFT is down.
+  for (auto [clear_pass, i] = std::tuple{true, 0}; i < 2;
+       clear_pass = false, i++) {
+    for (uint8_t idx = 0; idx < uint8_t(std::size(kVkLookup)); idx++) {
+      auto fbutton = uint64_t(1) << idx;
+      if (!(butts_changed & fbutton)) {
+        continue;
+      }
+      xe::ui::VirtualKey vk = kVkLookup.at(idx);
+      if (vk == xe::ui::VirtualKey::kNone) {
+        continue;
+      }
+
+      out_keystroke->virtual_key = uint16_t(vk);
+      out_keystroke->unicode = 0;
+      out_keystroke->user_index = user_index;
+      out_keystroke->hid_code = 0;
+
+      bool is_pressed = curr_butts & fbutton;
+      if (clear_pass && !is_pressed) {
+        // up
+        out_keystroke->flags = X_INPUT_KEYSTROKE_KEYUP;
+        last.buttons &= ~fbutton;
+        last.repeat_state = RepeatState::Idle;
+        return X_ERROR_SUCCESS;
+      }
+      if (!clear_pass && is_pressed) {
+        // down
+        out_keystroke->flags = X_INPUT_KEYSTROKE_KEYDOWN;
+        last.buttons |= fbutton;
+        last.repeat_state = RepeatState::Waiting;
+        last.repeat_butt_idx = idx;
+        last.repeat_time = guest_now;
+        return X_ERROR_SUCCESS;
+      }
+    }
+  }
+
+  return X_ERROR_EMPTY;
+}
+
 bool SDLInputDriver::TestSDLVersion() const {
 #if SDL_VERSION_ATLEAST(2, 0, 9)
   // SDL 2.0.9 or newer is required for simple rumble support and player
   // index.
-  constexpr Uint8 min_patchlevel = 9;
+  const Uint8 min_patchlevel = 9;
 #else
   // SDL 2.0.4 or newer is required to read game controller mappings from
   // file.
-  constexpr Uint8 min_patchlevel = 4;
+  const Uint8 min_patchlevel = 4;
 #endif
 
   SDL_version ver = {};
@@ -708,9 +1022,8 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
   }
 
   auto& c = state.caps;
-  c.type = 0x01;  // XINPUT_DEVTYPE_GAMEPAD
-  c.sub_type = static_cast<uint8_t>(SDL_JoystickGetType(
-      SDL_GameControllerGetJoystick(state.sdl)));  // XINPUT_DEVSUBTYPE_GAMEPAD
+  c.type = 0x01;      // XINPUT_DEVTYPE_GAMEPAD
+  c.sub_type = 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
   c.flags = cap_flags;
   c.gamepad.buttons =
       0xF3FF | (cvars::guide_button ? X_INPUT_GAMEPAD_GUIDE : 0x0);
@@ -732,8 +1045,24 @@ void SDLInputDriver::QueueControllerUpdate() {
   if (!is_queued) {
     window()->app_context().CallInUIThread([this]() {
       SDL_PumpEvents();
+      PollControllerEvents();
       sdl_pumpevents_queued_ = false;
     });
+  }
+}
+
+void SDLInputDriver::PollControllerEvents() {
+  std::array<SDL_Event, 64> events = {};
+  while (true) {
+    const int count =
+        SDL_PeepEvents(events.data(), static_cast<int>(events.size()),
+                       SDL_GETEVENT, SDL_JOYAXISMOTION, SDL_FINGERDOWN - 1);
+    if (count <= 0) {
+      break;
+    }
+    for (int i = 0; i < count; ++i) {
+      HandleEvent(events[i]);
+    }
   }
 }
 
