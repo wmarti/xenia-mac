@@ -268,6 +268,15 @@ filter({"platforms:Linux", "kind:*App"})
 
 if os.istarget("macosx") then
   filter("platforms:Mac-*")
+    buildoptions({
+      "-mmacosx-version-min=15.0",
+    })
+    linkoptions({
+      "-mmacosx-version-min=15.0",
+    })
+    xcodebuildsettings({
+      ["MACOSX_DEPLOYMENT_TARGET"] = "15.0",
+    })
     local qt_dir = os.getenv("QT_DIR")
     if not qt_dir then
       local brew_prefix = os.outputof("brew --prefix qt@6 2>/dev/null")
@@ -549,6 +558,7 @@ workspace("xenia")
   include("third_party/aes_128.lua")
   include("third_party/capstone.lua")
   include("third_party/dxbc.lua")
+  include("third_party/dxilconv.lua")
   include("third_party/discord-rpc.lua")
   include("third_party/cxxopts.lua")
   include("third_party/tomlplusplus.lua")
@@ -556,6 +566,8 @@ workspace("xenia")
   include("third_party/fmt.lua")
   include("third_party/glslang-spirv.lua")
   include("third_party/imgui.lua")
+  include("third_party/metal-shader-converter.lua")
+  include("third_party/metal-cpp.lua")
   include("third_party/miniaudio.lua")
   include("third_party/mspack.lua")
   include("third_party/snappy.lua")
@@ -648,6 +660,9 @@ workspace("xenia")
   include("src/xenia/cpu/backend/x64")
   include("src/xenia/debug/ui")
   include("src/xenia/gpu")
+  if os.istarget("macosx") then
+    include("src/xenia/gpu/metal")
+  end
   include("src/xenia/gpu/null")
   include("src/xenia/gpu/vulkan")
   include("src/xenia/hid")
@@ -656,6 +671,9 @@ workspace("xenia")
   include("src/xenia/kernel")
   include("src/xenia/patcher")
   include("src/xenia/ui")
+  if os.istarget("macosx") then
+    include("src/xenia/ui/metal")
+  end
   include("src/xenia/ui/vulkan")
   include("src/xenia/vfs")
 
