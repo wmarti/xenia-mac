@@ -537,6 +537,12 @@ class RenderTargetCache {
     return last_update_transfers_;
   }
 
+  const std::unordered_map<RenderTargetKey, RenderTarget*,
+                           RenderTargetKey::Hasher>&
+  render_targets() const {
+    return render_targets_;
+  }
+
   HostDepthStoreRenderTargetConstant GetHostDepthStoreRenderTargetConstant(
       uint32_t pitch_tiles, bool msaa_2x_supported) const {
     HostDepthStoreRenderTargetConstant constant;
