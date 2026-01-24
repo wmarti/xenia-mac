@@ -992,10 +992,10 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
 
     for (uint32_t slice = 0; slice < array_size; ++slice) {
       MetalLoadConstants constants = {};
-      constants.is_tiled_3d_endian_scale =
-          uint32_t(key.tiled) | (uint32_t(is_3d_tiling) << 1) |
-          (uint32_t(key.endianness) << 2) | (texture_resolution_scale_x << 4) |
-          (texture_resolution_scale_y << 7);
+    constants.is_tiled_3d_endian_scale =
+        uint32_t(key.tiled) | (uint32_t(is_3d_tiling) << 1) |
+        (uint32_t(key.endianness) << 2) | (texture_resolution_scale_x << 4) |
+        (texture_resolution_scale_y << 7);
       constants.guest_offset = level_guest_offset;
       if (!is_3d) {
         uint32_t slice_stride = level_guest_layout.array_slice_stride_bytes;
