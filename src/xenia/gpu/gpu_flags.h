@@ -13,6 +13,7 @@
 
 DECLARE_path(trace_gpu_prefix);
 DECLARE_bool(trace_gpu_stream);
+DECLARE_uint32(trace_debug_memory_base);
 
 DECLARE_path(dump_shaders);
 
@@ -32,6 +33,18 @@ DECLARE_bool(half_pixel_offset);
 DECLARE_int32(query_occlusion_sample_lower_threshold);
 
 DECLARE_int32(query_occlusion_sample_upper_threshold);
+
+DECLARE_bool(metal_shader_disk_cache);
+DECLARE_bool(metal_pipeline_binary_archive);
+DECLARE_bool(metal_pipeline_disk_cache);
+DECLARE_int32(metal_draw_ring_count);
+DECLARE_bool(metal_use_heaps);
+DECLARE_bool(metal_shared_memory_zero_copy);
+DECLARE_int32(metal_heap_min_bytes);
+DECLARE_bool(metal_texture_cache_use_private);
+DECLARE_bool(metal_texture_upload_via_blit);
+DECLARE_bool(metal_log_cache_stats);
+DECLARE_int32(metal_log_cache_stats_interval_seconds);
 
 DECLARE_bool(occlusion_query_enable);
 
