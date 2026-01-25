@@ -558,6 +558,10 @@ struct VECTOR_SHL_V128
   }
 
   static void EmitInt8(A64Emitter& e, const EmitArgType& i) {
+    QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1, i.src1.constant());
+    }
     if (i.src2.is_constant) {
       const auto& shamt = i.src2.constant();
       bool all_same = true;
@@ -569,19 +573,23 @@ struct VECTOR_SHL_V128
       }
       if (all_same) {
         // Every count is the same, so we can use SHL
-        e.SHL(i.dest.reg().B16(), i.src1.reg().B16(), shamt.u8[0] & 0x7);
+        e.SHL(i.dest.reg().B16(), src1.B16(), shamt.u8[0] & 0x7);
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
     } else {
       e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2));
     }
-    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1));
+    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, src1));
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateVectorShl<uint8_t>));
     e.MOV(i.dest.reg().B16(), Q0.B16());
   }
 
   static void EmitInt16(A64Emitter& e, const EmitArgType& i) {
+    QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1, i.src1.constant());
+    }
     if (i.src2.is_constant) {
       const auto& shamt = i.src2.constant();
       bool all_same = true;
@@ -593,19 +601,23 @@ struct VECTOR_SHL_V128
       }
       if (all_same) {
         // Every count is the same, so we can use SHL
-        e.SHL(i.dest.reg().H8(), i.src1.reg().H8(), shamt.u8[0] & 0xF);
+        e.SHL(i.dest.reg().H8(), src1.H8(), shamt.u8[0] & 0xF);
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
     } else {
       e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2));
     }
-    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1));
+    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, src1));
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateVectorShl<uint16_t>));
     e.MOV(i.dest.reg().B16(), Q0.B16());
   }
 
   static void EmitInt32(A64Emitter& e, const EmitArgType& i) {
+    QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1, i.src1.constant());
+    }
     if (i.src2.is_constant) {
       const auto& shamt = i.src2.constant();
       bool all_same = true;
@@ -617,14 +629,14 @@ struct VECTOR_SHL_V128
       }
       if (all_same) {
         // Every count is the same, so we can use SHL
-        e.SHL(i.dest.reg().S4(), i.src1.reg().S4(), shamt.u8[0] & 0x1F);
+        e.SHL(i.dest.reg().S4(), src1.S4(), shamt.u8[0] & 0x1F);
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
     } else {
       e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2));
     }
-    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1));
+    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, src1));
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateVectorShl<uint32_t>));
     e.MOV(i.dest.reg().B16(), Q0.B16());
   }
@@ -673,6 +685,10 @@ struct VECTOR_SHR_V128
   }
 
   static void EmitInt8(A64Emitter& e, const EmitArgType& i) {
+    QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1, i.src1.constant());
+    }
     if (i.src2.is_constant) {
       const auto& shamt = i.src2.constant();
       bool all_same = true;
@@ -684,19 +700,23 @@ struct VECTOR_SHR_V128
       }
       if (all_same) {
         // Every count is the same, so we can use USHR
-        e.USHR(i.dest.reg().B16(), i.src1.reg().B16(), shamt.u8[0] & 0x7);
+        e.USHR(i.dest.reg().B16(), src1.B16(), shamt.u8[0] & 0x7);
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
     } else {
       e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2));
     }
-    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1));
+    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, src1));
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateVectorShr<uint8_t>));
     e.MOV(i.dest.reg().B16(), Q0.B16());
   }
 
   static void EmitInt16(A64Emitter& e, const EmitArgType& i) {
+    QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1, i.src1.constant());
+    }
     if (i.src2.is_constant) {
       const auto& shamt = i.src2.constant();
       bool all_same = true;
@@ -708,19 +728,23 @@ struct VECTOR_SHR_V128
       }
       if (all_same) {
         // Every count is the same, so we can use USHR
-        e.USHR(i.dest.reg().H8(), i.src1.reg().H8(), shamt.u16[0] & 0xF);
+        e.USHR(i.dest.reg().H8(), src1.H8(), shamt.u16[0] & 0xF);
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
     } else {
       e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2));
     }
-    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1));
+    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, src1));
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateVectorShr<uint16_t>));
     e.MOV(i.dest.reg().B16(), Q0.B16());
   }
 
   static void EmitInt32(A64Emitter& e, const EmitArgType& i) {
+    QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1, i.src1.constant());
+    }
     if (i.src2.is_constant) {
       const auto& shamt = i.src2.constant();
       bool all_same = true;
@@ -732,14 +756,14 @@ struct VECTOR_SHR_V128
       }
       if (all_same) {
         // Every count is the same, so we can use USHR
-        e.USHR(i.dest.reg().S4(), i.src1.reg().S4(), shamt.u32[0] & 0x1F);
+        e.USHR(i.dest.reg().S4(), src1.S4(), shamt.u32[0] & 0x1F);
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
     } else {
       e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2));
     }
-    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1));
+    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, src1));
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateVectorShr<uint32_t>));
     e.MOV(i.dest.reg().B16(), Q0.B16());
   }
@@ -769,6 +793,10 @@ struct VECTOR_SHA_V128
   }
 
   static void EmitInt8(A64Emitter& e, const EmitArgType& i) {
+    QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1, i.src1.constant());
+    }
     if (i.src2.is_constant) {
       const auto& shamt = i.src2.constant();
       bool all_same = true;
@@ -780,19 +808,23 @@ struct VECTOR_SHA_V128
       }
       if (all_same) {
         // Every count is the same, so we can use SSHR
-        e.SSHR(i.dest.reg().B16(), i.src1.reg().B16(), shamt.u8[0] & 0x7);
+        e.SSHR(i.dest.reg().B16(), src1.B16(), shamt.u8[0] & 0x7);
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
     } else {
       e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2));
     }
-    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1));
+    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, src1));
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateVectorShr<int8_t>));
     e.MOV(i.dest.reg().B16(), Q0.B16());
   }
 
   static void EmitInt16(A64Emitter& e, const EmitArgType& i) {
+    QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1, i.src1.constant());
+    }
     if (i.src2.is_constant) {
       const auto& shamt = i.src2.constant();
       bool all_same = true;
@@ -804,19 +836,23 @@ struct VECTOR_SHA_V128
       }
       if (all_same) {
         // Every count is the same, so we can use SSHR
-        e.SSHR(i.dest.reg().H8(), i.src1.reg().H8(), shamt.u16[0] & 0xF);
+        e.SSHR(i.dest.reg().H8(), src1.H8(), shamt.u16[0] & 0xF);
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
     } else {
       e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2));
     }
-    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1));
+    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, src1));
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateVectorShr<int16_t>));
     e.MOV(i.dest.reg().B16(), Q0.B16());
   }
 
   static void EmitInt32(A64Emitter& e, const EmitArgType& i) {
+    QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1, i.src1.constant());
+    }
     if (i.src2.is_constant) {
       const auto& shamt = i.src2.constant();
       bool all_same = true;
@@ -828,14 +864,14 @@ struct VECTOR_SHA_V128
       }
       if (all_same) {
         // Every count is the same, so we can use SSHR
-        e.SSHR(i.dest.reg().S4(), i.src1.reg().S4(), shamt.u32[0] & 0x1F);
+        e.SSHR(i.dest.reg().S4(), src1.S4(), shamt.u32[0] & 0x1F);
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
     } else {
       e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2));
     }
-    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1));
+    e.ADD(e.GetNativeParam(0), SP, e.StashV(0, src1));
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateVectorShr<int32_t>));
     e.MOV(i.dest.reg().B16(), Q0.B16());
   }
@@ -1030,11 +1066,14 @@ struct EXTRACT_I32
         vec128b(15, 14, 13, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
     };
     if (i.src2.is_constant) {
-      e.UMOV(i.dest, i.src1.reg().Selem()[VEC128_D(i.src2.constant())]);
-    } else {
-      QReg src1 = i.src1.reg();
+      QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
       if (i.src1.is_constant) {
-        src1 = Q1;
+        e.LoadConstantV(src1, i.src1.constant());
+      }
+      e.UMOV(i.dest, src1.Selem()[VEC128_D(i.src2.constant())]);
+    } else {
+      QReg src1 = i.src1.is_constant ? Q1 : i.src1.reg();
+      if (i.src1.is_constant) {
         e.LoadConstantV(src1, i.src1.constant());
       }
 
@@ -1379,9 +1418,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitD3DCOLOR(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
-    QReg src = i.src1;
+    QReg src = i.src1.is_constant ? i.dest.reg() : i.src1.reg();
     if (i.src1.is_constant) {
-      src = i.dest;
       e.LoadConstantV(src, i.src1.constant());
     }
 
@@ -1552,9 +1590,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       return;
     }
 
-    QReg src = i.src1;
+    QReg src = i.src1.is_constant ? i.dest.reg() : i.src1.reg();
     if (i.src1.is_constant) {
-      src = i.dest;
       e.LoadConstantV(src, i.src1.constant());
     } else {
       // Copy src to dest if they're different registers
@@ -1597,9 +1634,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       return;
     }
 
-    QReg src = i.src1;
+    QReg src = i.src1.is_constant ? i.dest.reg() : i.src1.reg();
     if (i.src1.is_constant) {
-      src = i.dest;
       e.LoadConstantV(src, i.src1.constant());
     } else {
       // Copy src to dest if they're different registers
@@ -1677,9 +1713,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   static void EmitULONG_4202020(A64Emitter& e, const EmitArgType& i) {
     // XYZ are 20 bits, signed and saturated.
     // W is 4 bits, unsigned and saturated.
-    QReg src = i.src1;
+    QReg src = i.src1.is_constant ? i.dest.reg() : i.src1.reg();
     if (i.src1.is_constant) {
-      src = i.dest;
       e.LoadConstantV(src, i.src1.constant());
     }
     const XReg VConstData = X3;

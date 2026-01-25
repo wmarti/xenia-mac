@@ -533,12 +533,14 @@ struct Sequence {
   template <typename REG = QReg, typename FN>
   static void EmitCommutativeBinaryVOp(A64Emitter& e, const EmitArgType& i,
                                        const FN& fn) {
-    if (i.src1.is_constant) {
-      assert_true(!i.src2.is_constant);
+    if (i.src1.is_constant && i.src2.is_constant) {
+      e.LoadConstantV(Q0, i.src1.constant());
+      e.LoadConstantV(Q1, i.src2.constant());
+      fn(e, i.dest, REG(0), REG(1));
+    } else if (i.src1.is_constant) {
       e.LoadConstantV(Q0, i.src1.constant());
       fn(e, i.dest, REG(0), i.src2);
     } else if (i.src2.is_constant) {
-      assert_true(!i.src1.is_constant);
       e.LoadConstantV(Q0, i.src2.constant());
       fn(e, i.dest, i.src1, REG(0));
     } else {
@@ -549,12 +551,14 @@ struct Sequence {
   template <typename REG = QReg, typename FN>
   static void EmitAssociativeBinaryVOp(A64Emitter& e, const EmitArgType& i,
                                        const FN& fn) {
-    if (i.src1.is_constant) {
-      assert_true(!i.src2.is_constant);
+    if (i.src1.is_constant && i.src2.is_constant) {
+      e.LoadConstantV(Q0, i.src1.constant());
+      e.LoadConstantV(Q1, i.src2.constant());
+      fn(e, i.dest, REG(0), REG(1));
+    } else if (i.src1.is_constant) {
       e.LoadConstantV(Q0, i.src1.constant());
       fn(e, i.dest, REG(0), i.src2);
     } else if (i.src2.is_constant) {
-      assert_true(!i.src1.is_constant);
       e.LoadConstantV(Q0, i.src2.constant());
       fn(e, i.dest, i.src1, REG(0));
     } else {
