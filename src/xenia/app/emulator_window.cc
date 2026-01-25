@@ -649,14 +649,19 @@ void EmulatorWindow::EmulatorWindowListener::OnClosing(ui::UIEvent& e) {
       }
 #else
 #if XE_PLATFORM_MAC
+      // Build arg_storage first, then create argv pointers to avoid
+      // dangling pointers from vector reallocation.
       std::vector<std::string> arg_storage;
-      std::vector<char*> argv;
       arg_storage.push_back(executable_path.string());
-      argv.push_back(arg_storage.back().data());
 
       if (!cvars::config.empty()) {
         arg_storage.push_back("--config=" + cvars::config);
-        argv.push_back(arg_storage.back().data());
+      }
+
+      std::vector<char*> argv;
+      argv.reserve(arg_storage.size() + 1);
+      for (auto& arg : arg_storage) {
+        argv.push_back(arg.data());
       }
       argv.push_back(nullptr);
 
@@ -2450,25 +2455,28 @@ void EmulatorWindow::LaunchTitleInNewProcess(
   CloseHandle(pi.hThread);
 #else
 #if XE_PLATFORM_MAC
+  // Build arg_storage first, then create argv pointers to avoid
+  // dangling pointers from vector reallocation.
   std::vector<std::string> arg_storage;
-  std::vector<char*> argv;
   arg_storage.push_back(executable_path.string());
-  argv.push_back(arg_storage.back().data());
 
   // Pass the config file if one is being used
   if (!cvars::config.empty()) {
     arg_storage.push_back("--config=" + cvars::config);
-    argv.push_back(arg_storage.back().data());
   }
 
   // Tell game process to return to UI when it exits
   arg_storage.push_back("--return_to_ui=true");
-  argv.push_back(arg_storage.back().data());
 
   // Add the target game file
   if (!path_to_file.empty()) {
     arg_storage.push_back(path_to_file.string());
-    argv.push_back(arg_storage.back().data());
+  }
+
+  std::vector<char*> argv;
+  argv.reserve(arg_storage.size() + 1);
+  for (auto& arg : arg_storage) {
+    argv.push_back(arg.data());
   }
   argv.push_back(nullptr);
 
