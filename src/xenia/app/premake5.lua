@@ -89,6 +89,10 @@ project("xenia-app")
     links({
       "xenia-cpu-backend-x64",
     })
+  filter("architecture:arm64")
+    links({
+      "xenia-cpu-backend-a64",
+    })
 
   -- TODO(Triang3l): The emulator itself on Android.
   filter("platforms:not Android-*")
@@ -127,8 +131,6 @@ project("xenia-app")
   -- macOS: Use Metal backend instead of Vulkan.
   filter("platforms:Mac-*")
     removelinks({
-      "xenia-app-discord",
-      "discord-rpc",
       "xenia-gpu-vulkan",
       "xenia-ui-vulkan",
     })
@@ -138,6 +140,7 @@ project("xenia-app")
       "metal-cpp",
       "metalirconverter",
       "dxilconv",
+      "LLVMDxcSupport",
       "SDL2",
       "Cocoa.framework",
       "CoreFoundation.framework",
@@ -148,19 +151,43 @@ project("xenia-app")
     })
     libdirs({
       metal_converter_libdir,
-      "/usr/local/lib",
     })
-    runpathdirs({
-      "@executable_path/../Frameworks",
-      metal_converter_libdir,
-      "/usr/local/lib",
+    linkoptions({
+      "-Wl,-rpath,@executable_path/../Frameworks",
     })
   filter({"platforms:Mac-*", "architecture:arm64"})
-    libdirs({ dxilconv_libdir_arm64 })
-    runpathdirs({ dxilconv_libdir_arm64 })
+    libdirs({ dxilconv_libdir_arm64, "/opt/homebrew/lib" })
+    runpathdirs({ dxilconv_libdir_arm64, "/opt/homebrew/lib" })
+    linkoptions({
+      path.getabsolute(path.join(dxilconv_libdir_arm64, "libdxilconv.dylib")),
+    })
+    -- Copy dylibs to app bundle Frameworks folder
+    local app_frameworks = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Frameworks"
+    local app_executable = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/MacOS/xenia"
+    postbuildcommands({
+      'mkdir -p "' .. app_frameworks .. '"',
+      'cp -f "' .. path.getabsolute(path.join(metal_converter_libdir, "libmetalirconverter.dylib")) .. '" "' .. app_frameworks .. '/"',
+      'cp -f "' .. path.getabsolute(path.join(dxilconv_libdir_arm64, "libdxilconv.dylib")) .. '" "' .. app_frameworks .. '/"',
+      'codesign --force --sign - "' .. app_frameworks .. '/libmetalirconverter.dylib"',
+      'codesign --force --sign - "' .. app_frameworks .. '/libdxilconv.dylib"',
+    })
   filter({"platforms:Mac-*", "architecture:x86_64"})
-    libdirs({ dxilconv_libdir_x86_64 })
-    runpathdirs({ dxilconv_libdir_x86_64 })
+    libdirs({ dxilconv_libdir_x86_64, "/usr/local/lib" })
+    runpathdirs({ dxilconv_libdir_x86_64, "/usr/local/lib" })
+    removelinks({ "LLVMDxcSupport" })
+    linkoptions({
+      path.getabsolute(path.join(dxilconv_libdir_x86_64, "libLLVMDxcSupport.a")),
+    })
+    -- Copy dylibs to app bundle Frameworks folder
+    local app_frameworks_x86 = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Frameworks"
+    postbuildcommands({
+      'mkdir -p "' .. app_frameworks_x86 .. '"',
+      'cp -f "' .. path.getabsolute(path.join(metal_converter_libdir, "libmetalirconverter.dylib")) .. '" "' .. app_frameworks_x86 .. '/"',
+      'cp -f "' .. path.getabsolute(path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")) .. '" "' .. app_frameworks_x86 .. '/"',
+      'codesign --force --sign - "' .. app_frameworks_x86 .. '/libmetalirconverter.dylib"',
+      'codesign --force --sign - "' .. app_frameworks_x86 .. '/libdxilconv.dylib"',
+    })
+  filter({})
 
   filter("platforms:Windows")
     links({
