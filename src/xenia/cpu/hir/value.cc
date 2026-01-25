@@ -289,22 +289,32 @@ bool Value::Add(Value* other) {
 #define ADD_DID_CARRY(a, b) CHECK_DID_CARRY(a, b)
   assert_true(type == other->type);
   bool did_carry = false;
+  // Use unsigned arithmetic to avoid undefined behavior on signed overflow.
+  // Emulation requires wrap-around semantics.
   switch (type) {
     case INT8_TYPE:
       did_carry = ADD_DID_CARRY(constant.i8, other->constant.i8);
-      constant.i8 += other->constant.i8;
+      constant.i8 =
+          static_cast<int8_t>(static_cast<uint8_t>(constant.i8) +
+                              static_cast<uint8_t>(other->constant.i8));
       break;
     case INT16_TYPE:
       did_carry = ADD_DID_CARRY(constant.i16, other->constant.i16);
-      constant.i16 += other->constant.i16;
+      constant.i16 =
+          static_cast<int16_t>(static_cast<uint16_t>(constant.i16) +
+                               static_cast<uint16_t>(other->constant.i16));
       break;
     case INT32_TYPE:
       did_carry = ADD_DID_CARRY(constant.i32, other->constant.i32);
-      constant.i32 += other->constant.i32;
+      constant.i32 =
+          static_cast<int32_t>(static_cast<uint32_t>(constant.i32) +
+                               static_cast<uint32_t>(other->constant.i32));
       break;
     case INT64_TYPE:
       did_carry = ADD_DID_CARRY(constant.i64, other->constant.i64);
-      constant.i64 += other->constant.i64;
+      constant.i64 =
+          static_cast<int64_t>(static_cast<uint64_t>(constant.i64) +
+                               static_cast<uint64_t>(other->constant.i64));
       break;
     case FLOAT32_TYPE:
       constant.f32 += other->constant.f32;
@@ -323,26 +333,36 @@ bool Value::Sub(Value* other) {
 #define SUB_DID_CARRY(a, b) (b == 0 || a > (~(0 - b)))
   assert_true(type == other->type);
   bool did_carry = false;
+  // Use unsigned arithmetic to avoid undefined behavior on signed overflow.
+  // Emulation requires wrap-around semantics.
   switch (type) {
     case INT8_TYPE:
       did_carry =
           SUB_DID_CARRY(uint16_t(constant.i8), uint16_t(other->constant.i8));
-      constant.i8 -= other->constant.i8;
+      constant.i8 =
+          static_cast<int8_t>(static_cast<uint8_t>(constant.i8) -
+                              static_cast<uint8_t>(other->constant.i8));
       break;
     case INT16_TYPE:
       did_carry =
           SUB_DID_CARRY(uint16_t(constant.i16), uint16_t(other->constant.i16));
-      constant.i16 -= other->constant.i16;
+      constant.i16 =
+          static_cast<int16_t>(static_cast<uint16_t>(constant.i16) -
+                               static_cast<uint16_t>(other->constant.i16));
       break;
     case INT32_TYPE:
       did_carry =
           SUB_DID_CARRY(uint32_t(constant.i32), uint32_t(other->constant.i32));
-      constant.i32 -= other->constant.i32;
+      constant.i32 =
+          static_cast<int32_t>(static_cast<uint32_t>(constant.i32) -
+                               static_cast<uint32_t>(other->constant.i32));
       break;
     case INT64_TYPE:
       did_carry =
           SUB_DID_CARRY(uint64_t(constant.i64), uint64_t(other->constant.i64));
-      constant.i64 -= other->constant.i64;
+      constant.i64 =
+          static_cast<int64_t>(static_cast<uint64_t>(constant.i64) -
+                               static_cast<uint64_t>(other->constant.i64));
       break;
     case FLOAT32_TYPE:
       constant.f32 -= other->constant.f32;
@@ -359,18 +379,28 @@ bool Value::Sub(Value* other) {
 
 void Value::Mul(Value* other) {
   assert_true(type == other->type);
+  // Use unsigned arithmetic to avoid undefined behavior on signed overflow.
+  // Emulation requires wrap-around semantics.
   switch (type) {
     case INT8_TYPE:
-      constant.i8 *= other->constant.i8;
+      constant.i8 =
+          static_cast<int8_t>(static_cast<uint8_t>(constant.i8) *
+                              static_cast<uint8_t>(other->constant.i8));
       break;
     case INT16_TYPE:
-      constant.i16 *= other->constant.i16;
+      constant.i16 =
+          static_cast<int16_t>(static_cast<uint16_t>(constant.i16) *
+                               static_cast<uint16_t>(other->constant.i16));
       break;
     case INT32_TYPE:
-      constant.i32 *= other->constant.i32;
+      constant.i32 =
+          static_cast<int32_t>(static_cast<uint32_t>(constant.i32) *
+                               static_cast<uint32_t>(other->constant.i32));
       break;
     case INT64_TYPE:
-      constant.i64 *= other->constant.i64;
+      constant.i64 =
+          static_cast<int64_t>(static_cast<uint64_t>(constant.i64) *
+                               static_cast<uint64_t>(other->constant.i64));
       break;
     case FLOAT32_TYPE:
       constant.f32 *= other->constant.f32;
