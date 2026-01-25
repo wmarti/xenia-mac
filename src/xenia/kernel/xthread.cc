@@ -397,15 +397,17 @@ X_STATUS XThread::Create() {
   params.create_suspended = true;
 
   params.stack_size = 16_MiB;  // Allocate a big host stack.
-  thread_ = xe::threading::Thread::Create(params, [this]() {
+  // Copy thread name to avoid race with set_name() from another thread.
+  std::string thread_name_copy = thread_name_;
+  thread_ = xe::threading::Thread::Create(params, [this, thread_name_copy]() {
     // Set thread ID override. This is used by logging.
     xe::threading::set_current_thread_id(handle());
 
     // Set name immediately, if we have one.
-    thread_->set_name(thread_name_);
+    thread_->set_name(thread_name_copy);
 
     // Profiler needs to know about the thread.
-    xe::Profiler::ThreadEnter(thread_name_.c_str());
+    xe::Profiler::ThreadEnter(thread_name_copy.c_str());
 
     // Execute user code.
     current_xthread_tls_ = this;
@@ -625,11 +627,20 @@ void XThread::LeaveCriticalRegion() {
 
 void XThread::EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
                          uint32_t arg1, uint32_t arg2) {
-  // don't use thread_state_ -> context() ! we're not running on the thread
-  // we're enqueuing to
+  // Use the caller's PPCContext when available. Host threads (timer queue,
+  // IO completion, etc.) don't have a TLS-bound ThreadState, so fall back to
+  // the target thread's context to avoid null-context APC insertion.
+  cpu::ThreadState* caller_thread_state = cpu::ThreadState::Get();
+  cpu::ppc::PPCContext* context =
+      caller_thread_state
+          ? caller_thread_state->context()
+          : (thread_state_ ? thread_state_->context() : nullptr);
+  if (!context) {
+    XELOGE("XThread::EnqueueApc: no PPCContext available");
+    return;
+  }
   uint32_t success = xboxkrnl::xeNtQueueApcThread(
-      this->handle(), normal_routine, normal_context, arg1, arg2,
-      cpu::ThreadState::Get()->context());
+      this->handle(), normal_routine, normal_context, arg1, arg2, context);
 
   xenia_assert(success == X_STATUS_SUCCESS);
 }
