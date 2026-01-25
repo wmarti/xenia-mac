@@ -3,10 +3,6 @@ project("discord-rpc")
   uuid("012f6131-efc0-4abd-852d-a33640732d4c")
   kind("StaticLib")
   language("C++")
-  defines({
-    "RAPIDJSON_SSE42",
-  --  "RAPIDJSON_NEON",
-  })
   includedirs({
     "discord-rpc/include",
     "rapidjson/include"
@@ -20,13 +16,22 @@ project("discord-rpc")
     "discord-rpc/src/serialization.cpp",
     "discord-rpc/src/serialization.h"
   })
+
+  -- x86_64 uses SSE4.2, ARM64 uses NEON for rapidjson SIMD
+  filter("architecture:x86_64")
+    defines({ "RAPIDJSON_SSE42" })
+  filter("architecture:ARM64")
+    defines({ "RAPIDJSON_NEON" })
+  filter({})
+
   filter("platforms:Linux")
     files({
       "discord-rpc/src/connection_unix.cpp",
       "discord-rpc/src/discord_register_linux.cpp"
     })
-  filter("platforms:Mac")
+  filter("platforms:Mac-*")
     files({
+      "discord-rpc/src/connection_unix.cpp",
       "discord-rpc/src/discord_register_osx.m"
     })
   filter("platforms:Windows")
