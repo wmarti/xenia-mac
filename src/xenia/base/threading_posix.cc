@@ -616,7 +616,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
         signaled_(false),
         exit_code_(0),
         state_(State::kUninitialized),
-        suspend_count_(0) {
+        suspend_count_(0),
+        joined_(false) {
 #if XE_PLATFORM_ANDROID
     android_pre_api_26_name_[0] = '\0';
 #endif
@@ -657,7 +658,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
         signaled_(false),
         exit_code_(0),
         state_(State::kRunning),
-        suspend_count_(0) {
+        suspend_count_(0),
+        joined_(false) {
 #if XE_PLATFORM_ANDROID
     android_pre_api_26_name_[0] = '\0';
 #endif
@@ -958,7 +960,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   static void* ThreadStartRoutine(void* parameter);
   bool signaled() const override { return signaled_; }
   void post_execution() override {
-    if (thread_) {
+    if (thread_ && !joined_) {
+      joined_ = true;
       pthread_join(thread_, nullptr);
     }
   }
@@ -967,6 +970,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   int exit_code_;
   State state_;             // Protected by state_mutex_
   uint32_t suspend_count_;  // Protected by state_mutex_
+  bool joined_;             // Prevents double pthread_join
   mutable std::mutex state_mutex_;
   mutable std::mutex callback_mutex_;
   mutable std::condition_variable state_signal_;
@@ -1216,6 +1220,7 @@ class PosixThread final : public PosixConditionHandle<Thread> {
 
   void set_name(std::string name) override {
     handle_.WaitStarted();
+    std::lock_guard lock(name_mutex_);
     Thread::set_name(name);
     if (name.length() > 15) {
       name = name.substr(0, 15);
@@ -1250,6 +1255,9 @@ class PosixThread final : public PosixConditionHandle<Thread> {
   void Terminate(int exit_code) override { handle_.Terminate(exit_code); }
 
   void WaitSuspended() { handle_.WaitSuspended(); }
+
+ private:
+  mutable std::mutex name_mutex_;
 };
 
 thread_local PosixThread* current_thread_ = nullptr;
