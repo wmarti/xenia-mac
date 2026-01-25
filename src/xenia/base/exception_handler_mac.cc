@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <ucontext.h>
 #include <cstdint>
+#include <cstring>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/host_thread_context.h"
@@ -39,7 +40,16 @@ std::pair<ExceptionHandler::Handler, void*> handlers_[kMaxHandlerCount];
 
 static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                                      void* signal_context) {
+#if XE_ARCH_ARM64
+  // On ARM64, ucontext_t requires 16-byte alignment but the kernel may provide
+  // an unaligned pointer in the signal handler. Copy to an aligned local to
+  // avoid undefined behavior from misaligned access.
+  alignas(16) ucontext_t ucontext_storage;
+  std::memcpy(&ucontext_storage, signal_context, sizeof(ucontext_t));
+  ucontext_t* ucontext = &ucontext_storage;
+#else
   ucontext_t* ucontext = reinterpret_cast<ucontext_t*>(signal_context);
+#endif
   mcontext_t& mcontext = ucontext->uc_mcontext;
 
   HostThreadContext thread_context;
@@ -144,6 +154,8 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
         mcontext->__ns.__fpsr = thread_context.fpsr;
         mcontext->__ns.__fpcr = thread_context.fpcr;
       }
+      // Copy modified context back to the original signal context
+      std::memcpy(signal_context, ucontext, sizeof(ucontext_t));
 #endif  // XE_ARCH_ARM64
       return;
     }
