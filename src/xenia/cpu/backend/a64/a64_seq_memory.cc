@@ -64,8 +64,9 @@ XReg ComputeMemoryAddressOffset(A64Emitter& e, const T& guest, const T& offset,
       // TODO(benvanik): find a way to avoid doing this.
       e.MOV(W0, guest.reg().toW());
     }
-    e.MOV(X1, offset_const);
-    e.ADD(X0, X0, X1);
+    // Guest addresses are 32-bit and wrap on addition.
+    e.MOV(W1, offset_const);
+    e.ADD(W0, W0, W1);
 
     e.ADD(address_register.toX(), e.GetMembaseReg(), X0);
     return address_register.toX();
