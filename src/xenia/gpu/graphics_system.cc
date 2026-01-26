@@ -247,16 +247,16 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
 }
 
 void GraphicsSystem::Shutdown() {
-  if (command_processor_) {
-    EndTracing();
-    command_processor_->Shutdown();
-    command_processor_.reset();
-  }
-
   if (frame_limiter_worker_thread_) {
     frame_limiter_worker_running_ = false;
     frame_limiter_worker_thread_->Wait(0, 0, 0, nullptr);
     frame_limiter_worker_thread_.reset();
+  }
+
+  if (command_processor_) {
+    EndTracing();
+    command_processor_->Shutdown();
+    command_processor_.reset();
   }
 
   if (presenter_) {
