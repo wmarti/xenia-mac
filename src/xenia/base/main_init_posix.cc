@@ -12,6 +12,7 @@
 
 #include "xenia/ui/window_gtk.h"
 
+#if XE_ARCH_AMD64 == 1
 class StartupCpuFeatureCheck {
  public:
   StartupCpuFeatureCheck() {
@@ -36,11 +37,14 @@ class StartupCpuFeatureCheck {
     }
   }
 };
+#endif  // XE_ARCH_AMD64 == 1
 
 // This is a hack to get an instance of StartupAvxCheck
 // constructed before any initialization code,
 // where the AVX check then happens in the constructor.
 // Ref:
 // https://reviews.llvm.org/D12689#243295
+#if XE_ARCH_AMD64 == 1
 __attribute__((
     init_priority(101))) static StartupCpuFeatureCheck gStartupAvxCheck;
+#endif  // XE_ARCH_AMD64 == 1

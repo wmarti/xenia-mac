@@ -1438,8 +1438,16 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
       *old_protect = page_table_[start_page_number].current_protect;
     }
 #else
-    XELOGW("BaseHeap::Protect: ignoring request as not 4k page aligned");
-    return false;
+    if (xe_page_size > page_size_) {
+      XELOGW(
+          "BaseHeap::Protect: unaligned to host page size; skipping mprotect");
+      if (old_protect) {
+        *old_protect = page_table_[start_page_number].current_protect;
+      }
+    } else {
+      XELOGW("BaseHeap::Protect: ignoring request as not 4k page aligned");
+      return false;
+    }
 #endif
   }
 

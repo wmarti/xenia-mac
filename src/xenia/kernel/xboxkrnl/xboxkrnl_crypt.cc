@@ -8,6 +8,7 @@
 */
 
 #include <algorithm>
+#include <vector>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
@@ -18,6 +19,9 @@
 
 #ifdef XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"  // for bcrypt.h
+#endif
+#ifdef XE_PLATFORM_LINUX
+#include <openssl/bn.h>
 #endif
 
 #include "third_party/crypto/TinySHA1.hpp"
@@ -419,11 +423,83 @@ dword_result_t XeCryptBnQwNeRsaPubCrypt_entry(pointer_t<uint64_t> qw_a,
                                               pointer_t<XECRYPT_RSA> rsa) {
   // 0 indicates failure (but not a BOOL return value)
 #ifndef XE_PLATFORM_WIN32
+#if defined(XE_PLATFORM_LINUX)
+  uint32_t modulus_size = rsa->size * 8;
+
+  std::vector<uint64_t> modulus_words(rsa->size);
+  uint64_t* xecrypt_modulus = reinterpret_cast<uint64_t*>(&rsa[1]);
+  std::reverse_copy(xecrypt_modulus, xecrypt_modulus + rsa->size,
+                    modulus_words.data());
+
+  BIGNUM* modulus =
+      BN_bin2bn(reinterpret_cast<const unsigned char*>(modulus_words.data()),
+                modulus_size, nullptr);
+  if (!modulus) {
+    XELOGE("XeCryptBnQwNeRsaPubCrypt: BN_bin2bn modulus failed!");
+    return 0;
+  }
+
+  BIGNUM* exponent = BN_new();
+  if (!exponent || !BN_set_word(exponent, rsa->public_exponent.value)) {
+    XELOGE("XeCryptBnQwNeRsaPubCrypt: BN_set_word exponent failed!");
+    BN_free(modulus);
+    BN_free(exponent);
+    return 0;
+  }
+
+  std::vector<uint64_t> input_words(rsa->size);
+  xe::copy_and_swap<uint64_t>(input_words.data(), qw_a, rsa->size);
+  uint8_t* input_bytes = reinterpret_cast<uint8_t*>(input_words.data());
+  std::reverse(input_bytes, input_bytes + modulus_size);
+
+  BIGNUM* input = BN_bin2bn(input_bytes, modulus_size, nullptr);
+  if (!input) {
+    XELOGE("XeCryptBnQwNeRsaPubCrypt: BN_bin2bn input failed!");
+    BN_free(modulus);
+    BN_free(exponent);
+    return 0;
+  }
+
+  BN_CTX* ctx = BN_CTX_new();
+  BIGNUM* output = BN_new();
+  if (!ctx || !output || !BN_mod_exp(output, input, exponent, modulus, ctx)) {
+    XELOGE("XeCryptBnQwNeRsaPubCrypt: BN_mod_exp failed!");
+    BN_CTX_free(ctx);
+    BN_free(output);
+    BN_free(input);
+    BN_free(exponent);
+    BN_free(modulus);
+    return 0;
+  }
+
+  std::vector<uint64_t> output_words(rsa->size);
+  uint8_t* output_bytes = reinterpret_cast<uint8_t*>(output_words.data());
+  if (BN_bn2binpad(output, output_bytes, modulus_size) !=
+      static_cast<int>(modulus_size)) {
+    XELOGE("XeCryptBnQwNeRsaPubCrypt: BN_bn2binpad failed!");
+    BN_CTX_free(ctx);
+    BN_free(output);
+    BN_free(input);
+    BN_free(exponent);
+    BN_free(modulus);
+    return 0;
+  }
+
+  std::reverse(output_bytes, output_bytes + modulus_size);
+  xe::copy_and_swap<uint64_t>(qw_b, output_words.data(), rsa->size);
+
+  BN_CTX_free(ctx);
+  BN_free(output);
+  BN_free(input);
+  BN_free(exponent);
+  BN_free(modulus);
+  return 1;
+#else
   XELOGE(
       "XeCryptBnQwNeRsaPubCrypt called but no implementation available for "
       "this platform!");
-  assert_always();
-  return 1;
+#endif
+  return 0;
 #else
   uint32_t modulus_size = rsa->size * 8;
 
@@ -511,7 +587,7 @@ dword_result_t XeCryptBnQwNeRsaPubCrypt_entry(pointer_t<uint64_t> qw_a,
   return BCRYPT_SUCCESS(status) ? 1 : 0;
 #endif
 }
-#ifdef XE_PLATFORM_WIN32
+#if defined(XE_PLATFORM_WIN32) || defined(XE_PLATFORM_LINUX)
 DECLARE_XBOXKRNL_EXPORT1(XeCryptBnQwNeRsaPubCrypt, kNone, kImplemented);
 #else
 DECLARE_XBOXKRNL_EXPORT1(XeCryptBnQwNeRsaPubCrypt, kNone, kStub);
@@ -869,6 +945,20 @@ dword_result_t XeKeysGetConsoleType_entry(lpdword_t type_out) {
 }
 
 DECLARE_XBOXKRNL_EXPORT1(XeKeysGetConsoleType, kNone, kImplemented);
+
+dword_result_t XeKeysConsolePrivateKeySign_entry(const ppc_context_t& ctx) {
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    XELOGW(
+        "XeKeysConsolePrivateKeySign stub: r3=0x{:08X} r4=0x{:08X} "
+        "r5=0x{:08X} r6=0x{:08X}",
+        uint32_t(ctx->r[3]), uint32_t(ctx->r[4]), uint32_t(ctx->r[5]),
+        uint32_t(ctx->r[6]));
+  }
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(XeKeysConsolePrivateKeySign, kNone, kStub);
 
 }  // namespace xboxkrnl
 }  // namespace kernel

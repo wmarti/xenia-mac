@@ -236,9 +236,30 @@ bool Protect(void* base_address, size_t length, PageAccess access,
     QueryProtect(base_address, length_copy, *out_old_access);
   }
 
+  const size_t host_page_size = page_size();
+  if (host_page_size > 0x1000) {
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(base_address);
+    const size_t page_mask = host_page_size - 1;
+    if ((addr & page_mask) != 0 || (length & page_mask) != 0) {
+      XELOGW(
+          "mprotect skipped for unaligned host page size addr=0x{:X} "
+          "len=0x{:X} host_page=0x{:X}",
+          addr, length, host_page_size);
+      return true;
+    }
+  }
+
   uint32_t prot = ToPosixProtectFlags(access);
   if (mprotect(base_address, length, prot) != 0) {
     const int err = errno;
+    if (err == EINVAL && host_page_size > 0x1000) {
+      XELOGW(
+          "mprotect failed for host page size addr=0x{:X} len=0x{:X} "
+          "prot=0x{:X} err={} ({}); skipping",
+          reinterpret_cast<uintptr_t>(base_address), length, prot, err,
+          std::strerror(err));
+      return true;
+    }
     XELOGE("mprotect failed addr=0x{:X} len=0x{:X} prot=0x{:X} err={} ({})",
            reinterpret_cast<uintptr_t>(base_address), length, prot, err,
            std::strerror(err));

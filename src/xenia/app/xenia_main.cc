@@ -526,12 +526,12 @@ bool EmulatorApp::OnInitialize() {
   cache_root = std::filesystem::absolute(cache_root);
   XELOGI("Host cache root: {}", cache_root);
 
-#if !XE_PLATFORM_MAC
+#if !XE_PLATFORM_MAC && XE_ARCH_AMD64 == 1
   if (cvars::discord) {
     discord::DiscordPresence::Initialize();
     discord::DiscordPresence::NotPlaying();
   }
-#endif  // !XE_PLATFORM_MAC
+#endif  // !XE_PLATFORM_MAC && XE_ARCH_AMD64 == 1
 
   // Create the emulator but don't initialize so we can setup the window.
   emulator_ =
@@ -560,11 +560,11 @@ bool EmulatorApp::OnInitialize() {
 void EmulatorApp::OnDestroy() {
   ShutdownEmulatorThreadFromUIThread();
 
-#if !XE_PLATFORM_MAC
+#if !XE_PLATFORM_MAC && XE_ARCH_AMD64 == 1
   if (cvars::discord) {
     discord::DiscordPresence::Shutdown();
   }
-#endif  // !XE_PLATFORM_MAC
+#endif  // !XE_PLATFORM_MAC && XE_ARCH_AMD64 == 1
 
   Profiler::Dump();
   // The profiler needs to shut down before the graphics context.
@@ -696,12 +696,12 @@ void EmulatorApp::EmulatorThread() {
   }
 
   emulator_->on_launch.AddListener([&](auto title_id, const auto& game_title) {
-#if !XE_PLATFORM_MAC
+#if !XE_PLATFORM_MAC && XE_ARCH_AMD64 == 1
     if (cvars::discord) {
       discord::DiscordPresence::PlayingTitle(
           game_title.empty() ? "Unknown Title" : std::string(game_title));
     }
-#endif  // !XE_PLATFORM_MAC
+#endif  // !XE_PLATFORM_MAC && XE_ARCH_AMD64 == 1
     app_context().CallInUIThread([this]() { emulator_window_->UpdateTitle(); });
     emulator_thread_event_->Set();
   });
@@ -718,11 +718,11 @@ void EmulatorApp::EmulatorThread() {
   });
 
   emulator_->on_terminate.AddListener([]() {
-#if !XE_PLATFORM_MAC
+#if !XE_PLATFORM_MAC && XE_ARCH_AMD64 == 1
     if (cvars::discord) {
       discord::DiscordPresence::NotPlaying();
     }
-#endif  // !XE_PLATFORM_MAC
+#endif  // !XE_PLATFORM_MAC && XE_ARCH_AMD64 == 1
   });
 
   // Enable emulator input now that the emulator is properly loaded.
