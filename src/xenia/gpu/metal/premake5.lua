@@ -150,17 +150,11 @@ project("xenia-gpu-metal-trace-viewer")
     "metal_trace_viewer_main.cc",
   }
 
-  -- Check if mac-specific file exists, otherwise use posix
-  local mac_main = path.join("..", "..", "ui", "windowed_app_main_mac.cc")
-  local posix_main = path.join("..", "..", "ui",
-                               "windowed_app_main_posix.cc")
+  -- Use the Qt entrypoint for macOS builds.
+  local qt_main = path.join("..", "..", "ui", "windowed_app_main_qt.cc")
 
   filter "system:macosx"
-    if os.isfile(path.join(project_root, "src/xenia/ui/windowed_app_main_mac.cc")) then
-      files { mac_main }
-    else
-      files { posix_main }
-    end
+    files { qt_main }
   filter "not system:macosx"
     removefiles "**"
   filter {}

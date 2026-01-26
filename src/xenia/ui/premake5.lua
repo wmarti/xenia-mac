@@ -17,7 +17,6 @@ project("xenia-ui")
 
   filter("platforms:Mac-*")
     files({
-      "file_picker_mac.mm",
       "surface_mac.mm",
     })
     removefiles({
