@@ -71,14 +71,14 @@ if enableMiscSubprojects then
         "xenia-cpu-backend-x64",
       })
 
-    filter("platforms:Linux")
+    filter("platforms:Linux-*")
       links({
         "X11",
         "xcb",
         "X11-xcb",
       })
 
-    filter("platforms:Windows")
+    filter("platforms:Windows-*")
       -- Only create the .user file if it doesn't already exist.
       local user_file = project_root.."/build/xenia-gpu-vulkan-trace-viewer.vcxproj.user"
       if not os.isfile(user_file) then
@@ -136,14 +136,14 @@ if enableMiscSubprojects then
         "xenia-cpu-backend-x64",
       })
 
-    filter("platforms:Linux")
+    filter("platforms:Linux-*")
       links({
         "X11",
         "xcb",
         "X11-xcb",
       })
 
-    filter("platforms:Windows")
+    filter("platforms:Windows-*")
       -- Only create the .user file if it doesn't already exist.
       local user_file = project_root.."/build/xenia-gpu-vulkan-trace-dump.vcxproj.user"
       if not os.isfile(user_file) then

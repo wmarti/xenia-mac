@@ -1,3 +1,7 @@
+if not os.istarget("macosx") then
+  return
+end
+
 group("third_party")
 project("metal-cpp")
   uuid("11c84c8d-bfa2-4b14-b832-4e85e9ca8e3b")

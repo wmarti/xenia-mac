@@ -22,12 +22,31 @@ newoption({
   trigger = "mac-x86_64",
   description = "Enable x86_64 platform on macOS ARM64 hosts",
 })
+newoption({
+  trigger = "arch",
+  value = "ARCH",
+  description = "Target architecture (x86_64 or arm64)",
+})
 
 enableTests = _OPTIONS["tests"] ~= nil
 enableMiscSubprojects = os.istarget("macosx")
 
--- Define an ARCH variable
--- Only use this to enable architecture-specific functionality.
+local function normalize_arch(arch)
+  if not arch then
+    return nil
+  end
+  arch = arch:lower()
+  if arch == "arm64" or arch == "aarch64" then
+    return "ARM64"
+  end
+  if arch == "x86_64" or arch == "x64" or arch == "x86" or arch == "amd64" then
+    return "x86_64"
+  end
+  return nil
+end
+
+-- Define an ARCH variable (host/target hint). Only use this to enable
+-- architecture-specific functionality.
 if os.istarget("linux") then
   ARCH = os.outputof("uname -p")
 else
@@ -62,6 +81,30 @@ function is_macos_arm64_host()
   return false
 end
 
+local function detect_target_arch()
+  local option_arch = normalize_arch(_OPTIONS["arch"])
+  if option_arch then
+    return option_arch
+  end
+  if os.istarget("macosx") then
+    if _OPTIONS["mac-x86_64"] then
+      return "x86_64"
+    end
+    return is_macos_arm64_host() and "ARM64" or "x86_64"
+  end
+  if os.istarget("linux") then
+    return normalize_arch(os.outputof("uname -m")) or "x86_64"
+  end
+  if os.istarget("windows") then
+    local env_arch = os.getenv("PROCESSOR_ARCHITEW6432") or
+                     os.getenv("PROCESSOR_ARCHITECTURE")
+    return normalize_arch(env_arch) or "x86_64"
+  end
+  return "x86_64"
+end
+
+TARGET_ARCH = detect_target_arch()
+
 includedirs({
   ".",
   "src",
@@ -81,6 +124,9 @@ cdialect("C17")
 cppdialect("C++20")
 symbols("On")
 fatalwarnings("All")
+filter("platforms:Linux-*")
+  removefatalwarnings("All")
+filter({})
 
 -- TODO(DrChat): Find a way to disable this on other architectures.
 if ARCH ~= "ppc64" then
@@ -108,17 +154,17 @@ filter("configurations:Checked")
     "DEBUG",
   })
 
-filter({"configurations:Checked", "platforms:Windows"}) -- "toolset:msc"
+filter({"configurations:Checked", "platforms:Windows-*"}) -- "toolset:msc"
   buildoptions({
     "/RTCsu",           -- Full Run-Time Checks.
   })
 
-filter({"configurations:Checked or Debug", "platforms:Linux"})
+filter({"configurations:Checked or Debug", "platforms:Linux-*"})
   defines({
     "_GLIBCXX_DEBUG",   -- libstdc++ debug mode
   })
 
-filter({"configurations:Checked or Debug", "platforms:Windows"}) -- "toolset:msc"
+filter({"configurations:Checked or Debug", "platforms:Windows-*"}) -- "toolset:msc"
   symbols("Full")
 
 filter("configurations:Debug")
@@ -148,10 +194,10 @@ filter("configurations:Release")
   -- (such as constant propagation) emulation as predictable as possible,
   -- including handling of specials since games make assumptions about them.
 
-filter({"configurations:Release", "platforms:not Windows"})
+filter({"configurations:Release", "platforms:not Windows-*"})
   symbols("Off")
 
-filter({"configurations:Release", "platforms:Windows"}) -- "toolset:msc"
+filter({"configurations:Release", "platforms:Windows-*"}) -- "toolset:msc"
   linktimeoptimization("On")
   buildoptions({
     "/Gw",
@@ -159,7 +205,7 @@ filter({"configurations:Release", "platforms:Windows"}) -- "toolset:msc"
 --    "/Qpar",   -- TODO: Test this.
   })
 
-filter("platforms:Linux")
+filter("platforms:Linux-*")
   system("linux")
   toolset("clang")
   --buildoptions({
@@ -167,6 +213,7 @@ filter("platforms:Linux")
   --})
   pkg_config.all("gtk+-x11-3.0")
   links({
+    "crypto",
     "stdc++fs",
     "dl",
     "lz4",
@@ -174,7 +221,7 @@ filter("platforms:Linux")
     "rt",
   })
 
-filter({"platforms:Linux", "kind:*App"})
+filter({"platforms:Linux-*", "kind:*App"})
   linkgroups("On")
 
 filter({"system:macosx", "toolset:clang"})
@@ -277,7 +324,7 @@ if os.istarget("android") then
     })
 end
 
-filter("platforms:Windows")
+filter("platforms:Windows-*")
   system("windows")
   toolset("msc")
   buildoptions({
@@ -315,7 +362,7 @@ filter("platforms:Windows")
   })
 
 -- Embed the manifest for things like dependencies and DPI awareness.
-filter({"platforms:Windows", "kind:ConsoleApp or WindowedApp"})
+filter({"platforms:Windows-*", "kind:ConsoleApp or WindowedApp"})
   files({
     "src/xenia/base/app_win32.manifest"
   })
@@ -337,16 +384,17 @@ workspace("xenia")
     filter({})
   else
     if os.istarget("linux") then
-      platforms({"Linux"})
-      architecture("x86_64")
+      if TARGET_ARCH == "ARM64" then
+        platforms({"Linux-ARM64"})
+        architecture("ARM64")
+      else
+        platforms({"Linux-x86_64"})
+        architecture("x86_64")
+      end
     elseif os.istarget("macosx") then
       local mac_platforms = nil
-      if is_macos_arm64_host() then
-        if _OPTIONS["mac-x86_64"] then
-          mac_platforms = {"Mac-x86_64"}
-        else
-          mac_platforms = {"Mac-ARM64"}
-        end
+      if TARGET_ARCH == "ARM64" then
+        mac_platforms = {"Mac-ARM64"}
       else
         mac_platforms = {"Mac-x86_64"}
       end
@@ -364,8 +412,13 @@ workspace("xenia")
         })
       filter({})
     elseif os.istarget("windows") then
-      platforms({"Windows"})
-      architecture("x86_64")
+      if TARGET_ARCH == "ARM64" then
+        platforms({"Windows-ARM64"})
+        architecture("ARM64")
+      else
+        platforms({"Windows-x86_64"})
+        architecture("x86_64")
+      end
       -- 10.0.15063.0: ID3D12GraphicsCommandList1::SetSamplePositions.
       -- 10.0.19041.0: D3D12_HEAP_FLAG_CREATE_NOT_ZEROED.
       -- 10.0.22000.0: DWMWA_WINDOW_CORNER_PREFERENCE.

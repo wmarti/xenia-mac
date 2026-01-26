@@ -26,15 +26,15 @@ __author__ = "ben.vanik@gmail.com (Ben Vanik)"
 self_path = os.path.dirname(os.path.abspath(__file__))
 
 
-def normalize_macos_arch(arch):
+def normalize_arch(arch):
     if not arch:
         return None
     arch = arch.lower()
-    if arch in ("arm64", "a64"):
+    if arch in ("arm64", "a64", "aarch64"):
         return "arm64"
     if arch in ("x86_64", "x64", "x86", "amd64"):
         return "x86_64"
-    raise ValueError(f"Unsupported macOS arch: {arch}")
+    raise ValueError(f"Unsupported arch: {arch}")
 
 
 def is_macos_arm64_host():
@@ -608,16 +608,24 @@ def get_build_bin_path(args):
     Returns:
       A full path for the bin folder.
     """
+    arch_override = args.get("arch")
     if sys.platform == "darwin":
-        arch_override = args.get("arch")
         if arch_override:
             platform = "Mac-ARM64" if arch_override == "arm64" else "Mac-x86_64"
         else:
             platform = "Mac-ARM64" if is_macos_arm64_host() else "Mac-x86_64"
     elif sys.platform == "win32":
-        platform = "windows"
+        if arch_override:
+            platform = "Windows-ARM64" if arch_override == "arm64" else "Windows-x86_64"
+        else:
+            host_arch = normalize_arch(platform.machine())
+            platform = "Windows-ARM64" if host_arch == "arm64" else "Windows-x86_64"
     else:
-        platform = "linux"
+        if arch_override:
+            platform = "Linux-ARM64" if arch_override == "arm64" else "Linux-x86_64"
+        else:
+            host_arch = normalize_arch(platform.machine())
+            platform = "Linux-ARM64" if host_arch == "arm64" else "Linux-x86_64"
     return os.path.join(self_path, "build", "bin", platform,
                         args["config"].capitalize())
 
@@ -828,13 +836,19 @@ class PremakeCommand(Command):
         self.parser.add_argument(
             "--target_os", default=None,
             help="Target OS passed to premake, for cross-compilation")
+        self.parser.add_argument(
+            "--arch", type=normalize_arch, default=None,
+            help="Target architecture: arm64 or x86_64 (aliases: a64/x64/x86)")
 
     def execute(self, args, pass_args, cwd):
         # Update premake. If no binary found, it will be built from source.
         print("Running premake...\n")
+        extra_args = list(pass_args)
+        if args["arch"]:
+            extra_args.append(f"--arch={args['arch']}")
         ret = run_platform_premake(target_os_override=args["target_os"],
                                    cc=args["cc"], devenv=args["devenv"],
-                                   extra_premake_args=pass_args)
+                                   extra_premake_args=extra_args)
         print("Success!" if ret == 0 else "Error!")
 
         return ret
@@ -857,8 +871,8 @@ class BaseBuildCommand(Command):
             "--target", action="append", default=[],
             help="Builds only the given target(s).")
         self.parser.add_argument(
-            "--arch", type=normalize_macos_arch, default=None,
-            help="macOS architecture: arm64 or x86_64 (aliases: a64/x64/x86)")
+            "--arch", type=normalize_arch, default=None,
+            help="Target architecture: arm64 or x86_64 (aliases: a64/x64/x86)")
         self.parser.add_argument(
             "--force", action="store_true",
             help="Forces a full rebuild.")
@@ -868,7 +882,7 @@ class BaseBuildCommand(Command):
 
     def execute(self, args, pass_args, cwd):
         arch = args.get("arch")
-        premake_args = None
+        premake_args = []
         if sys.platform == "darwin":
             # Ensure dxbc2dxil is built on macOS as it's needed for Metal.
             dxilconv_dir = "build_dxilconv_macos"
@@ -900,14 +914,16 @@ class BaseBuildCommand(Command):
                     )
                 else:
                     print("WARNING: dxbc2dxil build script not found!")
+        if arch:
+            premake_args.append(f"--arch={arch}")
         if sys.platform == "darwin" and arch == "x86_64":
-            premake_args = ["--mac-x86_64"]
+            premake_args.append("--mac-x86_64")
         if not args["no_premake"]:
             print("- running premake...")
             enable_tests = any(
                 target.endswith("-tests") for target in (args["target"] or []))
             run_platform_premake(cc=args["cc"], enable_tests=enable_tests,
-                                 extra_premake_args=premake_args)
+                                 extra_premake_args=premake_args or None)
             print("")
 
         print("- building (%s):%s..." % (

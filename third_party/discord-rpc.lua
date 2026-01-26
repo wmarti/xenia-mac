@@ -3,10 +3,15 @@ project("discord-rpc")
   uuid("012f6131-efc0-4abd-852d-a33640732d4c")
   kind("StaticLib")
   language("C++")
-  defines({
-    "RAPIDJSON_SSE42",
-  --  "RAPIDJSON_NEON",
-  })
+  filter("architecture:x86_64")
+    defines({
+      "RAPIDJSON_SSE42",
+    })
+  filter("architecture:ARM64")
+    defines({
+      "RAPIDJSON_NEON",
+    })
+  filter({})
   includedirs({
     "discord-rpc/include",
     "rapidjson/include"
@@ -20,7 +25,7 @@ project("discord-rpc")
     "discord-rpc/src/serialization.cpp",
     "discord-rpc/src/serialization.h"
   })
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     files({
       "discord-rpc/src/connection_unix.cpp",
       "discord-rpc/src/discord_register_linux.cpp"
@@ -29,7 +34,7 @@ project("discord-rpc")
     files({
       "discord-rpc/src/discord_register_osx.m"
     })
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     files({
       "discord-rpc/src/connection_win.cpp",
       "discord-rpc/src/discord_register_win.cpp"

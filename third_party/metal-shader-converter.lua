@@ -1,3 +1,7 @@
+if not os.istarget("macosx") then
+  return
+end
+
 group("third_party")
 project("metal-shader-converter")
   uuid("b1b2c3d4-e5f6-7890-abcd-ef1234567890")

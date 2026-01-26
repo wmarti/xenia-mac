@@ -41,7 +41,7 @@ project("xenia-cpu-ppc-tests")
     links({
       "xenia-cpu-backend-a64",
     })
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     debugdir(project_root)
     debugargs({
       "2>&1",

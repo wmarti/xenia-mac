@@ -33,14 +33,14 @@ project("xenia-ui")
       wholelib("On")
   end
 
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     links({
       "dwmapi",
       "dxgi",
       "winmm",
     })
 
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     links({
       "xcb",
       "X11",

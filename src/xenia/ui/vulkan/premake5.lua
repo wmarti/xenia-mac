@@ -44,7 +44,7 @@ if enableMiscSubprojects then
       project_root,
     })
 
-    filter("platforms:Linux")
+    filter("platforms:Linux-*")
       links({
         "X11",
         "xcb",
