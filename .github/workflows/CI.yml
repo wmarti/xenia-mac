@@ -217,6 +217,93 @@ jobs:
           path: artifacts/release
           if-no-files-found: error
 
+  build-linux-arm64:
+    name: Build Linux ARM64
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@main
+        with:
+          fetch-depth: 0
+
+      - name: Cache premake5
+        id: cache-premake5
+        uses: actions/cache@main
+        with:
+          path: tools/build/bin/premake5
+          key: ${{ runner.os }}-${{ runner.arch }}-premake5-${{ hashFiles('third_party/premake-core/**') }}
+
+      - name: Cache Qt6
+        id: cache-qt-linux-arm64
+        uses: actions/cache@v3
+        with:
+          path: /opt/Qt
+          key: ${{ runner.os }}-${{ runner.arch }}-qt6-6.10.1
+
+      - name: Cache submodules
+        id: cache-submodules
+        uses: actions/cache@v3
+        with:
+          path: third_party
+          key: ${{ runner.os }}-${{ runner.arch }}-submodules-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
+
+      - name: Setup
+        run: |
+          UBUNTU_BASE=$(lsb_release -cs)
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-21 main"
+
+          sudo apt-get -y update
+          sudo apt-get -y install libc++-dev libc++abi-dev libsdl2-dev libx11-xcb-dev clang-21 ninja-build libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfontconfig1-dev libxtst-dev
+
+          # Install Qt 6.10.1 via aqtinstall
+          if [ '${{ steps.cache-qt-linux-arm64.outputs.cache-hit }}' != 'true' ]; then
+            pip install aqtinstall
+            aqt install-qt linux desktop 6.10.1 linux_gcc_arm64 -O /opt/Qt
+          fi
+          export PATH="/opt/Qt/6.10.1/gcc_arm64/bin:$PATH"
+          export CMAKE_PREFIX_PATH="/opt/Qt/6.10.1/gcc_arm64"
+          export QT_DIR="/opt/Qt/6.10.1/gcc_arm64"
+          echo "/opt/Qt/6.10.1/gcc_arm64/bin" >> $GITHUB_PATH
+          echo "CMAKE_PREFIX_PATH=/opt/Qt/6.10.1/gcc_arm64" >> $GITHUB_ENV
+          echo "QT_DIR=/opt/Qt/6.10.1/gcc_arm64" >> $GITHUB_ENV
+
+          # Update submodules if not cached
+          if [ '${{ steps.cache-submodules.outputs.cache-hit }}' != 'true' ]; then
+            git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/(DirectXShaderCompiler|premake-(androidndk|export-compile-commands))).+' .gitmodules)
+          fi
+
+          if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
+            ./xenia-build.py premake
+            cp third_party/premake-core/bin/release/premake5 tools/build/bin
+          fi
+
+          # Fetch data repos (game-patches, optimized-settings)
+          ./xenia-build.py fetchdata
+      - name: Build
+        env:
+          CC: clang-21
+          CXX: clang++-21
+        run: ./xenia-build.py build --config=Release
+      - name: Prepare artifacts
+        id: prepare_artifacts
+        run: |
+          binary=build/bin/Linux/Release/xenia_edge
+          if [ $(stat -c%s $binary) -le 100000 ]; then
+            echo "::error::Binary is too small."
+          fi
+          chmod +x $binary
+          mkdir -p artifacts/release
+          cp $binary artifacts/release/
+          cp LICENSE artifacts/release/
+      - name: Upload xenia edge artifacts
+        if: steps.prepare_artifacts.outcome == 'success'
+        uses: actions/upload-artifact@main
+        with:
+          name: xenia_edge_linux_arm64
+          path: artifacts/release
+          if-no-files-found: error
+
   build-macos:
     name: Build macOS
     needs: lint
@@ -436,7 +523,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-linux, build-linux-arm64, build-macos, build-windows]
     runs-on: ubuntu-latest
     if: |
       github.repository == 'has207/xenia-edge' &&
@@ -448,6 +535,12 @@ jobs:
         with:
           name: xenia_edge_linux
           path: linux_artifacts
+
+      - name: Download Linux ARM64 artifacts
+        uses: actions/download-artifact@main
+        with:
+          name: xenia_edge_linux_arm64
+          path: linux_arm64_artifacts
 
       - name: Download macOS artifacts
         uses: actions/download-artifact@main
@@ -469,6 +562,8 @@ jobs:
           # Prepare release artifacts
           cd linux_artifacts
           mv xenia_edge.AppImage ../xenia_edge_linux.AppImage
+          cd ../linux_arm64_artifacts
+          mv xenia_edge ../xenia_edge_linux_arm64
           cd ../macos_artifacts
           mv xenia_edge_macos.dmg ../
           cd ../windows_artifacts
@@ -477,5 +572,5 @@ jobs:
 
           # Create release
           tag=${GITHUB_SHA::7}
-          gh release create $tag xenia_edge_linux.AppImage xenia_edge_macos.dmg xenia_edge_windows.zip \
+          gh release create $tag xenia_edge_linux.AppImage xenia_edge_linux_arm64 xenia_edge_macos.dmg xenia_edge_windows.zip \
             --target $GITHUB_SHA -t "xenia_edge" --generate-notes

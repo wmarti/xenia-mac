@@ -560,8 +560,13 @@ workspace("xenia")
     filter({})
   else
     if os.istarget("linux") then
-      platforms({"Linux"})
-      architecture("x86_64")
+      if TARGET_ARCH == "ARM64" then
+        platforms({"Linux-ARM64"})
+        architecture("ARM64")
+      else
+        platforms({"Linux"})
+        architecture("x86_64")
+      end
     elseif os.istarget("macosx") then
       local mac_platforms = nil
       if is_macos_arm64_host() then
