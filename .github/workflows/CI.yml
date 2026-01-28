@@ -233,13 +233,6 @@ jobs:
           path: tools/build/bin/premake5
           key: ${{ runner.os }}-${{ runner.arch }}-premake5-${{ hashFiles('third_party/premake-core/**') }}
 
-      - name: Cache Qt6
-        id: cache-qt-linux-arm64
-        uses: actions/cache@v3
-        with:
-          path: /opt/Qt
-          key: ${{ runner.os }}-${{ runner.arch }}-qt6-6.10.1
-
       - name: Cache submodules
         id: cache-submodules
         uses: actions/cache@v3
@@ -256,17 +249,13 @@ jobs:
           sudo apt-get -y update
           sudo apt-get -y install libc++-dev libc++abi-dev libsdl2-dev libx11-xcb-dev clang-21 ninja-build libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfontconfig1-dev libxtst-dev
 
-          # Install Qt 6.10.1 via aqtinstall
-          if [ '${{ steps.cache-qt-linux-arm64.outputs.cache-hit }}' != 'true' ]; then
-            pip install aqtinstall
-            aqt install-qt linux desktop 6.10.1 linux_gcc_arm64 -O /opt/Qt
-          fi
-          export PATH="/opt/Qt/6.10.1/gcc_arm64/bin:$PATH"
-          export CMAKE_PREFIX_PATH="/opt/Qt/6.10.1/gcc_arm64"
-          export QT_DIR="/opt/Qt/6.10.1/gcc_arm64"
-          echo "/opt/Qt/6.10.1/gcc_arm64/bin" >> $GITHUB_PATH
-          echo "CMAKE_PREFIX_PATH=/opt/Qt/6.10.1/gcc_arm64" >> $GITHUB_ENV
-          echo "QT_DIR=/opt/Qt/6.10.1/gcc_arm64" >> $GITHUB_ENV
+          # Install Qt6 from Ubuntu repos (aqtinstall doesn't have ARM64 Linux builds)
+          sudo apt-get -y install qt6-base-dev qt6-base-private-dev libqt6widgets6
+
+          # Set Qt environment for system packages
+          export QT_DIR="/usr/lib/aarch64-linux-gnu/cmake/Qt6"
+          echo "QT_DIR=/usr/lib/aarch64-linux-gnu/cmake/Qt6" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=/usr/lib/aarch64-linux-gnu/cmake/Qt6" >> $GITHUB_ENV
 
           # Update submodules if not cached
           if [ '${{ steps.cache-submodules.outputs.cache-hit }}' != 'true' ]; then
