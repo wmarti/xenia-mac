@@ -2275,8 +2275,9 @@ bool PhysicalHeap::TriggerCallbacks(
               unprotect_page = false;
             }
           } else {
-            guest_page_last_exclusive = std::min<uint32_t>(
-                guest_page_last_exclusive, page_table_.size());
+            guest_page_last_exclusive =
+                std::min<uint32_t>(guest_page_last_exclusive,
+                                   static_cast<uint32_t>(page_table_.size()));
             bool any_read_write = false;
             for (uint32_t guest_page_number = guest_page_first;
                  guest_page_number < guest_page_last_exclusive;
