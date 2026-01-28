@@ -19,6 +19,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "third_party/metal-shader-converter/include/metal_irconverter_runtime.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/command_processor.h"
@@ -32,7 +33,6 @@
 #include "xenia/gpu/metal/metal_shader_converter.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
-#include "third_party/metal-shader-converter/include/metal_irconverter_runtime.h"
 #include "xenia/ui/metal/metal_api.h"
 #include "xenia/ui/metal/metal_provider.h"
 

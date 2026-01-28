@@ -234,7 +234,7 @@ dword_result_t RtlUpcaseUnicodeChar_entry(dword_t SourceCharacter) {
   wchar_t wide = static_cast<wchar_t>(source);
   return static_cast<uint16_t>(std::towupper(wide));
 #else
-  return std::use_facet<std::ctype<char16_t>>(std::locale())
+  return std::use_facet<std::ctype<char16_t> >(std::locale())
       .toupper(static_cast<char16_t>(SourceCharacter.value()));
 #endif  // XE_PLATFORM_MAC
 }

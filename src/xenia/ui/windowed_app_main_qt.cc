@@ -69,8 +69,8 @@ int main(int argc, char** argv) {
 
   // Parse arguments early to determine if this is a game or UI process
   // Must happen before QApplication creation for QT_QPA_PLATFORM to take effect
-  cvar::ParseLaunchArguments(filtered_argc, filtered_argv, "[Path to .iso/.xex]",
-                             {"target"});
+  cvar::ParseLaunchArguments(filtered_argc, filtered_argv,
+                             "[Path to .iso/.xex]", {"target"});
 
   bool is_game_process = !cvars::target.empty();
 

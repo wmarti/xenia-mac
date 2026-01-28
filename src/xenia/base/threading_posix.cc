@@ -322,8 +322,8 @@ class PosixConditionBase {
         locks.emplace_back(std::move(lk));
 #else
         // Linux/Android: robust-aware trylock.
-        auto native_mutex = static_cast<pthread_mutex_t*>(
-            handles[i]->mutex_.native_handle());
+        auto native_mutex =
+            static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
         int result = pthread_mutex_trylock(native_mutex);
         if (result == 0 || result == EOWNERDEAD) {
           if (result == EOWNERDEAD) {

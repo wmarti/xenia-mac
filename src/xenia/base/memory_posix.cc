@@ -470,8 +470,8 @@ void CloseFileMappingHandle(FileMappingHandle handle,
   // Remove from tracking.
   {
     std::lock_guard guard(g_shm_file_names_mutex);
-    auto it = std::find(g_shm_file_names.begin(), g_shm_file_names.end(),
-                        full_path);
+    auto it =
+        std::find(g_shm_file_names.begin(), g_shm_file_names.end(), full_path);
     if (it != g_shm_file_names.end()) {
       g_shm_file_names.erase(it);
     }
