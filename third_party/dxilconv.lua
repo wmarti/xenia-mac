@@ -15,7 +15,9 @@ project("dxilconv")
   local dxilconv_build_x86_64 =
       path.join(dxilconv_root, "build_dxilconv_macos_x86_64")
   local directx_headers_dir =
-      path.getabsolute("third_party/DirectX-Headers/include", _MAIN_SCRIPT_DIR)
+      path.getabsolute("third_party/DirectX-Headers/include/directx", _MAIN_SCRIPT_DIR)
+  local directx_wsl_dir =
+      path.getabsolute("third_party/DirectX-Headers/include/wsl", _MAIN_SCRIPT_DIR)
   local cxx_flags = "-stdlib=libc++ -Wno-deprecated-declarations "
       .. "-Wno-deprecated"
 
@@ -28,7 +30,8 @@ project("dxilconv")
       "cmake",
       "-S", quote(dxilconv_root),
       "-B", quote(build_dir),
-      "-DD3D12_macOS_INCLUDE_DIR=" .. quote(directx_headers_dir),
+      "-DD3D12_INCLUDE_DIR=" .. quote(directx_headers_dir),
+      "-DDXGI_INCLUDE_DIR=" .. quote(directx_headers_dir),
       "-DCMAKE_BUILD_TYPE=Release",
       "-DCMAKE_OSX_ARCHITECTURES=" .. arch,
       "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",

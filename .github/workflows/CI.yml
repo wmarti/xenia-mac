@@ -220,7 +220,7 @@ jobs:
   build-macos:
     name: Build macOS
     needs: lint
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@main
         with:
