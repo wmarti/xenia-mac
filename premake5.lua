@@ -11,8 +11,27 @@ end
 
 -- Helper function to extract Qt version from qconfig.pri
 function get_qt_version(qt_dir)
+  -- Try standard location first
   local qconfig_path = path.join(qt_dir, "mkspecs/qconfig.pri")
   local qconfig_file = io.open(qconfig_path, "r")
+
+  -- Try system Qt location (e.g., /usr/lib/x86_64-linux-gnu/qt6)
+  if not qconfig_file then
+    -- For system Qt, qt_dir might be cmake path - try to find actual Qt dir
+    local system_paths = {
+      "/usr/lib/x86_64-linux-gnu/qt6/mkspecs/qconfig.pri",
+      "/usr/lib/aarch64-linux-gnu/qt6/mkspecs/qconfig.pri",
+      "/usr/share/qt6/mkspecs/qconfig.pri",
+    }
+    for _, sys_path in ipairs(system_paths) do
+      qconfig_file = io.open(sys_path, "r")
+      if qconfig_file then
+        qconfig_path = sys_path
+        break
+      end
+    end
+  end
+
   if qconfig_file then
     for line in qconfig_file:lines() do
       local version = line:match("^QT_VERSION%s*=%s*(.+)$")
@@ -23,7 +42,9 @@ function get_qt_version(qt_dir)
     end
     qconfig_file:close()
   end
-  error("Could not read Qt version from " .. qconfig_path)
+
+  -- Return nil instead of error for system Qt without qconfig.pri
+  return nil
 end
 
 location(build_root)
@@ -263,32 +284,44 @@ filter({"configurations:Valgrind", "platforms:Linux"})
   })
 
 if os.istarget("linux") then
-  filter("platforms:Linux")
+  filter("platforms:Linux or Linux-ARM64")
     system("linux")
     toolset("clang")
     local qt_dir = os.getenv("QT_DIR")
     if qt_dir then
       local qt_version = get_qt_version(qt_dir)
-      includedirs({
-        path.join(qt_dir, "include"),
-        path.join(qt_dir, "include/QtCore"),
-        path.join(qt_dir, "include/QtCore", qt_version),
-        path.join(qt_dir, "include/QtCore", qt_version, "QtCore"),
-        path.join(qt_dir, "include/QtGui"),
-        path.join(qt_dir, "include/QtGui", qt_version),
-        path.join(qt_dir, "include/QtGui", qt_version, "QtGui"),
-        path.join(qt_dir, "include/QtWidgets"),
-      })
-      libdirs({
-        path.join(qt_dir, "lib"),
-      })
-      runpathdirs({
-        path.join(qt_dir, "lib"),
-      })
-      -- For CMake: set RPATH to find Qt libraries
-      linkoptions({
-        "-Wl,-rpath," .. path.join(qt_dir, "lib"),
-      })
+      if qt_version then
+        -- Qt installed via aqtinstall or similar (has version-specific dirs)
+        includedirs({
+          path.join(qt_dir, "include"),
+          path.join(qt_dir, "include/QtCore"),
+          path.join(qt_dir, "include/QtCore", qt_version),
+          path.join(qt_dir, "include/QtCore", qt_version, "QtCore"),
+          path.join(qt_dir, "include/QtGui"),
+          path.join(qt_dir, "include/QtGui", qt_version),
+          path.join(qt_dir, "include/QtGui", qt_version, "QtGui"),
+          path.join(qt_dir, "include/QtWidgets"),
+        })
+        libdirs({
+          path.join(qt_dir, "lib"),
+        })
+        runpathdirs({
+          path.join(qt_dir, "lib"),
+        })
+        linkoptions({
+          "-Wl,-rpath," .. path.join(qt_dir, "lib"),
+        })
+      else
+        -- System Qt (installed via apt) - use standard system paths
+        includedirs({
+          "/usr/include/x86_64-linux-gnu/qt6",
+          "/usr/include/aarch64-linux-gnu/qt6",
+          "/usr/include/qt6",
+          "/usr/include/qt6/QtCore",
+          "/usr/include/qt6/QtGui",
+          "/usr/include/qt6/QtWidgets",
+        })
+      end
       links({
         "Qt6Core",
         "Qt6Gui",
