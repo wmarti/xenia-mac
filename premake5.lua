@@ -39,6 +39,11 @@ newoption({
   trigger = "mac-x86_64",
   description = "Enable x86_64 platform on macOS ARM64 hosts",
 })
+newoption({
+  trigger = "arch",
+  value = "ARCH",
+  description = "Target architecture (x86_64 or arm64)",
+})
 
 enableTests = _OPTIONS["tests"] ~= nil
 enableMiscSubprojects = false
@@ -78,6 +83,44 @@ function is_macos_arm64_host()
   end
   return false
 end
+
+local function normalize_arch(arch)
+  if not arch then
+    return nil
+  end
+  arch = arch:lower()
+  if arch == "arm64" or arch == "aarch64" then
+    return "ARM64"
+  end
+  if arch == "x86_64" or arch == "x64" or arch == "x86" or arch == "amd64" then
+    return "x86_64"
+  end
+  return nil
+end
+
+local function detect_target_arch()
+  local option_arch = normalize_arch(_OPTIONS["arch"])
+  if option_arch then
+    return option_arch
+  end
+  if os.istarget("macosx") then
+    if _OPTIONS["mac-x86_64"] then
+      return "x86_64"
+    end
+    return is_macos_arm64_host() and "ARM64" or "x86_64"
+  end
+  if os.istarget("linux") then
+    return normalize_arch(os.outputof("uname -m")) or "x86_64"
+  end
+  if os.istarget("windows") then
+    local env_arch = os.getenv("PROCESSOR_ARCHITEW6432") or
+                     os.getenv("PROCESSOR_ARCHITECTURE")
+    return normalize_arch(env_arch) or "x86_64"
+  end
+  return "x86_64"
+end
+
+TARGET_ARCH = detect_target_arch()
 
 includedirs({
   ".",
