@@ -252,11 +252,13 @@ jobs:
       - name: Setup
         run: |
           # Install dependencies via Homebrew
-          brew install sdl2 ninja
+          brew install sdl2 ninja pipx
 
           # Install Qt 6.10.1 via aqtinstall
           if [ '${{ steps.cache-qt-macos.outputs.cache-hit }}' != 'true' ]; then
-            pip3 install aqtinstall
+            pipx install aqtinstall
+            pipx ensurepath
+            export PATH="$HOME/.local/bin:$PATH"
             aqt install-qt mac desktop 6.10.1 clang_64 -O ~/Qt
           fi
           export PATH="$HOME/Qt/6.10.1/macos/bin:$PATH"

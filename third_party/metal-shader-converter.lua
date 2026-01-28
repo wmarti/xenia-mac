@@ -1,10 +1,10 @@
 group("third_party")
 project("metal-shader-converter")
   uuid("b1b2c3d4-e5f6-7890-abcd-ef1234567890")
-  kind("StaticLib")
   language("C++")
 
   filter("system:macosx")
+    kind("StaticLib")
     defines({
       "_LIB",
     })
@@ -29,7 +29,7 @@ project("metal-shader-converter")
 
   filter("not system:macosx")
     -- Metal Shader Converter is macOS only
-    removefiles("**")
+    kind("None")
     defines({
       "METAL_SHADER_CONVERTER_UNAVAILABLE=1",
     })
