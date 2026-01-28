@@ -217,6 +217,99 @@ jobs:
           path: artifacts/release
           if-no-files-found: error
 
+  build-macos:
+    name: Build macOS
+    needs: lint
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@main
+        with:
+          fetch-depth: 0
+
+      - name: Cache premake5
+        id: cache-premake5
+        uses: actions/cache@main
+        with:
+          path: tools/build/bin/premake5
+          key: ${{ runner.os }}-premake5-${{ hashFiles('third_party/premake-core/**') }}
+
+      - name: Cache Qt6
+        id: cache-qt-macos
+        uses: actions/cache@v3
+        with:
+          path: ~/Qt
+          key: ${{ runner.os }}-qt6-6.10.1
+          restore-keys: |
+            ${{ runner.os }}-qt6-
+
+      - name: Cache submodules
+        id: cache-submodules
+        uses: actions/cache@v3
+        with:
+          path: third_party
+          key: ${{ runner.os }}-submodules-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
+
+      - name: Setup
+        run: |
+          # Install dependencies via Homebrew
+          brew install sdl2 ninja
+
+          # Install Qt 6.10.1 via aqtinstall
+          if [ '${{ steps.cache-qt-macos.outputs.cache-hit }}' != 'true' ]; then
+            pip3 install aqtinstall
+            aqt install-qt mac desktop 6.10.1 clang_64 -O ~/Qt
+          fi
+          export PATH="$HOME/Qt/6.10.1/macos/bin:$PATH"
+          export CMAKE_PREFIX_PATH="$HOME/Qt/6.10.1/macos"
+          export QT_DIR="$HOME/Qt/6.10.1/macos"
+          echo "$HOME/Qt/6.10.1/macos/bin" >> $GITHUB_PATH
+          echo "CMAKE_PREFIX_PATH=$HOME/Qt/6.10.1/macos" >> $GITHUB_ENV
+          echo "QT_DIR=$HOME/Qt/6.10.1/macos" >> $GITHUB_ENV
+
+          # Update submodules if not cached
+          if [ '${{ steps.cache-submodules.outputs.cache-hit }}' != 'true' ]; then
+            git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
+          fi
+
+          if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
+            ./xenia-build.py premake
+            cp third_party/premake-core/bin/release/premake5 tools/build/bin
+          fi
+
+          # Fetch data repos (game-patches, optimized-settings)
+          ./xenia-build.py fetchdata
+
+      - name: Build
+        run: ./xenia-build.py build --config=Release --target=xenia-app
+
+      - name: Prepare artifacts
+        id: prepare_artifacts
+        run: |
+          app_bundle="build/bin/Mac-ARM64/Release/Xenia.app"
+          if [ ! -d "$app_bundle" ]; then
+            echo "::error::App bundle not found at $app_bundle"
+            exit 1
+          fi
+
+          mkdir -p artifacts/release
+
+          # Create a DMG
+          mkdir -p dmg_contents
+          cp -R "$app_bundle" dmg_contents/
+          cp LICENSE dmg_contents/
+          ln -s /Applications dmg_contents/Applications
+
+          hdiutil create -volname "Xenia" -srcfolder dmg_contents -ov -format UDZO "artifacts/release/xenia_edge_macos.dmg"
+          rm -rf dmg_contents
+
+      - name: Upload xenia edge artifacts
+        if: steps.prepare_artifacts.outcome == 'success'
+        uses: actions/upload-artifact@main
+        with:
+          name: xenia_edge_macos
+          path: artifacts/release
+          if-no-files-found: error
+
   build-windows:
     name: Build Windows
     needs: lint
@@ -339,7 +432,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     if: |
       github.repository == 'has207/xenia-edge' &&
@@ -352,6 +445,12 @@ jobs:
           name: xenia_edge_linux
           path: linux_artifacts
 
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@main
+        with:
+          name: xenia_edge_macos
+          path: macos_artifacts
+
       - name: Download Windows artifacts
         uses: actions/download-artifact@main
         with:
@@ -363,15 +462,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          # Create zips
+          # Prepare release artifacts
           cd linux_artifacts
-          # For Linux, just rename the AppImage (no need to zip a single file)
           mv xenia_edge.AppImage ../xenia_edge_linux.AppImage
+          cd ../macos_artifacts
+          mv xenia_edge_macos.dmg ../
           cd ../windows_artifacts
           7z a ../xenia_edge_windows.zip * -xr!'*.pdb' -mx9 -bb3
           cd ..
 
           # Create release
           tag=${GITHUB_SHA::7}
-          gh release create $tag xenia_edge_linux.AppImage xenia_edge_windows.zip \
+          gh release create $tag xenia_edge_linux.AppImage xenia_edge_macos.dmg xenia_edge_windows.zip \
             --target $GITHUB_SHA -t "xenia_edge" --generate-notes

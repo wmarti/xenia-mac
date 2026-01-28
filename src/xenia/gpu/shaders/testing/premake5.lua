@@ -1,6 +1,10 @@
 project_root = "../../../../../"
 include(project_root.."/tools/build")
 
+if os.istarget("macosx") then
+  return
+end
+
 test_suite("xenia-gpu-shader-tests", project_root, ".", {
   links = {
     "fmt",

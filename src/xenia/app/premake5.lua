@@ -1,5 +1,15 @@
-project_root = "../../.."
+project_root = path.getabsolute("../../..")
 include(project_root.."/tools/build")
+
+-- macOS library paths for Metal backend dependencies.
+local metal_converter_libdir =
+    path.join(project_root, "third_party/metal-shader-converter/lib")
+local dxilconv_libdir_arm64 =
+    path.join(project_root,
+              "third_party/DirectXShaderCompiler/build_dxilconv_macos/lib")
+local dxilconv_libdir_x86_64 =
+    path.join(project_root,
+              "third_party/DirectXShaderCompiler/build_dxilconv_macos_x86_64/lib")
 
 group("src")
 project("xenia-app")
@@ -70,12 +80,18 @@ project("xenia-app")
   -- `targetname` is broken if building from Gradle, works only for toggling the
   -- `lib` prefix, as Gradle uses LOCAL_MODULE_FILENAME, not a derivative of
   -- LOCAL_MODULE, to specify the targets to build when executing ndk-build.
-  filter("platforms:not Android-*")
+  filter("platforms:Mac-*")
+    targetname("xenia")
+  filter({"platforms:not Android-*", "platforms:not Mac-*"})
     targetname("xenia_edge")
 
   filter("architecture:x86_64")
     links({
       "xenia-cpu-backend-x64",
+    })
+  filter("architecture:arm64")
+    links({
+      "xenia-cpu-backend-a64",
     })
 
   -- TODO(Triang3l): The emulator itself on Android.
@@ -111,6 +127,67 @@ project("xenia-app")
       "X11-xcb",
       "SDL2",
     })
+
+  -- macOS: Use Metal backend instead of Vulkan.
+  filter("platforms:Mac-*")
+    removelinks({
+      "xenia-gpu-vulkan",
+      "xenia-ui-vulkan",
+    })
+    links({
+      "xenia-gpu-metal",
+      "xenia-ui-metal",
+      "metal-cpp",
+      "metalirconverter",
+      "dxilconv",
+      "LLVMDxcSupport",
+      "SDL2",
+      "Cocoa.framework",
+      "CoreFoundation.framework",
+      "Metal.framework",
+      "MetalFX.framework",
+      "MetalKit.framework",
+      "QuartzCore.framework",
+    })
+    libdirs({
+      metal_converter_libdir,
+    })
+    linkoptions({
+      "-Wl,-rpath,@executable_path/../Frameworks",
+    })
+  filter({"platforms:Mac-*", "architecture:arm64"})
+    libdirs({ dxilconv_libdir_arm64, "/opt/homebrew/lib" })
+    runpathdirs({ dxilconv_libdir_arm64, "/opt/homebrew/lib" })
+    linkoptions({
+      path.getabsolute(path.join(dxilconv_libdir_arm64, "libdxilconv.dylib")),
+    })
+    -- Copy dylibs to app bundle Frameworks folder
+    local app_frameworks = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Frameworks"
+    local app_executable = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/MacOS/xenia"
+    postbuildcommands({
+      'mkdir -p "' .. app_frameworks .. '"',
+      'cp -f "' .. path.getabsolute(path.join(metal_converter_libdir, "libmetalirconverter.dylib")) .. '" "' .. app_frameworks .. '/"',
+      'cp -f "' .. path.getabsolute(path.join(dxilconv_libdir_arm64, "libdxilconv.dylib")) .. '" "' .. app_frameworks .. '/"',
+      'codesign --force --sign - "' .. app_frameworks .. '/libmetalirconverter.dylib"',
+      'codesign --force --sign - "' .. app_frameworks .. '/libdxilconv.dylib"',
+    })
+  filter({"platforms:Mac-*", "architecture:x86_64"})
+    libdirs({ dxilconv_libdir_x86_64, "/usr/local/lib" })
+    runpathdirs({ dxilconv_libdir_x86_64, "/usr/local/lib" })
+    removelinks({ "LLVMDxcSupport" })
+    linkoptions({
+      path.getabsolute(path.join(dxilconv_libdir_x86_64, "libLLVMDxcSupport.a")),
+    })
+    -- Copy dylibs to app bundle Frameworks folder
+    local app_frameworks_x86 = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Frameworks"
+    postbuildcommands({
+      'mkdir -p "' .. app_frameworks_x86 .. '"',
+      'cp -f "' .. path.getabsolute(path.join(metal_converter_libdir, "libmetalirconverter.dylib")) .. '" "' .. app_frameworks_x86 .. '/"',
+      'cp -f "' .. path.getabsolute(path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")) .. '" "' .. app_frameworks_x86 .. '/"',
+      'codesign --force --sign - "' .. app_frameworks_x86 .. '/libmetalirconverter.dylib"',
+      'codesign --force --sign - "' .. app_frameworks_x86 .. '/libdxilconv.dylib"',
+    })
+  filter({})
 
   filter("platforms:Windows")
     links({
@@ -206,3 +283,49 @@ project("xenia-app")
       '{MKDIR} ' .. assets_font_dst,
       '{COPY} ' .. assets_font_src .. '/* ' .. assets_font_dst
     }
+
+  -- macOS app bundle configuration.
+  filter("platforms:Mac-*")
+    local entitlements_path = path.getabsolute(project_root .. "/xenia.entitlements")
+    local app_bundle = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}"
+    local app_contents = app_bundle .. "/Contents"
+    local app_frameworks = app_contents .. "/Frameworks"
+    local app_executable = app_contents .. "/MacOS/xenia"
+    files({
+      "Info.plist",
+      project_root.."/xenia.entitlements",
+      project_root.."/assets/icon/xenia.icns",
+    })
+    xcodebuildsettings({
+      ["INFOPLIST_FILE"] = path.getabsolute("Info.plist"),
+      ["MACOSX_DEPLOYMENT_TARGET"] = "15.0",
+      ["PRODUCT_NAME"] = "Xenia",
+      ["EXECUTABLE_NAME"] = "xenia",
+      ["PRODUCT_BUNDLE_IDENTIFIER"] = "com.xenia.xenia-edge",
+      ["CODE_SIGN_STYLE"] = "Automatic",
+      ["CODE_SIGN_ENTITLEMENTS"] = entitlements_path,
+      ["CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION"] = "YES",
+    })
+    postbuildcommands({
+      'mkdir -p "' .. app_frameworks .. '"',
+      'cp -f "' .. path.join(metal_converter_libdir, "libmetalirconverter.dylib")
+          .. '" "' .. app_frameworks .. '/"',
+      'codesign --force --sign - "' .. app_frameworks
+          .. '/libmetalirconverter.dylib"',
+      'codesign --force --deep --sign - --entitlements "'
+          .. entitlements_path .. '" "' .. app_bundle .. '"',
+    })
+  filter({"platforms:Mac-*", "architecture:arm64"})
+    postbuildcommands({
+      'cp -f "' .. path.join(dxilconv_libdir_arm64, "libdxilconv.dylib")
+          .. '" "' .. app_frameworks .. '/"',
+      'codesign --force --sign - "' .. app_frameworks .. '/libdxilconv.dylib"',
+    })
+  filter({"platforms:Mac-*", "architecture:x86_64"})
+    postbuildcommands({
+      'cp -f "' .. path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")
+          .. '" "' .. app_frameworks .. '/"',
+      'codesign --force --sign - "' .. app_frameworks .. '/libdxilconv.dylib"',
+    })
+  filter({"platforms:Mac-*", "files:**.icns"})
+    buildaction("Resources")

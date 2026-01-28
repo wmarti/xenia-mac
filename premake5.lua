@@ -31,8 +31,16 @@ targetdir(build_bin)
 objdir(build_obj)
 
 -- Define variables for enabling specific submodules
--- Todo: Add changing from xb command
-enableTests = false
+newoption({
+  trigger = "tests",
+  description = "Enable building test targets",
+})
+newoption({
+  trigger = "mac-x86_64",
+  description = "Enable x86_64 platform on macOS ARM64 hosts",
+})
+
+enableTests = _OPTIONS["tests"] ~= nil
 enableMiscSubprojects = false
 
 -- Define an ARCH variable
@@ -41,6 +49,34 @@ if os.istarget("linux") then
   ARCH = os.outputof("uname -p")
 else
   ARCH = "unknown"
+end
+
+function is_macos_arm64_host()
+  local env = os.getenv("XE_MACOS_ARM64_HOST")
+  if env == "1" then
+    return true
+  end
+  if env == "0" then
+    return false
+  end
+  if not os.istarget("macosx") then
+    return false
+  end
+  local sysctl = os.outputof("sysctl -n hw.optional.arm64 2>/dev/null")
+  if sysctl then
+    local sysctl_value = sysctl:match("^(%d+)")
+    if sysctl_value == "1" then
+      return true
+    end
+  end
+  local machine = os.outputof("uname -m")
+  if machine then
+    local machine_value = machine:match("^(%S+)")
+    if machine_value == "arm64" then
+      return true
+    end
+  end
+  return false
 end
 
 includedirs({
@@ -183,50 +219,126 @@ filter({"configurations:Valgrind", "platforms:Linux"})
     "-g3",  -- Maximum debug info
   })
 
-filter("platforms:Linux")
-  system("linux")
-  toolset("clang")
-  local qt_dir = os.getenv("QT_DIR")
-  if qt_dir then
-    local qt_version = get_qt_version(qt_dir)
-    includedirs({
-      path.join(qt_dir, "include"),
-      path.join(qt_dir, "include/QtCore"),
-      path.join(qt_dir, "include/QtCore", qt_version),
-      path.join(qt_dir, "include/QtCore", qt_version, "QtCore"),
-      path.join(qt_dir, "include/QtGui"),
-      path.join(qt_dir, "include/QtGui", qt_version),
-      path.join(qt_dir, "include/QtGui", qt_version, "QtGui"),
-      path.join(qt_dir, "include/QtWidgets"),
-    })
-    libdirs({
-      path.join(qt_dir, "lib"),
-    })
-    runpathdirs({
-      path.join(qt_dir, "lib"),
-    })
-    -- For CMake: set RPATH to find Qt libraries
-    linkoptions({
-      "-Wl,-rpath," .. path.join(qt_dir, "lib"),
-    })
-    links({
-      "Qt6Core",
-      "Qt6Gui",
-      "Qt6Widgets",
-    })
-  end
+if os.istarget("linux") then
+  filter("platforms:Linux")
+    system("linux")
+    toolset("clang")
+    local qt_dir = os.getenv("QT_DIR")
+    if qt_dir then
+      local qt_version = get_qt_version(qt_dir)
+      includedirs({
+        path.join(qt_dir, "include"),
+        path.join(qt_dir, "include/QtCore"),
+        path.join(qt_dir, "include/QtCore", qt_version),
+        path.join(qt_dir, "include/QtCore", qt_version, "QtCore"),
+        path.join(qt_dir, "include/QtGui"),
+        path.join(qt_dir, "include/QtGui", qt_version),
+        path.join(qt_dir, "include/QtGui", qt_version, "QtGui"),
+        path.join(qt_dir, "include/QtWidgets"),
+      })
+      libdirs({
+        path.join(qt_dir, "lib"),
+      })
+      runpathdirs({
+        path.join(qt_dir, "lib"),
+      })
+      -- For CMake: set RPATH to find Qt libraries
+      linkoptions({
+        "-Wl,-rpath," .. path.join(qt_dir, "lib"),
+      })
+      links({
+        "Qt6Core",
+        "Qt6Gui",
+        "Qt6Widgets",
+      })
+    end
 
-  links({
-    "stdc++fs",
-    "dl",
-    "lz4",
-    "m",
-    "pthread",
-    "rt",
-  })
+    links({
+      "stdc++fs",
+      "dl",
+      "lz4",
+      "m",
+      "pthread",
+      "rt",
+    })
+end
 
 filter({"platforms:Linux", "kind:*App"})
   linkgroups("On")
+
+if os.istarget("macosx") then
+  filter("platforms:Mac-*")
+    buildoptions({
+      "-mmacosx-version-min=15.0",
+    })
+    linkoptions({
+      "-mmacosx-version-min=15.0",
+    })
+    xcodebuildsettings({
+      ["MACOSX_DEPLOYMENT_TARGET"] = "15.0",
+    })
+    local qt_dir = os.getenv("QT_DIR")
+    if not qt_dir then
+      local brew_prefix = os.outputof("brew --prefix qt@6 2>/dev/null")
+      if not brew_prefix or brew_prefix == "" then
+        brew_prefix = os.outputof("brew --prefix qt 2>/dev/null")
+      end
+      if brew_prefix then
+        brew_prefix = brew_prefix:gsub("%s+$", "")
+        if #brew_prefix > 0 and os.isdir(brew_prefix) then
+          qt_dir = brew_prefix
+        end
+      end
+    end
+    if not qt_dir then
+      local candidates = {
+        "/opt/homebrew/opt/qt",
+        "/opt/homebrew/opt/qt@6",
+        "/usr/local/opt/qt",
+        "/usr/local/opt/qt@6",
+      }
+      for _, candidate in ipairs(candidates) do
+        if os.isdir(candidate) then
+          qt_dir = candidate
+          break
+        end
+      end
+    end
+    if qt_dir then
+      frameworkdirs({
+        path.join(qt_dir, "lib"),
+      })
+      externalincludedirs({
+        path.join(qt_dir, "lib/QtCore.framework/Headers"),
+        path.join(qt_dir, "lib/QtGui.framework/Headers"),
+        path.join(qt_dir, "lib/QtWidgets.framework/Headers"),
+      })
+      buildoptions({
+        "-I" .. path.join(qt_dir, "lib/QtCore.framework/Headers"),
+        "-I" .. path.join(qt_dir, "lib/QtGui.framework/Headers"),
+        "-I" .. path.join(qt_dir, "lib/QtWidgets.framework/Headers"),
+      })
+      links({
+        "QtCore.framework",
+        "QtGui.framework",
+        "QtWidgets.framework",
+      })
+      linkoptions({
+        "-Wl,-rpath," .. path.join(qt_dir, "lib"),
+      })
+    end
+end
+
+filter({"platforms:Mac-*", "toolset:clang"})
+  buildoptions({
+    "-w",
+  })
+  removefatalwarnings("All")
+filter({"platforms:Mac-x86_64", "toolset:clang"})
+  buildoptions({
+    "-mavx",
+  })
+filter({})
 
 filter({"language:C++", "toolset:clang or gcc"}) -- "platforms:Linux"
   disablewarnings({
@@ -404,16 +516,36 @@ workspace("xenia")
       architecture("x86_64")
     filter({})
   else
-    architecture("x86_64")
     if os.istarget("linux") then
       platforms({"Linux"})
+      architecture("x86_64")
     elseif os.istarget("macosx") then
-      platforms({"Mac"})
-      xcodebuildsettings({
-        ["ARCHS"] = "x86_64"
-      })
+      local mac_platforms = nil
+      if is_macos_arm64_host() then
+        if _OPTIONS["mac-x86_64"] then
+          mac_platforms = {"Mac-x86_64"}
+        else
+          mac_platforms = {"Mac-ARM64"}
+        end
+      else
+        mac_platforms = {"Mac-x86_64"}
+      end
+      platforms(mac_platforms)
+      filter("platforms:Mac-ARM64")
+        architecture("ARM64")
+        xcodebuildsettings({
+          ["ARCHS"] = "arm64",
+        })
+      filter("platforms:Mac-x86_64")
+        architecture("x86_64")
+        xcodebuildsettings({
+          ["ARCHS"] = "x86_64",
+          ["CLANG_X86_VECTOR_INSTRUCTION_SET"] = "avx",
+        })
+      filter({})
     elseif os.istarget("windows") then
       platforms({"Windows"})
+      architecture("x86_64")
       -- 10.0.15063.0: ID3D12GraphicsCommandList1::SetSamplePositions.
       -- 10.0.19041.0: D3D12_HEAP_FLAG_CREATE_NOT_ZEROED.
       -- 10.0.22000.0: DWMWA_WINDOW_CORNER_PREFERENCE.
@@ -426,6 +558,7 @@ workspace("xenia")
   include("third_party/aes_128.lua")
   include("third_party/capstone.lua")
   include("third_party/dxbc.lua")
+  include("third_party/dxilconv.lua")
   include("third_party/discord-rpc.lua")
   include("third_party/cxxopts.lua")
   include("third_party/tomlplusplus.lua")
@@ -433,6 +566,8 @@ workspace("xenia")
   include("third_party/fmt.lua")
   include("third_party/glslang-spirv.lua")
   include("third_party/imgui.lua")
+  include("third_party/metal-shader-converter.lua")
+  include("third_party/metal-cpp.lua")
   include("third_party/miniaudio.lua")
   include("third_party/mspack.lua")
   include("third_party/snappy.lua")
@@ -521,9 +656,13 @@ workspace("xenia")
   include("src/xenia/apu/nop")
   include("src/xenia/base")
   include("src/xenia/cpu")
+  include("src/xenia/cpu/backend/a64")
   include("src/xenia/cpu/backend/x64")
   include("src/xenia/debug/ui")
   include("src/xenia/gpu")
+  if os.istarget("macosx") then
+    include("src/xenia/gpu/metal")
+  end
   include("src/xenia/gpu/null")
   include("src/xenia/gpu/vulkan")
   include("src/xenia/hid")
@@ -532,6 +671,9 @@ workspace("xenia")
   include("src/xenia/kernel")
   include("src/xenia/patcher")
   include("src/xenia/ui")
+  if os.istarget("macosx") then
+    include("src/xenia/ui/metal")
+  end
   include("src/xenia/ui/vulkan")
   include("src/xenia/vfs")
 

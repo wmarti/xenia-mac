@@ -10,6 +10,7 @@
 #ifndef XENIA_MEMORY_H_
 #define XENIA_MEMORY_H_
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -197,6 +198,9 @@ class BaseHeap {
   // range.
   xe::memory::PageAccess QueryRangeAccess(uint32_t low_address,
                                           uint32_t high_address);
+  // Returns the lowest reserved region in the heap, if any.
+  bool QueryLowestReservedRegion(uint32_t* out_base_address,
+                                 uint32_t* out_end_address);
 
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
@@ -285,8 +289,12 @@ class PhysicalHeap : public BaseHeap {
   uint32_t GetPhysicalAddress(uint32_t address) const;
 
   uint32_t SystemPagenumToGuestPagenum(uint32_t num) const {
-    return ((num << system_page_shift_) - host_address_offset()) >>
-           page_size_shift_;
+    uint32_t system_base = num << system_page_shift_;
+    uint32_t offset = host_address_offset();
+    if (system_base < offset) {
+      return 0;
+    }
+    return (system_base - offset) >> page_size_shift_;
   }
 
   uint32_t GuestPagenumToSystemPagenum(uint32_t num) {
@@ -527,6 +535,12 @@ class Memory {
 
   // Gets the physical base heap.
   VirtualHeap* GetPhysicalHeap();
+  uint32_t GetPhysicalSystemAllocationMin() const {
+    return physical_system_allocation_min_.load();
+  }
+  uint32_t GetPhysicalSystemAllocationMaxEnd() const {
+    return physical_system_allocation_max_end_.load();
+  }
 
   void GetHeapsPageStatsSummary(const BaseHeap* const* provided_heaps,
                                 size_t heaps_count, uint32_t& unreserved_pages,
@@ -543,6 +557,9 @@ class Memory {
                                          void* context);
 
  private:
+#if XE_PLATFORM_MAC
+  int MapViewsMac();
+#endif
   int MapViews(uint8_t* mapping_base);
   void UnmapViews();
 
@@ -554,6 +571,7 @@ class Memory {
   static bool AccessViolationCallbackThunk(
       global_unique_lock_type global_lock_locked_once, void* context,
       void* host_address, bool is_write);
+  void NotePhysicalSystemAllocation(uint32_t physical_address, uint32_t size);
 
   std::filesystem::path file_name_;
   uint32_t system_page_size_ = 0;
@@ -599,6 +617,8 @@ class Memory {
   xe::global_critical_region global_critical_region_;
   std::vector<std::pair<PhysicalMemoryInvalidationCallback, void*>*>
       physical_memory_invalidation_callbacks_;
+  std::atomic<uint32_t> physical_system_allocation_min_{UINT32_MAX};
+  std::atomic<uint32_t> physical_system_allocation_max_end_{0};
 };
 
 }  // namespace xe

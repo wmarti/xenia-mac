@@ -139,6 +139,26 @@ export PKG_CONFIG_PATH="/opt/Qt/6.10.1/gcc_64/lib/pkgconfig:$PKG_CONFIG_PATH"
 export QT_DIR="/opt/Qt/6.10.1/gcc_64"
 ```
 
+### macOS
+
+* macOS 15.0+ (current target)
+* Xcode Command Line Tools
+* [Python 3.9+](https://www.python.org/downloads/)
+* Qt 6.10.1 (required for the UI and tests that link xenia-gpu)
+  * Install using aqtinstall (pick one for your host CPU):
+    ```sh
+    pip install aqtinstall
+    # Apple Silicon:
+    python -m aqt install-qt mac desktop 6.10.1 macos_arm64 -m qtmultimedia -O /opt/Qt
+    # Intel:
+    python -m aqt install-qt mac desktop 6.10.1 clang_64 -m qtmultimedia -O /opt/Qt
+    ```
+  * Add Qt to your environment (adjust the path to match your install):
+    ```sh
+    export PATH="/opt/Qt/6.10.1/macos_arm64/bin:$PATH"
+    export QT_DIR="/opt/Qt/6.10.1/macos_arm64"
+    ```
+
 ## Running
 
 To make life easier you can set the program startup arguments in your IDE to something like `--log_file=stdout /path/to/Default.xex` to log to console rather than a file and start up the emulator right away.

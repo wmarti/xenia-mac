@@ -351,9 +351,16 @@ def generate_disasm(insns):
       w1('PadStringBuffer(str, str_start, kNamePad);')
     w0('}')
 
-  w0('#define INSTRUCTION(opcode, mnem, form, group, type, desc, fn) \\')
-  w0('    {PPCOpcodeGroup::group, PPCOpcodeFormat::form, opcode, mnem, desc, fn}')
+  w0('#define INIT_LIST(...) {__VA_ARGS__}')
+  w0('#if XE_PLATFORM_MAC && XE_ARCH_ARM64')
+  w0('#define INSTRUCTION(opcode, mnem, form, group, type, desc, reads, writes, fn) \\')
+  w0('    {PPCOpcodeGroup::group, PPCOpcodeFormat::form, opcode, mnem, desc, INIT_LIST reads, INIT_LIST writes, fn}')
   w0('PPCOpcodeDisasmInfo ppc_opcode_disasm_table[] = {')
+  w0('#else')
+  w0('#define INSTRUCTION(opcode, mnem, form, group, type, desc, reads, writes, fn) \\')
+  w0('    {PPCOpcodeGroup::group, PPCOpcodeFormat::form, opcode, mnem, desc, fn}')
+  w0('static constexpr PPCOpcodeDisasmInfo ppc_opcode_disasm_table[] = {')
+  w0('#endif')
   fmt = 'INSTRUCTION(' + ', '.join([
       '0x%08x',
       '%-' + str(mnem_len) + 's',
@@ -361,6 +368,8 @@ def generate_disasm(insns):
       '%-' + str(group_len) + 's',
       '%-' + str(type_len) + 's',
       '%-' + str(desc_len) + 's',
+      '(%s)',
+      '(%s)',
       '%s',
       ]) + '),'
   for i in insns:
@@ -371,9 +380,12 @@ def generate_disasm(insns):
         i.group,
         i.type,
         i.desc,
+        ','.join(['PPCOpcodeField::' + c_field(r) for r in i.reads]),
+        ','.join(['PPCOpcodeField::' + c_field(w) for w in i.writes]),
         ('PrintDisasm_' + literal_mnem(i.mnem)) if i.disasm_str else 'nullptr',
         ))
   w0('};')
+  w0('#undef INSTRUCTION')
   w0('static_assert(sizeof(ppc_opcode_disasm_table) / sizeof(PPCOpcodeDisasmInfo) == static_cast<int>(PPCOpcode::kInvalid), "PPC table mismatch - rerun ppc-table-gen.py");')
   w0('')
   w0('const PPCOpcodeDisasmInfo& GetOpcodeDisasmInfo(PPCOpcode opcode) {')
@@ -381,7 +393,11 @@ def generate_disasm(insns):
   w0('}')
   w0('void RegisterOpcodeDisasm(PPCOpcode opcode, InstrDisasmFn fn) {')
   w1('assert_null(ppc_opcode_disasm_table[static_cast<int>(opcode)].disasm);')
+  w0('#if XE_PLATFORM_MAC && XE_ARCH_ARM64')
   w1('ppc_opcode_disasm_table[static_cast<int>(opcode)].disasm = fn;')
+  w0('#else')
+  w1('const_cast<PPCOpcodeDisasmInfo*>( &ppc_opcode_disasm_table[static_cast<int>(opcode)])->disasm = fn;')
+  w0('#endif')
   w0('}')
 
   w0('')
