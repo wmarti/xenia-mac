@@ -330,22 +330,46 @@ if os.istarget("linux") then
           "-Wl,-rpath," .. path.join(qt_dir, "lib"),
         })
       else
-        -- System Qt (installed via apt) - use standard system paths
+        -- QT_DIR set but no version found - assume it's a system path or cmake dir
+        -- Use standard system paths instead
         includedirs({
           "/usr/include/x86_64-linux-gnu/qt6",
+          "/usr/include/x86_64-linux-gnu/qt6/QtCore",
+          "/usr/include/x86_64-linux-gnu/qt6/QtGui",
+          "/usr/include/x86_64-linux-gnu/qt6/QtWidgets",
           "/usr/include/aarch64-linux-gnu/qt6",
+          "/usr/include/aarch64-linux-gnu/qt6/QtCore",
+          "/usr/include/aarch64-linux-gnu/qt6/QtGui",
+          "/usr/include/aarch64-linux-gnu/qt6/QtWidgets",
           "/usr/include/qt6",
           "/usr/include/qt6/QtCore",
           "/usr/include/qt6/QtGui",
           "/usr/include/qt6/QtWidgets",
         })
       end
-      links({
-        "Qt6Core",
-        "Qt6Gui",
-        "Qt6Widgets",
+    else
+      -- No QT_DIR set - use system Qt paths (installed via apt)
+      includedirs({
+        "/usr/include/x86_64-linux-gnu/qt6",
+        "/usr/include/x86_64-linux-gnu/qt6/QtCore",
+        "/usr/include/x86_64-linux-gnu/qt6/QtGui",
+        "/usr/include/x86_64-linux-gnu/qt6/QtWidgets",
+        "/usr/include/aarch64-linux-gnu/qt6",
+        "/usr/include/aarch64-linux-gnu/qt6/QtCore",
+        "/usr/include/aarch64-linux-gnu/qt6/QtGui",
+        "/usr/include/aarch64-linux-gnu/qt6/QtWidgets",
+        "/usr/include/qt6",
+        "/usr/include/qt6/QtCore",
+        "/usr/include/qt6/QtGui",
+        "/usr/include/qt6/QtWidgets",
       })
     end
+    -- Always link Qt on Linux
+    links({
+      "Qt6Core",
+      "Qt6Gui",
+      "Qt6Widgets",
+    })
 
     links({
       "stdc++fs",

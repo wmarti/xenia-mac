@@ -282,7 +282,8 @@ void Win32A64CodeCache::InitializeUnwindEntry(
   // LDP(X29, X30, SP, POST_INDEXED, 16);
 
   // These opcodes must undo the epilog and put the return address within lr
-  unwind_info->UnwindCodes[0] = OpAllocL(func_info.stack_size);
+  unwind_info->UnwindCodes[0] =
+      OpAllocL(static_cast<int32_t>(func_info.stack_size));
   unwind_info->UnwindCodes[1] =
       UnwindOpWord(UWOP_SET_FP, OpSaveFpLrX(-16), UWOP_END);
 

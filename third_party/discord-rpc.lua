@@ -7,6 +7,8 @@ project("discord-rpc")
     "discord-rpc/include",
     "rapidjson/include"
   })
+
+  -- Common files for all platforms
   files({
     "discord-rpc/src/connection.h",
     "discord-rpc/src/discord_rpc.cpp",
@@ -24,6 +26,27 @@ project("discord-rpc")
     defines({ "RAPIDJSON_NEON" })
   filter({})
 
+  -- Platform-specific connection implementations
+  -- For premake-cmake compatibility, we use os.istarget() which is evaluated at
+  -- premake generation time. This ensures the correct files are included in cmake.
+  if os.istarget("linux") then
+    files({
+      "discord-rpc/src/connection_unix.cpp",
+      "discord-rpc/src/discord_register_linux.cpp"
+    })
+  elseif os.istarget("macosx") then
+    files({
+      "discord-rpc/src/connection_unix.cpp",
+      "discord-rpc/src/discord_register_osx.m"
+    })
+  elseif os.istarget("windows") then
+    files({
+      "discord-rpc/src/connection_win.cpp",
+      "discord-rpc/src/discord_register_win.cpp"
+    })
+  end
+
+  -- Also add platform filter for VS/Make generators that handle filters properly
   filter("platforms:Linux-*")
     files({
       "discord-rpc/src/connection_unix.cpp",
@@ -40,11 +63,3 @@ project("discord-rpc")
       "discord-rpc/src/discord_register_win.cpp"
     })
   filter({})
-
-  -- For Linux cmake compatibility (premake-cmake doesn't properly handle platform filters)
-  if os.istarget("linux") then
-    files({
-      "discord-rpc/src/connection_unix.cpp",
-      "discord-rpc/src/discord_register_linux.cpp"
-    })
-  end
