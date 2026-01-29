@@ -268,6 +268,13 @@ jobs:
           path: third_party
           key: ${{ runner.os }}-${{ runner.arch }}-submodules-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
 
+      - name: Cache Qt6
+        id: cache-qt-linux-arm64
+        uses: actions/cache@v3
+        with:
+          path: /opt/Qt
+          key: ${{ runner.os }}-${{ runner.arch }}-qt6-6.10.1
+
       - name: Setup
         run: |
           UBUNTU_BASE=$(lsb_release -cs)
@@ -277,16 +284,26 @@ jobs:
           sudo apt-get -y update
           sudo apt-get -y install libc++-dev libc++abi-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-21 ninja-build spirv-tools glslang-tools libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfontconfig1-dev libxtst-dev
 
-          # Install Qt6 from Ubuntu repos (aqtinstall doesn't have ARM64 Linux builds)
-          sudo apt-get -y install qt6-base-dev qt6-base-private-dev libqt6widgets6
+          # Install Qt 6.10.1 via aqtinstall (Linux ARM64 host)
+          if [ '${{ steps.cache-qt-linux-arm64.outputs.cache-hit }}' != 'true' ]; then
+            pip install aqtinstall
+            echo "Available architectures for Qt 6.10.1:"
+            aqt list-qt linux_arm64 desktop --arch 6.10.1 || true
+            aqt install-qt linux_arm64 desktop 6.10.1 linux_gcc_arm64 -O /opt/Qt
+          fi
+          export PATH="/opt/Qt/6.10.1/gcc_arm64/bin:$PATH"
+          export CMAKE_PREFIX_PATH="/opt/Qt/6.10.1/gcc_arm64"
+          export PKG_CONFIG_PATH="/opt/Qt/6.10.1/gcc_arm64/lib/pkgconfig:$PKG_CONFIG_PATH"
+          export QT_DIR="/opt/Qt/6.10.1/gcc_arm64"
+          echo "/opt/Qt/6.10.1/gcc_arm64/bin" >> $GITHUB_PATH
+          echo "CMAKE_PREFIX_PATH=/opt/Qt/6.10.1/gcc_arm64" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/opt/Qt/6.10.1/gcc_arm64/lib/pkgconfig" >> $GITHUB_ENV
+          echo "QT_DIR=/opt/Qt/6.10.1/gcc_arm64" >> $GITHUB_ENV
 
           # Set up Vulkan SDK environment using system packages
           # (LunarG SDK doesn't provide ARM64 Linux builds)
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
           echo "/usr/bin" >> $GITHUB_PATH
-
-          # For system Qt packages, do NOT set QT_DIR - let premake use system paths
-          # Setting QT_DIR would make premake think it's a custom Qt installation
 
           # Update submodules if not cached
           if [ '${{ steps.cache-submodules.outputs.cache-hit }}' != 'true' ]; then

@@ -47,21 +47,6 @@ function get_qt_version(qt_dir)
   return nil
 end
 
-function get_system_qt_version()
-  local system_qt_dirs = {
-    "/usr/lib/x86_64-linux-gnu/qt6",
-    "/usr/lib/aarch64-linux-gnu/qt6",
-    "/usr/share/qt6",
-  }
-  for _, dir in ipairs(system_qt_dirs) do
-    local version = get_qt_version(dir)
-    if version then
-      return version
-    end
-  end
-  return nil
-end
-
 location(build_root)
 targetdir(build_bin)
 objdir(build_obj)
@@ -320,26 +305,6 @@ if os.istarget("linux") then
   filter("platforms:Linux-*")
     system("linux")
     toolset("clang")
-    local function add_system_qt_private_includes(qt_version)
-      if not qt_version then
-        return
-      end
-      local roots = {
-        "/usr/include/x86_64-linux-gnu/qt6",
-        "/usr/include/aarch64-linux-gnu/qt6",
-        "/usr/include/qt6",
-      }
-      for _, root in ipairs(roots) do
-        includedirs({
-          path.join(root, "QtCore", qt_version),
-          path.join(root, "QtCore", qt_version, "QtCore"),
-          path.join(root, "QtGui", qt_version),
-          path.join(root, "QtGui", qt_version, "QtGui"),
-          path.join(root, "QtWidgets", qt_version),
-          path.join(root, "QtWidgets", qt_version, "QtWidgets"),
-        })
-      end
-    end
     local qt_dir = os.getenv("QT_DIR")
     if qt_dir then
       local qt_version = get_qt_version(qt_dir)
@@ -381,7 +346,6 @@ if os.istarget("linux") then
           "/usr/include/qt6/QtGui",
           "/usr/include/qt6/QtWidgets",
         })
-        add_system_qt_private_includes(get_system_qt_version())
       end
     else
       -- No QT_DIR set - use system Qt paths (installed via apt)
@@ -399,7 +363,6 @@ if os.istarget("linux") then
         "/usr/include/qt6/QtGui",
         "/usr/include/qt6/QtWidgets",
       })
-      add_system_qt_private_includes(get_system_qt_version())
     end
     -- Always link Qt on Linux
     links({
