@@ -10,12 +10,10 @@ project("xenia-ui-d3d12")
     "xenia-base",
     "xenia-ui",
   })
-  -- DXC includes only needed on macOS for Metal shader conversion
-  filter("system:macosx")
-    includedirs({
-      project_root.."/third_party/DirectXShaderCompiler/include",
-    })
-  filter({})
+  -- DXC includes needed for dxcapi.h and DxbcConverter.h
+  includedirs({
+    project_root.."/third_party/DirectXShaderCompiler/include",
+  })
   local_platform_files()
   files({
     "../shaders/bytecode/d3d12_5_1/*.h",
