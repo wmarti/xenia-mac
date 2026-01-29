@@ -49,6 +49,7 @@ if os.istarget("macosx") then
   local target_arch = os.targetarch() or ""
   local option_arch = _OPTIONS and _OPTIONS["arch"] or ""
   local want_x86 =
+      _OPTIONS and _OPTIONS["mac-x86_64"] or
       target_arch == "x86_64" or target_arch == "x64" or
       option_arch == "x86_64" or option_arch == "x64"
   local want_arm = target_arch == "arm64" or option_arch == "arm64"
