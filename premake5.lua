@@ -490,6 +490,7 @@ if os.istarget("linux") and string.contains(CLANG_BIN, "clang") then
       disablewarnings({
         "character-conversion",          -- Needed for utfcpp third-party library
         "absolute-value",                -- Needed for tomlplusplus third-party library
+        "enum-compare-switch",           -- Needed for a64_backend with capstone
       })
   end
 end
