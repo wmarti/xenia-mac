@@ -78,10 +78,11 @@ function sdl2_include()
     libdirs(sdl2_sys_libdirs)
   filter({})
 
-  -- For cmake builds on Linux, add SDL2 includes unconditionally as a fallback
-  -- This works around issues with premake-cmake not properly handling filtered includes
-  if os.istarget("linux") and _ACTION == "cmake" then
+  -- For Linux, also add SDL2 includes outside of filter for cmake compatibility
+  -- The premake-cmake module doesn't properly handle filtered include directories
+  if os.istarget("linux") then
     includedirs(sdl2_sys_includedirs)
     libdirs(sdl2_sys_libdirs)
+    print("SDL2: Added includes for Linux cmake: " .. table.concat(sdl2_sys_includedirs, ", "))
   end
 end

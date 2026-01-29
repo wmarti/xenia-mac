@@ -1935,10 +1935,19 @@ def build_shaders(targets=None, config="release"):
                     return 1
 
                 spirv_file_path = f"{spirv_file_path_base}.spv"
-                if subprocess.call([spirv_opt, "-O", "-O", "--canonicalize-ids",
-                                   spirv_glslang_file_path, "-o", spirv_file_path]) != 0:
-                    print("ERROR: failed to optimize a SPIR-V shader")
-                    return 1
+                # Try with --canonicalize-ids first, fall back without it for older spirv-opt
+                spirv_opt_result = subprocess.call(
+                    [spirv_opt, "-O", "-O", "--canonicalize-ids",
+                     spirv_glslang_file_path, "-o", spirv_file_path],
+                    stderr=subprocess.DEVNULL)
+                if spirv_opt_result != 0:
+                    # Retry without --canonicalize-ids for older spirv-tools versions
+                    spirv_opt_result = subprocess.call(
+                        [spirv_opt, "-O", "-O",
+                         spirv_glslang_file_path, "-o", spirv_file_path])
+                    if spirv_opt_result != 0:
+                        print("ERROR: failed to optimize a SPIR-V shader")
+                        return 1
                 os.remove(spirv_glslang_file_path)
 
                 spirv_dis_file_path = f"{spirv_file_path_base}.txt"

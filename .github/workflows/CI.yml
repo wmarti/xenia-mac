@@ -398,7 +398,7 @@ jobs:
   build-macos-x86_64:
     name: Build macOS x86_64
     needs: lint
-    runs-on: macos-15-large
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@main
         with:
