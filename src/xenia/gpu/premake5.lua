@@ -18,7 +18,7 @@ project("xenia-gpu")
   includedirs({
     project_root.."/third_party/glslang",  -- For glslang SPIRV headers
   })
-  filter("platforms:Linux-* or Windows or Android-*")
+  filter("platforms:Linux-* or Windows-* or Android-*")
     includedirs({
       project_root.."/third_party/Vulkan-Headers/include",
     })
