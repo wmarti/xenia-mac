@@ -176,6 +176,7 @@ project("xenia-app")
     runpathdirs({ dxilconv_libdir_x86_64, "/usr/local/lib" })
     removelinks({ "LLVMDxcSupport" })
     linkoptions({
+      path.getabsolute(path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")),
       path.getabsolute(path.join(dxilconv_libdir_x86_64, "libLLVMDxcSupport.a")),
     })
     -- Copy dylibs to app bundle Frameworks folder

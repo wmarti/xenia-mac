@@ -145,9 +145,12 @@ jobs:
             git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/(DirectXShaderCompiler|premake-(androidndk|export-compile-commands))).+' .gitmodules)
           fi
 
+          # Always run premake to regenerate cmake files (lua files may have changed)
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
             ./xenia-build.py premake
             cp third_party/premake-core/bin/release/premake5 tools/build/bin
+          else
+            ./xenia-build.py premake
           fi
 
           # Fetch data repos (game-patches, optimized-settings)
@@ -156,7 +159,10 @@ jobs:
         env:
           CC: clang-21
           CXX: clang++-21
-        run: ./xenia-build.py build --config=Release
+        run: |
+          # Clear cmake cache to ensure fresh build with updated files
+          rm -rf build/build_Release
+          ./xenia-build.py build --config=Release
       - name: Prepare artifacts
         id: prepare_artifacts
         run: |
@@ -287,9 +293,12 @@ jobs:
             git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/(DirectXShaderCompiler|premake-(androidndk|export-compile-commands))).+' .gitmodules)
           fi
 
+          # Always run premake to regenerate cmake files (lua files may have changed)
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
             ./xenia-build.py premake
             cp third_party/premake-core/bin/release/premake5 tools/build/bin
+          else
+            ./xenia-build.py premake
           fi
 
           # Fetch data repos (game-patches, optimized-settings)
@@ -298,7 +307,10 @@ jobs:
         env:
           CC: clang-21
           CXX: clang++-21
-        run: ./xenia-build.py build --config=Release
+        run: |
+          # Clear cmake cache to ensure fresh build with updated files
+          rm -rf build/build_Release
+          ./xenia-build.py build --config=Release
       - name: Prepare artifacts
         id: prepare_artifacts
         run: |
@@ -729,18 +741,15 @@ jobs:
           echo "VULKAN_SDK=$env:VULKAN_SDK" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "$env:VULKAN_SDK\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-          # Install Qt6 (aqtinstall doesn't have ARM64 Windows builds yet)
-          # TODO: Check if Qt provides ARM64 Windows builds via aqtinstall
+          # Install Qt6 for Windows ARM64 (cross-compiled version)
           $qtCacheHit = '${{ steps.cache-qt.outputs.cache-hit }}'
           if ($qtCacheHit -ne 'true') {
             pip install aqtinstall
-            # Try win64_msvc2022_arm64 if available, otherwise skip Qt for now
-            try {
-              aqt install-qt windows desktop 6.10.1 win64_msvc2022_arm64 -O C:\Qt
-            } catch {
-              echo "Warning: Qt ARM64 build not available, building without Qt UI"
-            }
+            aqt install-qt windows desktop 6.10.1 win64_msvc2022_arm64_cross_compiled -O C:\Qt
           }
+          # Set up Qt environment
+          $env:QT_DIR = "C:\Qt\6.10.1\msvc2022_arm64"
+          echo "QT_DIR=$env:QT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           # Always run submodule update - it's fast if already present from cache
           # This ensures any newly added submodules are fetched even with cache hit
