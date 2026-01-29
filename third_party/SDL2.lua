@@ -29,8 +29,13 @@ else
   end
   local result, code, what = os.outputof(sdl2_config .. " --cflags")
   if result then
+    print("SDL2: sdl2-config --cflags returned: " .. result)
     for inc in string.gmatch(result, "-I([%S]+)") do
       table.insert(sdl2_sys_includedirs, inc)
+      print("SDL2: Added include dir: " .. inc)
+    end
+    if #sdl2_sys_includedirs == 0 then
+      print("SDL2: Warning - no include directories found in sdl2-config output")
     end
   else
     error("Failed to run 'sdl2-config'. Are libsdl2 development files installed?")
