@@ -1395,14 +1395,19 @@ class BaseBuildCommand(Command):
                 print("ERROR: Visual Studio is not installed.")
                 result = 1
             else:
+                # Determine Windows platform name based on architecture
+                import platform as plat
+                if plat.machine() == "ARM64":
+                    win_platform = "Windows-ARM64"
+                else:
+                    win_platform = "Windows-x86_64"
+
                 targets = None
                 if args["target"]:
                     # Build each project file directly to avoid MSBuild trying to
                     # run the target on every project in the solution
                     result = 0
-                    # Convert config name to match project configuration names
-                    # e.g., "debug" -> "Debug Windows"
-                    config_name = f"{args['config'].capitalize()} Windows"
+                    config_name = args['config'].capitalize()
                     for target in args["target"]:
                         project_file = f"build/{target}.vcxproj"
                         if not os.path.exists(project_file):
@@ -1419,20 +1424,22 @@ class BaseBuildCommand(Command):
                             "/v:m",
                             target_arg,
                             f"/p:Configuration={config_name}",
-                            "/p:Platform=x64",
+                            f"/p:Platform={win_platform}",
                             ] + pass_args)
                         if result != 0:
                             break
                 else:
                     # Build entire solution
                     targets = "/t:Rebuild" if args["force"] else None
+                    config_name = args['config'].capitalize()
                     result = subprocess.call([
                         "msbuild",
                         "build/xenia.sln",
                         "/nologo",
                         "/m",
                         "/v:m",
-                        f"/p:Configuration={args['config']}",
+                        f"/p:Configuration={config_name}",
+                        f"/p:Platform={win_platform}",
                         ] + ([targets] if targets else []) + pass_args)
         elif sys.platform == "darwin":
             schemes = args["target"] or ["xenia-app"]
