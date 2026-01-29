@@ -295,6 +295,46 @@ project("xenia-app")
     local app_contents = app_bundle .. "/Contents"
     local app_frameworks = app_contents .. "/Frameworks"
     local app_executable = app_contents .. "/MacOS/xenia"
+    local qt_dir = os.getenv("QT_DIR")
+    if not qt_dir then
+      local brew_prefix = os.outputof("brew --prefix qt@6 2>/dev/null")
+      if not brew_prefix or brew_prefix == "" then
+        brew_prefix = os.outputof("brew --prefix qt 2>/dev/null")
+      end
+      if brew_prefix then
+        brew_prefix = brew_prefix:gsub("%s+$", "")
+        if #brew_prefix > 0 and os.isdir(brew_prefix) then
+          qt_dir = brew_prefix
+        end
+      end
+    end
+    if not qt_dir then
+      local qt_candidates = {
+        "/opt/homebrew/opt/qt",
+        "/opt/homebrew/opt/qt@6",
+        "/usr/local/opt/qt",
+        "/usr/local/opt/qt@6",
+      }
+      for _, candidate in ipairs(qt_candidates) do
+        if os.isdir(candidate) then
+          qt_dir = candidate
+          break
+        end
+      end
+    end
+    local sdl2_dylib = nil
+    local sdl2_candidates = {
+      "/opt/homebrew/opt/sdl2/lib/libSDL2-2.0.0.dylib",
+      "/opt/homebrew/lib/libSDL2-2.0.0.dylib",
+      "/usr/local/opt/sdl2/lib/libSDL2-2.0.0.dylib",
+      "/usr/local/lib/libSDL2-2.0.0.dylib",
+    }
+    for _, candidate in ipairs(sdl2_candidates) do
+      if os.isfile(candidate) then
+        sdl2_dylib = candidate
+        break
+      end
+    end
     files({
       "Info.plist",
       project_root.."/xenia.entitlements",
@@ -316,9 +356,40 @@ project("xenia-app")
           .. '" "' .. app_frameworks .. '/"',
       'codesign --force --sign - "' .. app_frameworks
           .. '/libmetalirconverter.dylib"',
-      'codesign --force --deep --sign - --entitlements "'
-          .. entitlements_path .. '" "' .. app_bundle .. '"',
     })
+    if qt_dir then
+      postbuildcommands({
+        'mkdir -p "' .. app_contents .. '/PlugIns"',
+        'rsync -a "' .. path.join(qt_dir, "lib/QtCore.framework")
+            .. '" "' .. app_frameworks .. '/"',
+        'rsync -a "' .. path.join(qt_dir, "lib/QtGui.framework")
+            .. '" "' .. app_frameworks .. '/"',
+        'rsync -a "' .. path.join(qt_dir, "lib/QtWidgets.framework")
+            .. '" "' .. app_frameworks .. '/"',
+        'rsync -a "' .. path.join(qt_dir, "plugins/platforms")
+            .. '" "' .. app_contents .. '/PlugIns/"',
+        'rsync -a "' .. path.join(qt_dir, "plugins/imageformats")
+            .. '" "' .. app_contents .. '/PlugIns/"',
+        'rsync -a "' .. path.join(qt_dir, "plugins/iconengines")
+            .. '" "' .. app_contents .. '/PlugIns/"',
+      })
+    end
+    if sdl2_dylib then
+      postbuildcommands({
+        'cp -f "' .. sdl2_dylib .. '" "' .. app_frameworks .. '/"',
+        'install_name_tool -id "@rpath/libSDL2-2.0.0.dylib" "'
+            .. app_frameworks .. '/libSDL2-2.0.0.dylib"',
+        'install_name_tool -change "' .. sdl2_dylib
+            .. '" "@rpath/libSDL2-2.0.0.dylib" "'
+            .. app_executable .. '" || true',
+        'install_name_tool -change "/usr/local/opt/sdl2/lib/libSDL2-2.0.0.dylib"'
+            .. ' "@rpath/libSDL2-2.0.0.dylib" "'
+            .. app_executable .. '" || true',
+        'install_name_tool -change "/opt/homebrew/opt/sdl2/lib/libSDL2-2.0.0.dylib"'
+            .. ' "@rpath/libSDL2-2.0.0.dylib" "'
+            .. app_executable .. '" || true',
+      })
+    end
   filter({"platforms:Mac-*", "architecture:arm64"})
     postbuildcommands({
       'cp -f "' .. path.join(dxilconv_libdir_arm64, "libdxilconv.dylib")
@@ -330,6 +401,11 @@ project("xenia-app")
       'cp -f "' .. path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")
           .. '" "' .. app_frameworks .. '/"',
       'codesign --force --sign - "' .. app_frameworks .. '/libdxilconv.dylib"',
+    })
+  filter("platforms:Mac-*")
+    postbuildcommands({
+      'codesign --force --deep --sign - --entitlements "'
+          .. entitlements_path .. '" "' .. app_bundle .. '"',
     })
   filter({"platforms:Mac-*", "files:**.icns"})
     buildaction("Resources")
