@@ -109,7 +109,7 @@
 	url = https://github.com/cpplint/cpplint.git
 [submodule "third_party/miniaudio"]
 	path = third_party/miniaudio
-	url = https://github.com/wmarti/miniaudio.git
+	url = https://github.com/mackron/miniaudio.git
 [submodule "third_party/DirectX-Headers"]
 	path = third_party/DirectX-Headers
 	url = https://github.com/microsoft/DirectX-Headers.git
