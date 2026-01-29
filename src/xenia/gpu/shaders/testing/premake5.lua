@@ -18,7 +18,7 @@ test_suite("xenia-gpu-shader-tests", project_root, ".", {
 })
 
 -- Use vkd3d-shader for DXBC conversion and SPIRV-Cross for reflection
-filter("platforms:Linux")
+filter("platforms:Linux-*")
   links({
     "vkd3d-shader",
     "spirv-cross-c-shared",  -- For SPIRV reflection (C API)
@@ -34,11 +34,11 @@ files({
 })
 
 -- Platform-specific Vulkan libraries
-filter("platforms:Linux")
+filter("platforms:Linux-*")
   links({
     "vulkan",  -- System Vulkan library
   })
-filter("platforms:Windows")
+filter("platforms:Windows-*")
   links({
     "vulkan-1",  -- Vulkan SDK library
   })

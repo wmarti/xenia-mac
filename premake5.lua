@@ -192,7 +192,7 @@ filter("configurations:Checked")
     "NDEBUG",
   })
 
-filter({"configurations:Checked", "platforms:Linux"})
+filter({"configurations:Checked", "platforms:Linux-*"})
   buildoptions({
     "-fsanitize=undefined",
   })
@@ -200,19 +200,19 @@ filter({"configurations:Checked", "platforms:Linux"})
     "-fsanitize=undefined",
   })
 
-filter({"configurations:Checked", "platforms:Windows"}) -- "toolset:msc"
+filter({"configurations:Checked", "platforms:Windows-*"}) -- "toolset:msc"
   buildoptions({
     "/RTCsu",           -- Full Run-Time Checks.
   })
   -- AddressSanitizer on Windows (doesn't conflict with memory layout like on Linux)
   sanitize("Address")
 
-filter({"configurations:Checked or Debug", "platforms:Linux"})
+filter({"configurations:Checked or Debug", "platforms:Linux-*"})
   defines({
     -- "_GLIBCXX_DEBUG",   -- libstdc++ debug mode (disabled - causes ABI issues with system libraries)
   })
 
-filter({"configurations:Checked or Debug", "platforms:Windows"}) -- "toolset:msc"
+filter({"configurations:Checked or Debug", "platforms:Windows-*"}) -- "toolset:msc"
   symbols("Full")
 
 filter("configurations:Debug")
@@ -242,7 +242,7 @@ filter("configurations:Release")
   -- (such as constant propagation) emulation as predictable as possible,
   -- including handling of specials since games make assumptions about them.
 
-filter({"configurations:Release", "platforms:not Windows"})
+filter({"configurations:Release", "platforms:Linux-* or Mac-* or Android-*"})
   symbols("On")  -- Enable debug symbols for crash debugging
   linktimeoptimization("On")
   buildoptions({
@@ -252,7 +252,7 @@ filter({"configurations:Release", "platforms:not Windows"})
     "-fomit-frame-pointer",  -- Don't keep frame pointer for better performance
   })
 
-filter({"configurations:Release", "platforms:Windows"}) -- "toolset:msc"
+filter({"configurations:Release", "platforms:Windows-*"}) -- "toolset:msc"
   symbols("Off")  -- Disable PDB generation for release builds
   linktimeoptimization("On")
   buildoptions({
@@ -277,14 +277,14 @@ filter("configurations:Valgrind")
     "-fno-inline-functions",    -- Disable function inlining for clearer traces
   })
 
-filter({"configurations:Valgrind", "platforms:Linux"})
+filter({"configurations:Valgrind", "platforms:Linux-*"})
   -- Additional Valgrind-friendly settings for Linux
   buildoptions({
     "-g3",  -- Maximum debug info
   })
 
 if os.istarget("linux") then
-  filter("platforms:Linux or Linux-ARM64")
+  filter("platforms:Linux-*")
     system("linux")
     toolset("clang")
     local qt_dir = os.getenv("QT_DIR")
@@ -339,7 +339,7 @@ if os.istarget("linux") then
     })
 end
 
-filter({"platforms:Linux", "kind:*App"})
+filter({"platforms:Linux-*", "kind:*App"})
   linkgroups("On")
 
 if os.istarget("macosx") then
@@ -416,13 +416,13 @@ filter({"platforms:Mac-x86_64", "toolset:clang"})
   })
 filter({})
 
-filter({"language:C++", "toolset:clang or gcc"}) -- "platforms:Linux"
+filter({"language:C++", "toolset:clang or gcc"}) -- "platforms:Linux-*"
   disablewarnings({
     "switch",
     "attributes",
   })
 
-filter({"language:C++", "toolset:gcc"}) -- "platforms:Linux"
+filter({"language:C++", "toolset:gcc"}) -- "platforms:Linux-*"
   disablewarnings({
     "unused-result",
     "volatile",
@@ -431,7 +431,7 @@ filter({"language:C++", "toolset:gcc"}) -- "platforms:Linux"
     "deprecated",
   })
 
-filter("toolset:gcc") -- "platforms:Linux"
+filter("toolset:gcc") -- "platforms:Linux-*"
   removefatalwarnings("All") -- HACK
   if ARCH == "ppc64" then
     buildoptions({
@@ -451,7 +451,7 @@ filter("toolset:gcc") -- "platforms:Linux"
     })
   end
 
-filter({"language:C++", "toolset:clang"}) -- "platforms:Linux"
+filter({"language:C++", "toolset:clang"}) -- "platforms:Linux-*"
   disablewarnings({
     "deprecated-register",
     "deprecated-volatile",
@@ -461,21 +461,21 @@ CLANG_BIN = os.getenv("CC") or _OPTIONS["cc"] or "clang"
 if os.istarget("linux") and string.contains(CLANG_BIN, "clang") then
   CLANG_VER = tonumber(string.match(os.outputof(CLANG_BIN.." --version"), "version (%d%d)"))
   if CLANG_VER >= 20 then
-    filter({"language:C++", "toolset:clang"}) -- "platforms:Linux"
+    filter({"language:C++", "toolset:clang"}) -- "platforms:Linux-*"
       disablewarnings({
         "deprecated-literal-operator",   -- Needed only for tabulate
         "nontrivial-memcall",
       })
   end
   if CLANG_VER >= 21 then
-    filter({"language:C++", "toolset:clang"}) -- "platforms:Linux"
+    filter({"language:C++", "toolset:clang"}) -- "platforms:Linux-*"
       disablewarnings({
         "character-conversion",          -- Needed for utfcpp third-party library
       })
   end
 end
 
-filter({"language:C", "toolset:clang or gcc"}) -- "platforms:Linux"
+filter({"language:C", "toolset:clang or gcc"}) -- "platforms:Linux-*"
   disablewarnings({
     "implicit-function-declaration",
   })
@@ -499,7 +499,7 @@ if os.istarget("android") then
     })
 end
 
-filter("platforms:Windows")
+filter("platforms:Windows-*")
   system("windows")
   toolset("msc")
   buildoptions({
@@ -519,7 +519,6 @@ filter("platforms:Windows")
     "_CRT_SECURE_NO_WARNINGS",
     "WIN32",
     "_WIN64=1",
-    "_AMD64=1",
   })
   linkoptions({
     "/ignore:4006",  -- Ignores complaints about empty obj files.
@@ -550,7 +549,17 @@ filter("platforms:Windows")
     })
   end
 
-filter({"platforms:Windows", "configurations:Release"})
+filter("platforms:Windows-x86_64")
+  defines({
+    "_AMD64=1",
+  })
+
+filter("platforms:Windows-ARM64")
+  defines({
+    "_ARM64_=1",
+  })
+
+filter({"platforms:Windows-*", "configurations:Release"})
   if qt_dir then
     links({
       "Qt6Core",
@@ -559,7 +568,7 @@ filter({"platforms:Windows", "configurations:Release"})
     })
   end
 
-filter({"platforms:Windows", "configurations:Debug or Checked"})
+filter({"platforms:Windows-*", "configurations:Debug or Checked"})
   if qt_dir then
     links({
       "Qt6Cored",
@@ -568,10 +577,10 @@ filter({"platforms:Windows", "configurations:Debug or Checked"})
     })
   end
 
-filter("platforms:Windows")
+filter("platforms:Windows-*")
 
 -- Embed the manifest for things like dependencies and DPI awareness.
-filter({"platforms:Windows", "kind:ConsoleApp or WindowedApp"})
+filter({"platforms:Windows-*", "kind:ConsoleApp or WindowedApp"})
   files({
     "src/xenia/base/app_win32.manifest"
   })
@@ -597,7 +606,7 @@ workspace("xenia")
         platforms({"Linux-ARM64"})
         architecture("ARM64")
       else
-        platforms({"Linux"})
+        platforms({"Linux-x86_64"})
         architecture("x86_64")
       end
     elseif os.istarget("macosx") then
@@ -625,8 +634,13 @@ workspace("xenia")
         })
       filter({})
     elseif os.istarget("windows") then
-      platforms({"Windows"})
-      architecture("x86_64")
+      if TARGET_ARCH == "ARM64" then
+        platforms({"Windows-ARM64"})
+        architecture("ARM64")
+      else
+        platforms({"Windows-x86_64"})
+        architecture("x86_64")
+      end
       -- 10.0.15063.0: ID3D12GraphicsCommandList1::SetSamplePositions.
       -- 10.0.19041.0: D3D12_HEAP_FLAG_CREATE_NOT_ZEROED.
       -- 10.0.22000.0: DWMWA_WINDOW_CORNER_PREFERENCE.
@@ -681,7 +695,7 @@ workspace("xenia")
     })
     removefatalwarnings("All")
 
-    filter({"platforms:Linux", "configurations:Checked"})
+    filter({"platforms:Linux-*", "configurations:Checked"})
       buildoptions({
         "-fsanitize=undefined",
       })
@@ -692,7 +706,7 @@ workspace("xenia")
 
     -- Add POSIX feature test macros for FFmpeg on Linux
     if prj.name == "libavutil" or prj.name == "libavcodec" or prj.name == "libavformat" then
-      filter({"platforms:Linux"})
+      filter({"platforms:Linux-*"})
         defines({
           "_GNU_SOURCE",
           "_POSIX_C_SOURCE=200809L",
@@ -702,7 +716,7 @@ workspace("xenia")
     end
 
     -- Suppress warnings for third_party modules on Windows
-    filter({"platforms:Windows"})
+    filter({"platforms:Windows-*"})
       if string.startswith(prj.name, "third_party") or
          prj.name == "aes_128" or
          prj.name == "capstone" or

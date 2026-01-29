@@ -74,7 +74,7 @@ project("xenia-app")
   end
   filter(NOT_SINGLE_LIBRARY_FILTER)
     kind("WindowedApp")
-  filter({NOT_SINGLE_LIBRARY_FILTER, "platforms:Windows", "configurations:Debug"})
+  filter({NOT_SINGLE_LIBRARY_FILTER, "platforms:Windows-*", "configurations:Debug"})
     kind("ConsoleApp")
 
   -- `targetname` is broken if building from Gradle, works only for toggling the
@@ -100,7 +100,7 @@ project("xenia-app")
       "xenia_main.cc",
     })
 
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     files({
       "main_resources.rc",
     })
@@ -119,7 +119,7 @@ project("xenia-app")
       "xenia-hid-sdl",
     })
 
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     links({
       "xenia-apu-alsa",
       "X11",
@@ -189,7 +189,7 @@ project("xenia-app")
     })
   filter({})
 
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     links({
       "xenia-apu-xaudio2",
       "xenia-gpu-d3d12",
@@ -198,17 +198,17 @@ project("xenia-app")
       "xenia-ui-d3d12",
     })
 
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
 
   if enableMiscSubprojects then
-    filter({"platforms:Windows", SINGLE_LIBRARY_FILTER})
+    filter({"platforms:Windows-*", SINGLE_LIBRARY_FILTER})
       links({
         "xenia-gpu-d3d12-trace-viewer",
         "xenia-ui-window-d3d12-demo",
       })
   end
 
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     -- Only create the .user file if it doesn't already exist.
     local user_file = project_root.."/build/xenia-app.vcxproj.user"
     if not os.isfile(user_file) then
@@ -216,7 +216,7 @@ project("xenia-app")
     end
 
   -- Run windeployqt as post-build event to copy Qt DLLs
-  filter({"platforms:Windows", "configurations:Debug or Checked"})
+  filter({"platforms:Windows-*", "configurations:Debug or Checked"})
     local qt_dir = os.getenv("QT_DIR")
     if qt_dir then
       local windeployqt = path.translate(path.join(qt_dir, "bin", "windeployqt.exe"), "\\")
@@ -225,7 +225,7 @@ project("xenia-app")
       }
     end
 
-  filter({"platforms:Windows", "configurations:Release"})
+  filter({"platforms:Windows-*", "configurations:Release"})
     local qt_dir = os.getenv("QT_DIR")
     if qt_dir then
       local windeployqt = path.translate(path.join(qt_dir, "bin", "windeployqt.exe"), "\\")
@@ -235,7 +235,7 @@ project("xenia-app")
     end
 
   -- Copy optimized-settings JSON files next to executable
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     -- Use absolute path to avoid issues with relative paths
     local optimized_settings_src = path.translate(path.getabsolute(path.join(project_root, ".data_repos", "optimized-settings", "settings")), "\\")
     postbuildcommands {
@@ -244,7 +244,7 @@ project("xenia-app")
     }
 
   -- Copy game-patches TOML files next to executable
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     local game_patches_src = path.translate(path.getabsolute(path.join(project_root, ".data_repos", "game-patches", "patches")), "\\")
     postbuildcommands {
       'if not exist "$(TargetDir)game_patches" mkdir "$(TargetDir)game_patches"',
@@ -252,14 +252,14 @@ project("xenia-app")
     }
 
   -- Copy assets/font next to executable
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     local assets_font_src = path.translate(path.getabsolute(path.join(project_root, "assets", "font")), "\\")
     postbuildcommands {
       'if not exist "$(TargetDir)assets\\font" mkdir "$(TargetDir)assets\\font"',
       'xcopy /I /Y /Q "' .. assets_font_src .. '\\*.*" "$(TargetDir)assets\\font\\"'
     }
 
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     local optimized_settings_src = path.getabsolute(path.join(project_root, ".data_repos", "optimized-settings", "settings"))
     local optimized_settings_dst = path.getabsolute(path.join(project_root, "build", "bin", "Linux")) .. "/%{cfg.buildcfg}/optimized_settings"
     postbuildcommands {
@@ -267,7 +267,7 @@ project("xenia-app")
       '{COPY} ' .. optimized_settings_src .. '/*.json ' .. optimized_settings_dst
     }
 
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     local game_patches_src = path.getabsolute(path.join(project_root, ".data_repos", "game-patches", "patches"))
     local game_patches_dst = path.getabsolute(path.join(project_root, "build", "bin", "Linux")) .. "/%{cfg.buildcfg}/game_patches"
     postbuildcommands {
@@ -276,7 +276,7 @@ project("xenia-app")
     }
 
   -- Copy assets/font next to executable
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     local assets_font_src = path.getabsolute(path.join(project_root, "assets", "font"))
     local assets_font_dst = path.getabsolute(path.join(project_root, "build", "bin", "Linux")) .. "/%{cfg.buildcfg}/assets/font"
     postbuildcommands {

@@ -24,7 +24,7 @@ project("discord-rpc")
     defines({ "RAPIDJSON_NEON" })
   filter({})
 
-  filter("platforms:Linux")
+  filter("platforms:Linux-*")
     files({
       "discord-rpc/src/connection_unix.cpp",
       "discord-rpc/src/discord_register_linux.cpp"
@@ -34,7 +34,7 @@ project("discord-rpc")
       "discord-rpc/src/connection_unix.cpp",
       "discord-rpc/src/discord_register_osx.m"
     })
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     files({
       "discord-rpc/src/connection_win.cpp",
       "discord-rpc/src/discord_register_win.cpp"
