@@ -11,15 +11,26 @@
 
 #include <cstdlib>
 
-#include <spirv-tools/optimizer.hpp>
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
+
+#if XE_PLATFORM_WIN32 && XE_ARCH_ARM64
+#define XE_DISABLE_SPIRV_TOOLS 1
+#endif
+
+#if !XE_DISABLE_SPIRV_TOOLS
+#include <spirv-tools/optimizer.hpp>
+#endif
 
 namespace xe {
 namespace ui {
 namespace vulkan {
 
 bool SpirvToolsContext::Initialize(unsigned int spirv_version) {
+#if XE_DISABLE_SPIRV_TOOLS
+  XELOGI("SPIRV-Tools: Disabled on Windows ARM64");
+  return false;
+#else
   // Determine target environment based on SPIR-V version
   if (spirv_version >= 0x10500) {
     target_env_ = SPV_ENV_VULKAN_1_2;
@@ -40,18 +51,24 @@ bool SpirvToolsContext::Initialize(unsigned int spirv_version) {
 
   XELOGI("SPIRV-Tools: Initialized successfully with static linking");
   return true;
+#endif
 }
 
 void SpirvToolsContext::Shutdown() {
+#if !XE_DISABLE_SPIRV_TOOLS
   if (context_) {
     spvContextDestroy(context_);
     context_ = nullptr;
   }
+#endif
 }
 
 spv_result_t SpirvToolsContext::Validate(const uint32_t* words,
                                          size_t num_words,
                                          std::string* error) const {
+#if XE_DISABLE_SPIRV_TOOLS
+  return SPV_UNSUPPORTED;
+#else
   if (error) {
     error->clear();
   }
@@ -81,12 +98,16 @@ spv_result_t SpirvToolsContext::Validate(const uint32_t* words,
     spvDiagnosticDestroy(diagnostic);
   }
   return result;
+#endif
 }
 
 spv_result_t SpirvToolsContext::Optimize(const uint32_t* words,
                                          size_t num_words,
                                          std::vector<uint32_t>& optimized_words,
                                          bool performance_passes) {
+#if XE_DISABLE_SPIRV_TOOLS
+  return SPV_UNSUPPORTED;
+#else
   optimized_words.clear();
   if (!context_) {
     return SPV_UNSUPPORTED;
@@ -119,6 +140,7 @@ spv_result_t SpirvToolsContext::Optimize(const uint32_t* words,
   }
 
   return SPV_SUCCESS;
+#endif
 }
 
 }  // namespace vulkan
