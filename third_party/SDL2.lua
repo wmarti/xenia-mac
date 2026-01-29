@@ -83,6 +83,12 @@ function sdl2_include()
   if os.istarget("linux") then
     includedirs(sdl2_sys_includedirs)
     libdirs(sdl2_sys_libdirs)
-    print("SDL2: Added includes for Linux cmake: " .. table.concat(sdl2_sys_includedirs, ", "))
+    -- Also add common fallback path for cases where sdl2-config doesn't return -I flags
+    if #sdl2_sys_includedirs == 0 then
+      includedirs({"/usr/include/SDL2"})
+      print("SDL2: Using fallback include path /usr/include/SDL2")
+    else
+      print("SDL2: Added includes for Linux cmake: " .. table.concat(sdl2_sys_includedirs, ", "))
+    end
   end
 end

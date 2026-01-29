@@ -7,6 +7,16 @@ project("dxilconv")
   uuid("9b1b4a3d-5c3b-4c1e-8db5-4c1e9937f2f8")
   kind("Utility")
   language("C++")
+  -- Set architecture explicitly for Utility projects which don't inherit from workspace
+  filter("platforms:Mac-ARM64")
+    xcodebuildsettings({
+      ["ARCHS"] = "arm64",
+    })
+  filter("platforms:Mac-x86_64")
+    xcodebuildsettings({
+      ["ARCHS"] = "x86_64",
+    })
+  filter({})
 
   local dxilconv_root =
       path.getabsolute("third_party/DirectXShaderCompiler", _MAIN_SCRIPT_DIR)

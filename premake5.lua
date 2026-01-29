@@ -149,6 +149,24 @@ includedirs({
   "third_party",
 })
 
+-- Add SDL2 include path for Linux cmake builds
+-- premake-cmake doesn't properly handle includedirs from sdl2_include() function
+if os.istarget("linux") then
+  local sdl2_config = os.getenv("SDL2_CONFIG") or "sdl2-config"
+  local sdl2_cflags = os.outputof(sdl2_config .. " --cflags")
+  if sdl2_cflags then
+    for inc in string.gmatch(sdl2_cflags, "-I([%S]+)") do
+      includedirs({inc})
+      print("SDL2: Global include dir: " .. inc)
+    end
+  end
+  -- Fallback to common location if sdl2-config doesn't return -I flags
+  if not sdl2_cflags or not string.find(sdl2_cflags, "-I") then
+    includedirs({"/usr/include/SDL2"})
+    print("SDL2: Using fallback global include /usr/include/SDL2")
+  end
+end
+
 defines({
   "VULKAN_HPP_NO_TO_STRING",
   "IMGUI_DISABLE_OBSOLETE_FUNCTIONS",
