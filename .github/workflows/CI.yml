@@ -47,6 +47,17 @@ jobs:
           path: tools/build/bin/premake5
           key: ${{ runner.os }}-premake5-${{ hashFiles('third_party/premake-core/**') }}
 
+      - name: Cache build output
+        id: cache-build
+        uses: actions/cache@v3
+        with:
+          path: |
+            build/obj
+            build/bin/Linux-x86_64/Release/*.a
+          key: ${{ runner.os }}-x86_64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          restore-keys: |
+            ${{ runner.os }}-x86_64-build-
+
       - name: Cache Qt6
         id: cache-qt-linux
         uses: actions/cache@v3
@@ -233,6 +244,17 @@ jobs:
           path: tools/build/bin/premake5
           key: ${{ runner.os }}-${{ runner.arch }}-premake5-${{ hashFiles('third_party/premake-core/**') }}
 
+      - name: Cache build output
+        id: cache-build
+        uses: actions/cache@v3
+        with:
+          path: |
+            build/obj
+            build/bin/Linux-ARM64/Release/*.a
+          key: ${{ runner.os }}-ARM64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          restore-keys: |
+            ${{ runner.os }}-ARM64-build-
+
       - name: Cache submodules
         id: cache-submodules
         uses: actions/cache@v3
@@ -313,6 +335,17 @@ jobs:
         with:
           path: tools/build/bin/premake5
           key: ${{ runner.os }}-premake5-${{ hashFiles('third_party/premake-core/**') }}
+
+      - name: Cache build output
+        id: cache-build
+        uses: actions/cache@v3
+        with:
+          path: |
+            build/obj
+            build/bin/Mac-ARM64/Release/*.a
+          key: ${{ runner.os }}-ARM64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          restore-keys: |
+            ${{ runner.os }}-ARM64-build-
 
       - name: Cache Qt6
         id: cache-qt-macos
@@ -411,6 +444,17 @@ jobs:
           path: tools/build/bin/premake5
           key: ${{ runner.os }}-${{ runner.arch }}-premake5-${{ hashFiles('third_party/premake-core/**') }}
 
+      - name: Cache build output
+        id: cache-build
+        uses: actions/cache@v3
+        with:
+          path: |
+            build/obj
+            build/bin/Mac-x86_64/Release/*.a
+          key: ${{ runner.os }}-x86_64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          restore-keys: |
+            ${{ runner.os }}-x86_64-build-
+
       - name: Cache Qt6
         id: cache-qt-macos
         uses: actions/cache@v3
@@ -503,6 +547,17 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
+
+      - name: Cache build output
+        id: cache-build
+        uses: actions/cache@v3
+        with:
+          path: |
+            build/obj
+            build/bin/Windows-x86_64/Release/*.lib
+          key: ${{ runner.os }}-x86_64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          restore-keys: |
+            ${{ runner.os }}-x86_64-build-
 
       - name: Cache Vulkan SDK
         id: cache-vulkan-sdk
@@ -625,6 +680,17 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
+
+      - name: Cache build output
+        id: cache-build
+        uses: actions/cache@v3
+        with:
+          path: |
+            build/obj
+            build/bin/Windows-ARM64/Release/*.lib
+          key: ${{ runner.os }}-ARM64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          restore-keys: |
+            ${{ runner.os }}-ARM64-build-
 
       - name: Cache Vulkan SDK
         id: cache-vulkan-sdk
