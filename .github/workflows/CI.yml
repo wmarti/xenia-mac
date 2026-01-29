@@ -140,10 +140,8 @@ jobs:
           which spirv-opt && spirv-opt --version || echo "Warning: spirv-opt not found"
           which spirv-dis || echo "Warning: spirv-dis not found"
 
-          # Update submodules if not cached
-          if [ '${{ steps.cache-submodules.outputs.cache-hit }}' != 'true' ]; then
-            git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/(DirectXShaderCompiler|premake-(androidndk|export-compile-commands))).+' .gitmodules)
-          fi
+          # Always update submodules so .git/modules is present even on cache hit
+          git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/(DirectXShaderCompiler|premake-(androidndk|export-compile-commands))).+' .gitmodules)
 
           # Always run premake to regenerate cmake files (lua files may have changed)
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
@@ -161,7 +159,7 @@ jobs:
           CXX: clang++-21
         run: |
           # Clear cmake cache to ensure fresh build with updated files
-          rm -rf build/build_Release
+          rm -rf build/build_release
           ./xenia-build.py build --config=Release
       - name: Prepare artifacts
         id: prepare_artifacts
@@ -305,10 +303,8 @@ jobs:
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
           echo "/usr/bin" >> $GITHUB_PATH
 
-          # Update submodules if not cached
-          if [ '${{ steps.cache-submodules.outputs.cache-hit }}' != 'true' ]; then
-            git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/(DirectXShaderCompiler|premake-(androidndk|export-compile-commands))).+' .gitmodules)
-          fi
+          # Always update submodules so .git/modules is present even on cache hit
+          git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/(DirectXShaderCompiler|premake-(androidndk|export-compile-commands))).+' .gitmodules)
 
           # Always run premake to regenerate cmake files (lua files may have changed)
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
@@ -326,7 +322,7 @@ jobs:
           CXX: clang++-21
         run: |
           # Clear cmake cache to ensure fresh build with updated files
-          rm -rf build/build_Release
+          rm -rf build/build_release
           ./xenia-build.py build --config=Release
       - name: Prepare artifacts
         id: prepare_artifacts
@@ -409,12 +405,10 @@ jobs:
           echo "CMAKE_PREFIX_PATH=$HOME/Qt/6.10.1/macos" >> $GITHUB_ENV
           echo "QT_DIR=$HOME/Qt/6.10.1/macos" >> $GITHUB_ENV
 
-          # Update submodules if not cached
-          if [ '${{ steps.cache-submodules.outputs.cache-hit }}' != 'true' ]; then
-            git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
-            # DirectXShaderCompiler has nested submodules needed for dxilconv
-            git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
-          fi
+          # Always update submodules so .git/modules is present even on cache hit
+          git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
+          # DirectXShaderCompiler has nested submodules needed for dxilconv
+          git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
 
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
             ./xenia-build.py premake
@@ -517,12 +511,10 @@ jobs:
           echo "CMAKE_PREFIX_PATH=$HOME/Qt/6.10.1/macos" >> $GITHUB_ENV
           echo "QT_DIR=$HOME/Qt/6.10.1/macos" >> $GITHUB_ENV
 
-          # Update submodules if not cached
-          if [ '${{ steps.cache-submodules.outputs.cache-hit }}' != 'true' ]; then
-            git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
-            # DirectXShaderCompiler has nested submodules needed for dxilconv
-            git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
-          fi
+          # Always update submodules so .git/modules is present even on cache hit
+          git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
+          # DirectXShaderCompiler has nested submodules needed for dxilconv
+          git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
 
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
             ./xenia-build.py premake
