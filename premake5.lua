@@ -772,8 +772,12 @@ workspace("xenia")
   include("src/xenia/apu/nop")
   include("src/xenia/base")
   include("src/xenia/cpu")
-  include("src/xenia/cpu/backend/a64")
-  include("src/xenia/cpu/backend/x64")
+  if TARGET_ARCH == "ARM64" then
+    include("src/xenia/cpu/backend/a64")
+  end
+  if TARGET_ARCH == "x86_64" then
+    include("src/xenia/cpu/backend/x64")
+  end
   include("src/xenia/debug/ui")
   include("src/xenia/gpu")
   if os.istarget("macosx") then
