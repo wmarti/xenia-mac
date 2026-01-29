@@ -519,6 +519,15 @@ if os.istarget("linux") and string.contains(CLANG_BIN, "clang") then
       })
   end
 end
+if os.istarget("linux") then
+  if ARCH == "aarch64" or ARCH == "arm64" then
+    filter({"platforms:Linux-*", "toolset:clang"})
+      buildoptions({
+        "-include arm_acle.h",
+      })
+  end
+end
+filter({})
 
 filter({"language:C", "toolset:clang or gcc"}) -- "platforms:Linux-*"
   disablewarnings({
