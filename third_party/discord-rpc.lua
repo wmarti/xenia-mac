@@ -39,3 +39,12 @@ project("discord-rpc")
       "discord-rpc/src/connection_win.cpp",
       "discord-rpc/src/discord_register_win.cpp"
     })
+  filter({})
+
+  -- For Linux cmake compatibility (premake-cmake doesn't properly handle platform filters)
+  if os.istarget("linux") then
+    files({
+      "discord-rpc/src/connection_unix.cpp",
+      "discord-rpc/src/discord_register_linux.cpp"
+    })
+  end

@@ -109,14 +109,14 @@ project("dxilconv")
     return table.concat(commands, " ")
   end
 
-  filter({"system:macosx", "architecture:arm64"})
-    prebuildmessage("Building dxilconv (dxbc2dxil)")
+  filter("platforms:Mac-ARM64")
+    prebuildmessage("Building dxilconv (dxbc2dxil) for arm64")
     prebuildcommands({
       dxilconv_build_cmd(dxilconv_build_arm64, "arm64",
                          "arm64-apple-darwin"),
     })
-  filter({"system:macosx", "architecture:x86_64"})
-    prebuildmessage("Building dxilconv (dxbc2dxil)")
+  filter("platforms:Mac-x86_64")
+    prebuildmessage("Building dxilconv (dxbc2dxil) for x86_64")
     prebuildcommands({
       dxilconv_build_cmd(dxilconv_build_x86_64, "x86_64",
                          "x86_64-apple-darwin"),

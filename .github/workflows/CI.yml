@@ -583,12 +583,12 @@ jobs:
             aqt install-qt windows desktop 6.10.1 win64_msvc2022_64 -O C:\Qt
           }
 
-          $cacheHit = '${{ steps.cache-submodules.outputs.cache-hit }}'
-          if ($cacheHit -ne 'true') {
-            git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS (Select-String -CaseSensitive '(?<=path = )(?!third_party\/(premake-(androidndk|cmake|export-compile-commands))).+' .gitmodules).Matches.Value
-            # DirectXShaderCompiler has nested submodules needed for dxilconv
-            git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
-          }
+          # Always run submodule update - it's fast if already present from cache
+          # This ensures any newly added submodules are fetched even with cache hit
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS (Select-String -CaseSensitive '(?<=path = )(?!third_party\/(premake-(androidndk|cmake|export-compile-commands))).+' .gitmodules).Matches.Value
+
+          # DirectXShaderCompiler has nested submodules needed for dxilconv
+          git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
 
           # Fetch data repos (game-patches, optimized-settings)
           python xenia-build.py fetchdata
@@ -678,12 +678,12 @@ jobs:
             }
           }
 
-          $cacheHit = '${{ steps.cache-submodules.outputs.cache-hit }}'
-          if ($cacheHit -ne 'true') {
-            git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS (Select-String -CaseSensitive '(?<=path = )(?!third_party\/(premake-(androidndk|cmake|export-compile-commands))).+' .gitmodules).Matches.Value
-            # DirectXShaderCompiler has nested submodules needed for dxilconv
-            git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
-          }
+          # Always run submodule update - it's fast if already present from cache
+          # This ensures any newly added submodules are fetched even with cache hit
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS (Select-String -CaseSensitive '(?<=path = )(?!third_party\/(premake-(androidndk|cmake|export-compile-commands))).+' .gitmodules).Matches.Value
+
+          # DirectXShaderCompiler has nested submodules needed for dxilconv
+          git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
 
           # Fetch data repos (game-patches, optimized-settings)
           python xenia-build.py fetchdata
