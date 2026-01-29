@@ -46,7 +46,7 @@ LONG CALLBACK ExceptionHandlerCallback(PEXCEPTION_POINTERS ex_info) {
               sizeof(thread_context.xmm_registers));
 #elif XE_ARCH_ARM64
   thread_context.pc = ex_info->ContextRecord->Pc;
-  thread_context.cpsr = ex_info->ContextRecord->Cpsr;
+  thread_context.pstate = ex_info->ContextRecord->Cpsr;
   std::memcpy(thread_context.x, &ex_info->ContextRecord->X,
               sizeof(thread_context.x));
   std::memcpy(thread_context.v, &ex_info->ContextRecord->V,
@@ -111,7 +111,7 @@ LONG CALLBACK ExceptionHandlerCallback(PEXCEPTION_POINTERS ex_info) {
       }
 #elif XE_ARCH_ARM64
       ex_info->ContextRecord->Pc = thread_context.pc;
-      ex_info->ContextRecord->Cpsr = thread_context.cpsr;
+      ex_info->ContextRecord->Cpsr = static_cast<DWORD>(thread_context.pstate);
       uint32_t modified_register_index;
       uint32_t modified_x_registers_remaining = ex.modified_x_registers();
       while (xe::bit_scan_forward(modified_x_registers_remaining,
