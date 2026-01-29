@@ -247,10 +247,15 @@ jobs:
           sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-21 main"
 
           sudo apt-get -y update
-          sudo apt-get -y install libc++-dev libc++abi-dev libsdl2-dev libx11-xcb-dev clang-21 ninja-build libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfontconfig1-dev libxtst-dev
+          sudo apt-get -y install libc++-dev libc++abi-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-21 ninja-build spirv-tools glslang-tools libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfontconfig1-dev libxtst-dev
 
           # Install Qt6 from Ubuntu repos (aqtinstall doesn't have ARM64 Linux builds)
           sudo apt-get -y install qt6-base-dev qt6-base-private-dev libqt6widgets6
+
+          # Set up Vulkan SDK environment using system packages
+          # (LunarG SDK doesn't provide ARM64 Linux builds)
+          echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
+          echo "/usr/bin" >> $GITHUB_PATH
 
           # Set Qt environment for system packages
           export QT_DIR="/usr/lib/aarch64-linux-gnu/cmake/Qt6"
