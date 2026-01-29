@@ -1935,6 +1935,7 @@ void D3D12CommandProcessor::ShutdownContext() {
 XE_FORCEINLINE
 void D3D12CommandProcessor::WriteRegisterForceinline(uint32_t index,
                                                      uint32_t value) {
+#if XE_ARCH_AMD64
   __m128i to_rangecheck = _mm_set1_epi16(static_cast<short>(index));
 
   __m128i lower_bounds = _mm_setr_epi16(
@@ -2003,6 +2004,54 @@ void D3D12CommandProcessor::WriteRegisterForceinline(uint32_t index,
     _ReadWriteBarrier();
     return;
   }
+#else
+  const bool in_fetch = index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+                        index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5;
+  const bool in_float = index >= XE_GPU_REG_SHADER_CONSTANT_000_X &&
+                        index <= XE_GPU_REG_SHADER_CONSTANT_511_W;
+  const bool in_bool_loop = index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
+                            index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31;
+  const bool in_special =
+      (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) ||
+      index == XE_GPU_REG_COHER_STATUS_HOST ||
+      (index >= XE_GPU_REG_DC_LUT_RW_INDEX &&
+       index <= XE_GPU_REG_DC_LUT_30_COLOR);
+
+  register_file_->values[index] = value;
+
+  if (in_float) {
+    if (frame_open_) {
+      uint32_t float_constant_index =
+          (index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+      uint64_t float_constant_mask = 1ULL << float_constant_index;
+
+      if (float_constant_index >= 256) {
+        float_constant_index = static_cast<unsigned char>(float_constant_index);
+        if (current_float_constant_map_pixel_[float_constant_index >> 6] &
+            float_constant_mask) {  // take advantage of x86 modulus shift
+          cbuffer_binding_float_pixel_.up_to_date = false;
+        }
+      } else {
+        if (current_float_constant_map_vertex_[float_constant_index >> 6] &
+            float_constant_mask) {
+          cbuffer_binding_float_vertex_.up_to_date = false;
+        }
+      }
+    }
+  } else if (in_bool_loop) {
+    cbuffer_binding_bool_loop_.up_to_date = false;
+  } else if (in_fetch) {
+    cbuffer_binding_fetch_.up_to_date = false;
+
+    texture_cache_->TextureFetchConstantWritten(
+        (index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 6);
+  } else if (in_special) {
+    HandleSpecialRegisterWrite(index, value);
+  } else {
+    _ReadWriteBarrier();
+    return;
+  }
+#endif
 }
 // todo: bit-pack the bools and use bitarith to reduce branches
 void D3D12CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {

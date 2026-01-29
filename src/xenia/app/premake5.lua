@@ -105,6 +105,9 @@ project("xenia-app")
       "main_resources.rc",
     })
     linkoptions({"/ENTRY:mainCRTStartup"})
+    includedirs({
+      project_root.."/third_party/DirectXShaderCompiler/include",
+    })
 
   filter({"architecture:x86_64", "files:../base/main_init_"..platform_suffix..".cc"})
     vectorextensions("SSE2")  -- Disable AVX for main_init_win.cc so our AVX check doesn't use AVX instructions.
