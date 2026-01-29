@@ -279,10 +279,8 @@ jobs:
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
           echo "/usr/bin" >> $GITHUB_PATH
 
-          # Set Qt environment for system packages
-          export QT_DIR="/usr/lib/aarch64-linux-gnu/cmake/Qt6"
-          echo "QT_DIR=/usr/lib/aarch64-linux-gnu/cmake/Qt6" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=/usr/lib/aarch64-linux-gnu/cmake/Qt6" >> $GITHUB_ENV
+          # For system Qt packages, do NOT set QT_DIR - let premake use system paths
+          # Setting QT_DIR would make premake think it's a custom Qt installation
 
           # Update submodules if not cached
           if [ '${{ steps.cache-submodules.outputs.cache-hit }}' != 'true' ]; then
