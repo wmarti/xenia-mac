@@ -46,18 +46,18 @@ project("discord-rpc")
     })
   end
 
-  -- Also add platform filter for VS/Make generators that handle filters properly
-  filter("platforms:Linux-*")
+  -- Also add system filter for generators that handle platforms differently
+  filter("system:linux")
     files({
       "discord-rpc/src/connection_unix.cpp",
       "discord-rpc/src/discord_register_linux.cpp"
     })
-  filter("platforms:Mac-*")
+  filter("system:macosx")
     files({
       "discord-rpc/src/connection_unix.cpp",
       "discord-rpc/src/discord_register_osx.m"
     })
-  filter("platforms:Windows-*")
+  filter("system:windows")
     files({
       "discord-rpc/src/connection_win.cpp",
       "discord-rpc/src/discord_register_win.cpp"
