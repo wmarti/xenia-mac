@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2024 Ben Vanik. All rights reserved.                             *
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -46,14 +46,8 @@
 #endif
 #import <QuartzCore/CAMetalLayer.h>
 
-DEFINE_bool(metal_presenter_wait_for_copy, false,
-            "Wait for Metal guest output copy completion (debug).", "GPU");
-DEFINE_bool(metal_presenter_log_mailbox, false, "Log Metal guest output mailbox indices (debug).",
-            "GPU");
-DEFINE_bool(metal_presenter_probe_copy, false,
-            "Read back 1x1 pixel after Metal guest output copy (debug).", "GPU");
-DEFINE_bool(metal_presenter_force_10bpc, false, "Force RGB10A2 guest output for presenter (debug).",
-            "GPU");
+DEFINE_bool(metal_presenter_force_10bpc, true,
+            "Force RGB10A2 guest output for presenter (reduces gamma conversion cost).", "GPU");
 DEFINE_int32(metal_presenter_gamma_debug, 0,
              "Gamma debug mode: 0=off, 1=gradient, 2=copy, 3=ramp_table, "
              "4=ramp_pwl.",
@@ -68,17 +62,13 @@ DEFINE_int32(metal_presenter_metalfx_scale_x, 0,
              "MetalFX scale factor X (1=1x, 2=2x, etc). 0 = Fit Window.", "GPU");
 DEFINE_int32(metal_presenter_metalfx_scale_y, 0,
              "MetalFX scale factor Y (1=1x, 2=2x, etc). 0 = Fit Window.", "GPU");
-#if XE_PLATFORM_IOS
 DEFINE_bool(metal_presenter_use_backing_scale, false,
-            "Use platform backing scale for CAMetalLayer drawable size. "
-            "If false, drawable size equals logical window size.",
+            "Use macOS backing scale (Retina) for CAMetalLayer drawable size. "
+            "If false, drawable size equals logical window size (lower GPU cost, "
+            "less sharp).",
             "GPU");
-#else
-DEFINE_bool(metal_presenter_use_backing_scale, false,
-            "Use platform backing scale for CAMetalLayer drawable size. "
-            "If false, drawable size equals logical window size.",
-            "GPU");
-#endif
+DEFINE_bool(metal_presenter_debug_markers, false,
+            "Add Metal debug markers for presenter passes and conversions.", "GPU");
 
 namespace xe {
 namespace ui {
@@ -89,9 +79,12 @@ MetalPresenter::MetalPresenter(MetalProvider* provider, HostGpuLossCallback host
   device_ = provider_->GetDevice();
   // Initialize guest output textures to nil
   guest_output_textures_.fill(nil);
+  guest_output_submissions_.fill(0);
 }
 
 MetalPresenter::~MetalPresenter() = default;
+
+void MetalPresenter::RequestCapture() { capture_requested_.store(true, std::memory_order_release); }
 
 bool MetalPresenter::Initialize() {
   // Use the shared MetalProvider command queue so presenter work is serialized
@@ -102,14 +95,33 @@ bool MetalPresenter::Initialize() {
     return false;
   }
 
+  id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device_;
+  if (!mtl_device) {
+    XELOGE("Metal presenter failed to get Metal device");
+    return false;
+  }
+  shared_event_ = [mtl_device newSharedEvent];
+  if (!shared_event_) {
+    XELOGE("Metal presenter requires MTLSharedEvent for D3D12 parity");
+    return false;
+  }
+
   XELOGI("Metal presenter initialized with shared command queue");
   return true;
 }
 
 void MetalPresenter::Shutdown() {
+  uint64_t last_submission = guest_output_submission_counter_.load(std::memory_order_acquire);
+  if (shared_event_ && last_submission) {
+    [(id<MTLSharedEvent>)shared_event_ waitUntilSignaledValue:last_submission timeout:UINT64_MAX];
+  }
   // Release Metal presentation resources
   if (command_queue_) {
     command_queue_ = nullptr;
+  }
+  if (shared_event_) {
+    [shared_event_ release];
+    shared_event_ = nullptr;
   }
   if (copy_texture_convert_pipeline_2d_) {
     copy_texture_convert_pipeline_2d_ = nullptr;
@@ -178,7 +190,7 @@ void MetalPresenter::Shutdown() {
   surface_width_in_points_ = 0;
   surface_height_in_points_ = 0;
   metal_layer_ = nullptr;
-  XELOGI("Metal presenter shut down");
+  XELOGD("Metal presenter shut down");
 }
 
 Surface::TypeFlags MetalPresenter::GetSupportedSurfaceTypes() const {
@@ -190,16 +202,7 @@ Surface::TypeFlags MetalPresenter::GetSupportedSurfaceTypes() const {
 }
 
 bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
-  XELOGI("Metal CaptureGuestOutput: Called");
-
-  auto log_mailbox = [&](const char* label, uint32_t mailbox_index) {
-    if (!::cvars::metal_presenter_log_mailbox) {
-      return;
-    }
-    uint32_t last_produced = last_guest_output_mailbox_index_.load(std::memory_order_relaxed);
-    XELOGI("Metal CaptureGuestOutput: {} mailbox index {} (last produced {})", label, mailbox_index,
-           last_produced);
-  };
+  XELOGD("Metal CaptureGuestOutput: Called");
 
   // Get the latest guest output
   uint32_t guest_output_mailbox_index;
@@ -210,15 +213,13 @@ bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
     std::unique_lock<std::mutex> guest_output_consumer_lock(
         ConsumeGuestOutput(guest_output_mailbox_index, nullptr, nullptr));
   }
-  log_mailbox("consumed", guest_output_mailbox_index);
-
   if (guest_output_mailbox_index == UINT32_MAX) {
     XELOGW("Metal CaptureGuestOutput: No guest output available, trying auto-refresh");
 
     // Try to auto-refresh for trace dumps without SWAP commands
     // For now, just create placeholder textures since accessing render targets safely is complex
     RefreshGuestOutput(1280, 720, 1280, 720, [](GuestOutputRefreshContext& context) -> bool {
-      XELOGI("Metal CaptureGuestOutput: Auto-refresh creating placeholder texture");
+      XELOGD("Metal CaptureGuestOutput: Auto-refresh creating placeholder texture");
       // Just return true to create guest output textures with placeholder data
       // This ensures CaptureGuestOutput has something to read
       return true;
@@ -227,8 +228,6 @@ bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
     // Try to get guest output again after refresh
     std::unique_lock<std::mutex> guest_output_consumer_lock2(
         ConsumeGuestOutput(guest_output_mailbox_index, nullptr, nullptr));
-    log_mailbox("auto-refresh", guest_output_mailbox_index);
-
     if (guest_output_mailbox_index == UINT32_MAX) {
       XELOGW("Metal CaptureGuestOutput: Auto-refresh failed, generating test image");
 
@@ -253,10 +252,10 @@ bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
         }
       }
 
-      XELOGI("Metal CaptureGuestOutput: Generated fallback test image {}x{}", width, height);
+      XELOGD("Metal CaptureGuestOutput: Generated fallback test image {}x{}", width, height);
       return true;
     } else {
-      XELOGI("Metal CaptureGuestOutput: Auto-refresh succeeded, got mailbox index "
+      XELOGD("Metal CaptureGuestOutput: Auto-refresh succeeded, got mailbox index "
              "{}",
              guest_output_mailbox_index);
     }
@@ -282,7 +281,7 @@ bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
   uint32_t height = static_cast<uint32_t>(guest_output_texture.height);
   size_t stride = width * 4;  // 4 bytes per pixel
 
-  XELOGI("Metal CaptureGuestOutput: Reading real texture data {}x{} from mailbox index {}", width,
+  XELOGD("Metal CaptureGuestOutput: Reading real texture data {}x{} from mailbox index {}", width,
          height, guest_output_mailbox_index);
 
   // Set up output image
@@ -347,82 +346,11 @@ bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
   // Release the readback buffer now that we've copied its contents
   [readback_buffer release];
 
-  auto log_capture_probe = [&](const char* label, const uint8_t* data, size_t bytes_per_row,
-                               uint32_t tex_width, uint32_t tex_height, MTLPixelFormat format) {
-    if (!::cvars::metal_presenter_probe_copy) {
-      return;
-    }
-    static uint32_t probe_count = 0;
-    if (probe_count >= 8) {
-      return;
-    }
-    ++probe_count;
-    uint32_t sample_x = std::min<uint32_t>(tex_width / 2, tex_width - 1);
-    uint32_t sample_y = std::min<uint32_t>(tex_height / 2, tex_height - 1);
-    auto read_packed = [&](uint32_t x, uint32_t y) -> uint32_t {
-      uint32_t packed = 0;
-      size_t offset = size_t(y) * bytes_per_row + size_t(x) * 4;
-      std::memcpy(&packed, data + offset, sizeof(packed));
-      return packed;
-    };
-    auto to_8bpc = [](uint32_t value) -> uint8_t {
-      return static_cast<uint8_t>((value * 255u + 511u) / 1023u);
-    };
-    uint32_t packed_tl = read_packed(0, 0);
-    uint32_t packed_mid = read_packed(sample_x, sample_y);
-    bool is_rgb10a2 = format == MTLPixelFormatRGB10A2Unorm;
-    bool is_bgr10a2 = false;
-#ifdef MTLPixelFormatRGB10A2Unorm_sRGB
-    if (format == MTLPixelFormatRGB10A2Unorm_sRGB) {
-      is_rgb10a2 = true;
-    }
-#endif
-#ifdef MTLPixelFormatBGR10A2Unorm
-    if (format == MTLPixelFormatBGR10A2Unorm) {
-      is_bgr10a2 = true;
-    }
-#endif
-#ifdef MTLPixelFormatBGR10A2Unorm_sRGB
-    if (format == MTLPixelFormatBGR10A2Unorm_sRGB) {
-      is_bgr10a2 = true;
-    }
-#endif
-    if (is_rgb10a2 || is_bgr10a2) {
-      auto log_rgb10 = [&](const char* pos, uint32_t packed) {
-        uint32_t r = packed & 0x3FFu;
-        uint32_t g = (packed >> 10) & 0x3FFu;
-        uint32_t b = (packed >> 20) & 0x3FFu;
-        uint32_t a = (packed >> 30) & 0x3u;
-        if (is_bgr10a2) {
-          std::swap(r, b);
-        }
-        XELOGI("Metal CaptureGuestOutput: {} {} fmt={} packed=0x{:08X} "
-               "rgba8={:02X} {:02X} {:02X} a2={}",
-               label, pos, int(format), packed, to_8bpc(r), to_8bpc(g), to_8bpc(b), a);
-      };
-      log_rgb10("tl", packed_tl);
-      log_rgb10("mid", packed_mid);
-      return;
-    }
-    auto log_rgba8 = [&](const char* pos, uint32_t packed) {
-      uint8_t r = packed & 0xFFu;
-      uint8_t g = (packed >> 8) & 0xFFu;
-      uint8_t b = (packed >> 16) & 0xFFu;
-      uint8_t a = (packed >> 24) & 0xFFu;
-      XELOGI("Metal CaptureGuestOutput: {} {} fmt={} rgba8={:02X} {:02X} {:02X} "
-             "{:02X}",
-             label, pos, int(format), r, g, b, a);
-    };
-    log_rgba8("tl", packed_tl);
-    log_rgba8("mid", packed_mid);
-  };
-
   // `stbi_write_png` expects RGBA8. Convert packed 10bpc and BGRA8 to RGBA8
   // and force alpha to 255 (matches D3D12/Vulkan behavior).
   uint8_t* pixel_data = image_out.data.data();
   size_t pixel_count = width * height;
   MTLPixelFormat pixel_format = guest_output_texture.pixelFormat;
-  log_capture_probe("pre-convert", pixel_data, stride, width, height, pixel_format);
   bool is_rgb10a2 = pixel_format == MTLPixelFormatRGB10A2Unorm
 #ifdef MTLPixelFormatRGB10A2Unorm_sRGB
                     || pixel_format == MTLPixelFormatRGB10A2Unorm_sRGB
@@ -471,10 +399,8 @@ bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
       pixel[3] = 255;
     }
   }
-  log_capture_probe("post-convert", image_out.data.data(), stride, width, height,
-                    MTLPixelFormatRGBA8Unorm);
 
-  XELOGI("Metal CaptureGuestOutput: Successfully read real texture data from "
+  XELOGD("Metal CaptureGuestOutput: Successfully read real texture data from "
          "Metal (forced alpha=255)");
   return true;
 }
@@ -520,8 +446,36 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
     return PaintResult::kNotPresented;
   }
 
+  bool started_capture = false;
+  id capture_manager = nil;
+  if (capture_requested_.exchange(false, std::memory_order_acq_rel)) {
+    capture_manager = [MTLCaptureManager sharedCaptureManager];
+    if (capture_manager) {
+      id descriptor = [[MTLCaptureDescriptor alloc] init];
+      [descriptor setCaptureObject:(__bridge id<MTLDevice>)device_];
+      [descriptor setDestination:MTLCaptureDestinationGPUTraceDocument];
+      const char* capture_dir = std::getenv("XENIA_GPU_CAPTURE_DIR");
+      std::string filename = capture_dir ? (std::string(capture_dir) + "/metal_capture.gputrace")
+                                         : std::string("./metal_capture.gputrace");
+      NSURL* output_url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:filename.c_str()]];
+      [descriptor setOutputURL:output_url];
+      NSError* error = nil;
+      if (![capture_manager startCaptureWithDescriptor:descriptor error:&error]) {
+        XELOGE("Metal capture start failed: {}",
+               error ? error.localizedDescription.UTF8String : "unknown");
+      } else {
+        XELOGD("Metal capture started: {}", filename);
+        started_capture = true;
+      }
+      [descriptor release];
+    }
+  }
+
   // Create command buffer
   id<MTLCommandBuffer> command_buffer = [command_queue_ commandBuffer];
+  if (cvars::metal_presenter_debug_markers && command_buffer) {
+    command_buffer.label = @"XeniaPresenter";
+  }
 
   // Draw the guest output to the drawable (bilinear/dither only for now).
   uint32_t guest_output_mailbox_index = UINT32_MAX;
@@ -532,6 +486,11 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
     std::unique_lock<std::mutex> guest_output_consumer_lock(ConsumeGuestOutput(
         guest_output_mailbox_index, &guest_output_properties, &guest_output_paint_config));
     if (guest_output_mailbox_index != UINT32_MAX) {
+      uint64_t await_submission = guest_output_submissions_[guest_output_mailbox_index];
+      if (await_submission && shared_event_) {
+        [command_buffer encodeWaitForEvent:(id<MTLSharedEvent>)shared_event_
+                                     value:await_submission];
+      }
       guest_output_texture = guest_output_textures_[guest_output_mailbox_index];
     }
   }
@@ -672,6 +631,9 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
                 }
               }
               if (metalfx_scaler_ && metalfx_output_texture_) {
+                if (cvars::metal_presenter_debug_markers) {
+                  [command_buffer pushDebugGroup:@"MetalFX"];
+                }
                 id<MTLFXSpatialScaler> scaler = (id<MTLFXSpatialScaler>)metalfx_scaler_;
                 scaler.colorTexture = guest_output_texture;
                 scaler.outputTexture = metalfx_output_texture_;
@@ -679,6 +641,9 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
                 scaler.inputContentHeight = input_height;
                 [scaler encodeToCommandBuffer:command_buffer];
                 paint_texture = metalfx_output_texture_;
+                if (cvars::metal_presenter_debug_markers) {
+                  [command_buffer popDebugGroup];
+                }
               }
             }
           }
@@ -704,8 +669,14 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
     XELOGW("Metal PaintAndPresentImpl failed to create render encoder");
     return PaintResult::kNotPresented;
   }
+  if (cvars::metal_presenter_debug_markers) {
+    render_encoder.label = @"XeniaPresenterRender";
+  }
 
   if (draw_guest_output && paint_texture) {
+    if (cvars::metal_presenter_debug_markers) {
+      [render_encoder pushDebugGroup:@"GuestOutput"];
+    }
     MTLViewport viewport;
     viewport.originX = 0.0;
     viewport.originY = 0.0;
@@ -733,10 +704,16 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
       [render_encoder setFragmentSamplerState:guest_output_sampler_ atIndex:0];
     }
     [render_encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    if (cvars::metal_presenter_debug_markers) {
+      [render_encoder popDebugGroup];
+    }
   }
 
   // Execute UI drawers if requested
   if (execute_ui_drawers) {
+    if (cvars::metal_presenter_debug_markers) {
+      [render_encoder pushDebugGroup:@"UI"];
+    }
     static bool ui_capture_done = false;
     if (!ui_capture_done) {
       const char* capture_env = std::getenv("XENIA_METAL_UI_CAPTURE");
@@ -759,7 +736,7 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
             XELOGE("Metal UI capture start failed: {}",
                    error ? error.localizedDescription.UTF8String : "unknown");
           } else {
-            XELOGI("Metal UI capture started: {}", filename);
+            XELOGD("Metal UI capture started: {}", filename);
           }
           [descriptor release];
         }
@@ -779,8 +756,11 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
       id capture_manager = [MTLCaptureManager sharedCaptureManager];
       if (capture_manager && [capture_manager isCapturing]) {
         [capture_manager stopCapture];
-        XELOGI("Metal UI capture completed");
+        XELOGD("Metal UI capture completed");
       }
+    }
+    if (cvars::metal_presenter_debug_markers) {
+      [render_encoder popDebugGroup];
     }
   }
 
@@ -789,6 +769,12 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
 
   // Present the drawable
   [command_buffer presentDrawable:drawable];
+  if (started_capture && capture_manager) {
+    [command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+      [capture_manager stopCapture];
+      XELOGD("Metal capture completed");
+    }];
+  }
   [command_buffer commit];
 
   // XELOGI("Metal PaintAndPresentImpl: Frame presented successfully");
@@ -833,6 +819,18 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   MacNSViewSurface& mac_ns_view_surface =
       static_cast<MacNSViewSurface&>(new_surface);
   metal_layer = mac_ns_view_surface.GetOrCreateMetalLayer();
+  NSView* view = mac_ns_view_surface.view();
+  if (view) {
+    NSRect bounds = [view bounds];
+    if (bounds.size.width > 0.0 && bounds.size.height > 0.0) {
+      NSRect backing_bounds = [view convertRectToBacking:bounds];
+      if (backing_bounds.size.width > 0.0) {
+        surface_scale = backing_bounds.size.width / bounds.size.width;
+      }
+    } else if (view.window) {
+      surface_scale = view.window.backingScaleFactor;
+    }
+  }
 #endif
 
   if (!metal_layer) {
@@ -846,15 +844,9 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   if (surface_scale <= 0.0) {
     surface_scale = 1.0;
   }
-#if !XE_PLATFORM_IOS
-  // Match D3D12/Vulkan surface sizing semantics on macOS (no Retina multiplier
-  // at the presenter level).
-  surface_scale = 1.0;
-#else
-  // Match other backends' surface sizing semantics on iOS as well (logical
-  // surface size at presenter level).
-  surface_scale = 1.0;
-#endif
+  if (!cvars::metal_presenter_use_backing_scale) {
+    surface_scale = 1.0;
+  }
   surface_scale_ = static_cast<float>(surface_scale);
   surface_width_in_points_ = new_surface_width;
   surface_height_in_points_ = new_surface_height;
@@ -939,11 +931,7 @@ bool MetalPresenter::RefreshGuestOutputImpl(
 
   guest_output_textures_[mailbox_index] = guest_output_texture;
   last_guest_output_mailbox_index_.store(mailbox_index, std::memory_order_relaxed);
-  if (::cvars::metal_presenter_log_mailbox) {
-    XELOGI("Metal RefreshGuestOutputImpl: produced mailbox index {} ({}x{})", mailbox_index,
-           frontbuffer_width, frontbuffer_height);
-  }
-
+  guest_output_submissions_[mailbox_index] = context.submission_id();
   return true;
 }
 
@@ -994,12 +982,12 @@ bool MetalPresenter::UpdateGammaRamp(const void* table_data, size_t table_bytes,
         reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(contents) + table_bytes);
     static bool logged_once = false;
     if (!logged_once) {
-      XELOGI("MetalPresenter::UpdateGammaRamp: table_bytes={} pwl_bytes={}", table_bytes,
+      XELOGD("MetalPresenter::UpdateGammaRamp: table_bytes={} pwl_bytes={}", table_bytes,
              pwl_bytes);
-      XELOGI("MetalPresenter::UpdateGammaRamp: table[0..3]=0x{:08X} 0x{:08X} "
+      XELOGD("MetalPresenter::UpdateGammaRamp: table[0..3]=0x{:08X} 0x{:08X} "
              "0x{:08X} 0x{:08X}",
              table_words[0], table_words[1], table_words[2], table_words[3]);
-      XELOGI("MetalPresenter::UpdateGammaRamp: pwl[0..3]=0x{:08X} 0x{:08X} "
+      XELOGD("MetalPresenter::UpdateGammaRamp: pwl[0..3]=0x{:08X} 0x{:08X} "
              "0x{:08X} 0x{:08X}",
              pwl_words[0], pwl_words[1], pwl_words[2], pwl_words[3]);
       logged_once = true;
@@ -1490,10 +1478,14 @@ bool MetalPresenter::EnsureGuestOutputPaintResources(uint32_t pixel_format) {
 
 bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id dest_texture,
                                               uint32_t source_width, uint32_t source_height,
-                                              bool force_swap_rb, bool use_pwl_gamma_ramp) {
+                                              bool force_swap_rb, bool use_pwl_gamma_ramp,
+                                              uint64_t* submission_out) {
   if (!source_texture || !dest_texture) {
     XELOGE("MetalPresenter::CopyTextureToGuestOutput: Invalid textures");
     return false;
+  }
+  if (submission_out) {
+    *submission_out = 0;
   }
 
   // Create command buffer for the copy operation
@@ -1502,6 +1494,18 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
     XELOGE("MetalPresenter::CopyTextureToGuestOutput: Failed to create "
            "command buffer");
     return false;
+  }
+  if (cvars::metal_presenter_debug_markers) {
+    copy_command_buffer.label = @"XeniaGuestOutputCopy";
+  }
+
+  uint64_t submission_id =
+      guest_output_submission_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (submission_out) {
+    *submission_out = submission_id;
+  }
+  if (shared_event_) {
+    [copy_command_buffer encodeSignalEvent:(id<MTLSharedEvent>)shared_event_ value:submission_id];
   }
 
   // Cast dest_texture to proper Metal texture type
@@ -1523,128 +1527,6 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
 
   MTLPixelFormat src_format = (MTLPixelFormat)source_texture->pixelFormat();
   MTLPixelFormat dst_format = dest_metal_texture.pixelFormat;
-  const bool wait_for_copy =
-      ::cvars::metal_presenter_wait_for_copy || ::cvars::metal_presenter_probe_copy;
-  auto log_probe_pixel = [&](const char* label, id<MTLTexture> texture, MTLPixelFormat format) {
-    if (!::cvars::metal_presenter_probe_copy) {
-      return;
-    }
-    static uint32_t probe_count = 0;
-    if (probe_count >= 8) {
-      return;
-    }
-    ++probe_count;
-    uint32_t tex_width = static_cast<uint32_t>(texture.width);
-    uint32_t tex_height = static_cast<uint32_t>(texture.height);
-    if (!tex_width || !tex_height) {
-      return;
-    }
-    uint32_t mid_x = std::min<uint32_t>(tex_width / 2, tex_width - 1);
-    uint32_t mid_y = std::min<uint32_t>(tex_height / 2, tex_height - 1);
-    id<MTLCommandBuffer> probe_command_buffer = [command_queue_ commandBuffer];
-    if (!probe_command_buffer) {
-      XELOGW("MetalPresenter::CopyTextureToGuestOutput: probe command buffer "
-             "creation failed");
-      return;
-    }
-    id<MTLBuffer> probe_buffer =
-        [(__bridge id<MTLDevice>)device_ newBufferWithLength:8
-                                                     options:MTLResourceStorageModeShared];
-    if (!probe_buffer) {
-      XELOGW("MetalPresenter::CopyTextureToGuestOutput: probe buffer allocation "
-             "failed");
-      return;
-    }
-    id<MTLBlitCommandEncoder> probe_blit = [probe_command_buffer blitCommandEncoder];
-    if (!probe_blit) {
-      XELOGW("MetalPresenter::CopyTextureToGuestOutput: probe blit encoder "
-             "creation failed");
-      [probe_buffer release];
-      return;
-    }
-    [probe_blit copyFromTexture:texture
-                     sourceSlice:0
-                     sourceLevel:0
-                    sourceOrigin:MTLOriginMake(0, 0, 0)
-                      sourceSize:MTLSizeMake(1, 1, 1)
-                        toBuffer:probe_buffer
-               destinationOffset:0
-          destinationBytesPerRow:4
-        destinationBytesPerImage:4];
-    [probe_blit copyFromTexture:texture
-                     sourceSlice:0
-                     sourceLevel:0
-                    sourceOrigin:MTLOriginMake(mid_x, mid_y, 0)
-                      sourceSize:MTLSizeMake(1, 1, 1)
-                        toBuffer:probe_buffer
-               destinationOffset:4
-          destinationBytesPerRow:4
-        destinationBytesPerImage:4];
-    [probe_blit endEncoding];
-    [probe_command_buffer commit];
-    [probe_command_buffer waitUntilCompleted];
-    const uint8_t* pixel = reinterpret_cast<const uint8_t*>([probe_buffer contents]);
-    if (!pixel) {
-      XELOGW("MetalPresenter::CopyTextureToGuestOutput: probe buffer contents "
-             "null");
-      [probe_buffer release];
-      return;
-    }
-    uint32_t packed_tl = uint32_t(pixel[0]) | (uint32_t(pixel[1]) << 8) |
-                         (uint32_t(pixel[2]) << 16) | (uint32_t(pixel[3]) << 24);
-    uint32_t packed_mid = uint32_t(pixel[4]) | (uint32_t(pixel[5]) << 8) |
-                          (uint32_t(pixel[6]) << 16) | (uint32_t(pixel[7]) << 24);
-    bool is_rgb10a2 = format == MTLPixelFormatRGB10A2Unorm;
-    bool is_bgr10a2 = false;
-#ifdef MTLPixelFormatRGB10A2Unorm_sRGB
-    if (format == MTLPixelFormatRGB10A2Unorm_sRGB) {
-      is_rgb10a2 = true;
-    }
-#endif
-#ifdef MTLPixelFormatBGR10A2Unorm
-    if (format == MTLPixelFormatBGR10A2Unorm) {
-      is_bgr10a2 = true;
-    }
-#endif
-#ifdef MTLPixelFormatBGR10A2Unorm_sRGB
-    if (format == MTLPixelFormatBGR10A2Unorm_sRGB) {
-      is_bgr10a2 = true;
-    }
-#endif
-    if (is_rgb10a2 || is_bgr10a2) {
-      auto to_8bpc = [](uint32_t value) -> uint8_t {
-        return static_cast<uint8_t>((value * 255u + 511u) / 1023u);
-      };
-      auto log_rgb10 = [&](const char* pos, uint32_t packed) {
-        uint32_t r = packed & 0x3FFu;
-        uint32_t g = (packed >> 10) & 0x3FFu;
-        uint32_t b = (packed >> 20) & 0x3FFu;
-        uint32_t a = (packed >> 30) & 0x3u;
-        if (is_bgr10a2) {
-          std::swap(r, b);
-        }
-        XELOGI("MetalPresenter::CopyTextureToGuestOutput: {} {} fmt={} "
-               "packed=0x{:08X} rgba8={:02X} {:02X} {:02X} a2={}",
-               label, pos, int(format), packed, to_8bpc(r), to_8bpc(g), to_8bpc(b), a);
-      };
-      log_rgb10("tl", packed_tl);
-      log_rgb10("mid", packed_mid);
-      [probe_buffer release];
-      return;
-    }
-    auto log_rgba8 = [&](const char* pos, uint32_t packed) {
-      uint8_t r = packed & 0xFFu;
-      uint8_t g = (packed >> 8) & 0xFFu;
-      uint8_t b = (packed >> 16) & 0xFFu;
-      uint8_t a = (packed >> 24) & 0xFFu;
-      XELOGI("MetalPresenter::CopyTextureToGuestOutput: {} {} fmt={} rgba8={:02X} "
-             "{:02X} {:02X} {:02X}",
-             label, pos, int(format), r, g, b, a);
-    };
-    log_rgba8("tl", packed_tl);
-    log_rgba8("mid", packed_mid);
-    [probe_buffer release];
-  };
   static MTLPixelFormat last_src_format = MTLPixelFormatInvalid;
   static MTLPixelFormat last_dst_format = MTLPixelFormatInvalid;
   static bool last_swap_rb = false;
@@ -1802,11 +1684,9 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
     }
   };
 
-  log_probe_pixel("pre-copy src", (__bridge id<MTLTexture>)sample_texture, src_format);
-
   static bool logged_source_info = false;
   if (!logged_source_info && ::cvars::metal_presenter_gamma_debug != 0) {
-    XELOGI("MetalPresenter::CopyTextureToGuestOutput: source type={} arrayLen={} "
+    XELOGD("MetalPresenter::CopyTextureToGuestOutput: source type={} arrayLen={} "
            "sample type={}",
            static_cast<int>(source_texture->textureType()),
            static_cast<int>(source_texture->arrayLength()),
@@ -1830,6 +1710,9 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
              "encoder for gamma debug");
       release_views();
       return false;
+    }
+    if (cvars::metal_presenter_debug_markers) {
+      compute_encoder.label = @"GammaDebug";
     }
     id<MTLComputePipelineState> pipeline = nil;
     uint32_t ramp_width = 0;
@@ -1868,7 +1751,7 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
 
     static int last_gamma_debug_mode = -1;
     if (last_gamma_debug_mode != gamma_debug_mode) {
-      XELOGI("MetalPresenter::CopyTextureToGuestOutput: gamma debug mode {} "
+      XELOGD("MetalPresenter::CopyTextureToGuestOutput: gamma debug mode {} "
              "(src={}, dst={})",
              gamma_debug_mode, int(src_format), int(dst_format));
       last_gamma_debug_mode = gamma_debug_mode;
@@ -1905,10 +1788,6 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
     [compute_encoder endEncoding];
 
     [copy_command_buffer commit];
-    if (wait_for_copy) {
-      [copy_command_buffer waitUntilCompleted];
-    }
-    log_probe_pixel("post-copy gamma_debug", dest_metal_texture, dst_format);
     release_views();
     return true;
   }
@@ -1951,6 +1830,9 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
       release_views();
       return false;
     }
+    if (cvars::metal_presenter_debug_markers) {
+      compute_encoder.label = @"ApplyGamma";
+    }
 
     id<MTLComputePipelineState> pipeline =
         use_pwl_gamma_ramp ? apply_gamma_pwl_pipeline_ : apply_gamma_table_pipeline_;
@@ -1983,7 +1865,7 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
 
     if (last_src_format != src_format || last_dst_format != dst_format || last_swap_rb ||
         !last_used_shader) {
-      XELOGI("MetalPresenter::CopyTextureToGuestOutput: present path=gamma "
+      XELOGD("MetalPresenter::CopyTextureToGuestOutput: present path=gamma "
              "src={} dst={} pwl={}",
              int(src_format), int(dst_format), use_pwl_gamma_ramp ? 1 : 0);
       last_src_format = src_format;
@@ -2004,6 +1886,9 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
                "compute encoder for gamma conversion");
         release_views();
         return false;
+      }
+      if (cvars::metal_presenter_debug_markers) {
+        convert_encoder.label = @"GammaConvert";
       }
       id<MTLComputePipelineState> pipeline =
           (gamma_dest_texture.textureType == MTLTextureType2DArray)
@@ -2034,10 +1919,6 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
     }
 
     [copy_command_buffer commit];
-    if (wait_for_copy) {
-      [copy_command_buffer waitUntilCompleted];
-    }
-    log_probe_pixel("post-copy gamma", dest_metal_texture, dst_format);
     release_views();
     return true;
   }
@@ -2045,8 +1926,7 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
   // Metal blit encoder copies require identical pixel formats. If formats
   // differ (for example RGBA8 vs BGRA8), the result is undefined and may
   // manifest as diagonal splits / corrupted colors in captures.
-  bool needs_shader =
-      src_format != dst_format || swap_rb_in_shader || decode_srgb || encode_srgb || force_swap_rb;
+  bool needs_shader = src_format != dst_format || swap_rb_in_shader || decode_srgb || encode_srgb;
   if (needs_shader) {
     XELOGW("MetalPresenter::CopyTextureToGuestOutput: {} src={} dst={} - using "
            "shader conversion",
@@ -2075,6 +1955,9 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
       release_views();
       return false;
     }
+    if (cvars::metal_presenter_debug_markers) {
+      compute_encoder.label = @"CopyConvert";
+    }
 
     id<MTLComputePipelineState> pipeline =
         (src_type == MTL::TextureType::TextureType2DArray)
@@ -2100,7 +1983,7 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
     bool swap_rb = swap_rb_in_shader || (is_bgra_format(src_format) != is_bgra_format(dst_format));
     if (last_src_format != src_format || last_dst_format != dst_format || last_swap_rb != swap_rb ||
         !last_used_shader) {
-      XELOGI("MetalPresenter::CopyTextureToGuestOutput: present path=shader "
+      XELOGD("MetalPresenter::CopyTextureToGuestOutput: present path=shader "
              "src={} dst={} swap_rb={} srgb_decode={} srgb_encode={}",
              int(src_format), int(dst_format), swap_rb ? 1 : 0, decode_srgb ? 1 : 0,
              encode_srgb ? 1 : 0);
@@ -2120,18 +2003,14 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
     [compute_encoder endEncoding];
 
     [copy_command_buffer commit];
-    if (wait_for_copy) {
-      [copy_command_buffer waitUntilCompleted];
-    }
-    log_probe_pixel("post-copy shader", dest_metal_texture, dst_format);
-    XELOGI("MetalPresenter::CopyTextureToGuestOutput: Shader copy completed successfully");
+    XELOGD("MetalPresenter::CopyTextureToGuestOutput: Shader copy completed successfully");
     release_views();
     return true;
   }
 
   if (last_src_format != src_format || last_dst_format != dst_format || last_swap_rb ||
       last_used_shader) {
-    XELOGI("MetalPresenter::CopyTextureToGuestOutput: present path=blit "
+    XELOGD("MetalPresenter::CopyTextureToGuestOutput: present path=blit "
            "src={} dst={}",
            int(src_format), int(dst_format));
     last_src_format = src_format;
@@ -2148,7 +2027,7 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
     return false;
   }
 
-  XELOGI("MetalPresenter::CopyTextureToGuestOutput: Copying {}x{} (src {}x{}) → "
+  XELOGD("MetalPresenter::CopyTextureToGuestOutput: Copying {}x{} (src {}x{}) → "
          "{}x{}",
          copy_width, copy_height, sample_texture->width(), sample_texture->height(),
          [dest_metal_texture width], [dest_metal_texture height]);
@@ -2167,25 +2046,21 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
 
   // Commit and wait for completion
   [copy_command_buffer commit];
-  if (wait_for_copy) {
-    [copy_command_buffer waitUntilCompleted];
-  }
-  log_probe_pixel("post-copy blit", dest_metal_texture, dst_format);
 
-  XELOGI("MetalPresenter::CopyTextureToGuestOutput: Copy completed successfully");
+  XELOGD("MetalPresenter::CopyTextureToGuestOutput: Copy completed successfully");
   release_views();
   return true;
 }
 
 void MetalPresenter::TryRefreshGuestOutputForTraceDump(void* command_processor_ptr) {
-  XELOGI("Metal TryRefreshGuestOutputForTraceDump: Attempting to refresh guest output");
+  XELOGD("Metal TryRefreshGuestOutputForTraceDump: Attempting to refresh guest output");
   (void)command_processor_ptr;
 
   // For now, just use default dimensions since accessing the command processor is complex
   uint32_t guest_width = 1280;
   uint32_t guest_height = 720;
 
-  XELOGI("Metal TryRefreshGuestOutputForTraceDump: Using default dimensions {}x{}", guest_width,
+  XELOGD("Metal TryRefreshGuestOutputForTraceDump: Using default dimensions {}x{}", guest_width,
          guest_height);
 
   // Call RefreshGuestOutput to populate the mailbox with final render state

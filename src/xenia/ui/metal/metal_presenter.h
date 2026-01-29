@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2024 Ben Vanik. All rights reserved.                             *
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 
 #include "xenia/ui/metal/metal_provider.h"
 #include "xenia/ui/presenter.h"
@@ -44,9 +45,14 @@ class MetalGuestOutputRefreshContext final
   // The guest output Metal texture that the refresher should write to.
   // Initial state is undefined, refresher must write all pixels.
   id resource_uav_capable() const { return resource_; }
+  void SetSubmissionId(uint64_t submission_id) {
+    submission_id_ = submission_id;
+  }
+  uint64_t submission_id() const { return submission_id_; }
 
  private:
   id resource_;
+  uint64_t submission_id_ = 0;
 };
 
 class MetalUIDrawContext final : public UIDrawContext {
@@ -81,10 +87,14 @@ class MetalPresenter : public Presenter {
   Surface::TypeFlags GetSupportedSurfaceTypes() const override;
   bool CaptureGuestOutput(RawImage& image_out) override;
 
+  // Request a one-shot GPU capture of the next present.
+  void RequestCapture();
+
   // Helper method to copy Metal texture to guest output texture
   bool CopyTextureToGuestOutput(MTL::Texture* source_texture, id dest_texture,
                                 uint32_t source_width, uint32_t source_height,
-                                bool force_swap_rb, bool use_pwl_gamma_ramp);
+                                bool force_swap_rb, bool use_pwl_gamma_ramp,
+                                uint64_t* submission_out = nullptr);
 
   // Upload gamma ramp data used by the present path.
   bool UpdateGammaRamp(const void* table_data, size_t table_bytes,
@@ -122,6 +132,7 @@ class MetalPresenter : public Presenter {
   // Metal presentation resources
   CAMetalLayer* metal_layer_ = nullptr;
   id command_queue_ = nullptr;  // id<MTLCommandQueue>
+  id shared_event_ = nullptr;   // id<MTLSharedEvent>
 
   // Compute pipeline state used to convert/copy from swap formats to the
   // RGBA8 guest output texture.
@@ -168,6 +179,9 @@ class MetalPresenter : public Presenter {
   // Guest output textures for PNG capture (mailbox system)
   std::array<id, kGuestOutputMailboxSize> guest_output_textures_;
   std::atomic<uint32_t> last_guest_output_mailbox_index_{UINT32_MAX};
+  std::array<uint64_t, kGuestOutputMailboxSize> guest_output_submissions_{};
+  std::atomic<uint64_t> guest_output_submission_counter_{0};
+  std::atomic<bool> capture_requested_{false};
 };
 
 }  // namespace metal
