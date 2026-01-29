@@ -397,9 +397,15 @@ def generate_moc_files():
             moc_path = os.path.join(qt_dir, "share", "qt", "libexec", "moc")
         if not os.path.exists(moc_path):
             moc_path = os.path.join(qt_dir, "bin", "moc")
+        if not os.path.exists(moc_path):
+            # System Qt packages (e.g., apt-installed qt6-base-dev) place moc in /usr/lib/qt6/libexec
+            moc_path = "/usr/lib/qt6/libexec/moc"
+        if not os.path.exists(moc_path):
+            # Fallback to system PATH (e.g., /usr/bin/moc)
+            moc_path = shutil.which("moc")
 
-    if not os.path.exists(moc_path):
-        print(f"WARNING: moc not found at {moc_path}")
+    if not moc_path or not os.path.exists(moc_path):
+        print(f"WARNING: moc not found")
         return False
 
     # Find all Qt headers with Q_OBJECT
