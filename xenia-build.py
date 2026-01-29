@@ -1014,16 +1014,26 @@ def get_build_bin_path(args):
     Returns:
       A full path for the bin folder.
     """
+    arch_override = args.get("arch")
     if sys.platform == "darwin":
-        arch_override = args.get("arch")
         if arch_override:
             platform = "Mac-ARM64" if arch_override == "arm64" else "Mac-x86_64"
         else:
             platform = "Mac-ARM64" if is_macos_arm64_host() else "Mac-x86_64"
     elif sys.platform == "win32":
-        platform = "windows"
+        if arch_override:
+            platform = "Windows-ARM64" if arch_override == "arm64" else "Windows-x86_64"
+        else:
+            # Detect Windows architecture
+            import platform as plat
+            platform = "Windows-ARM64" if plat.machine() == "ARM64" else "Windows-x86_64"
     else:
-        platform = "linux"
+        if arch_override:
+            platform = "Linux-ARM64" if arch_override == "arm64" else "Linux-x86_64"
+        else:
+            # Detect Linux architecture
+            import platform as plat
+            platform = "Linux-ARM64" if plat.machine() == "aarch64" else "Linux-x86_64"
     return os.path.join(self_path, "build", "bin", platform,
                         args["config"].capitalize())
 
