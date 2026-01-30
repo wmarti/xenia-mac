@@ -259,6 +259,15 @@ jobs:
           path: /opt/Qt
           key: ${{ runner.os }}-${{ runner.arch }}-qt6-6.10.1
 
+      - name: Cache linuxdeploy tools
+        id: cache-linuxdeploy-arm64
+        uses: actions/cache@v3
+        with:
+          path: ~/linuxdeploy
+          key: ${{ runner.os }}-${{ runner.arch }}-linuxdeploy-tools
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-linuxdeploy-
+
       - name: Setup
         run: |
           UBUNTU_BASE=$(lsb_release -cs)
@@ -266,7 +275,7 @@ jobs:
           sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-21 main"
 
           sudo apt-get -y update
-          sudo apt-get -y install libc++-dev libc++abi-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-21 ninja-build spirv-tools glslang-tools libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfontconfig1-dev libxtst-dev patchelf
+          sudo apt-get -y install libc++-dev libc++abi-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-21 ninja-build spirv-tools glslang-tools libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfontconfig1-dev libxtst-dev
 
           # Install Qt 6.10.1 via aqtinstall (Linux ARM64 host)
           if [ '${{ steps.cache-qt-linux-arm64.outputs.cache-hit }}' != 'true' ]; then
@@ -288,6 +297,16 @@ jobs:
           # (LunarG SDK doesn't provide ARM64 Linux builds)
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
           echo "/usr/bin" >> $GITHUB_PATH
+
+          # Download linuxdeploy tools if not cached
+          if [ '${{ steps.cache-linuxdeploy-arm64.outputs.cache-hit }}' != 'true' ]; then
+            mkdir -p ~/linuxdeploy
+            wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage -O ~/linuxdeploy/linuxdeploy
+            wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-aarch64.AppImage -O ~/linuxdeploy/linuxdeploy-plugin-qt
+            wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-aarch64.AppImage -O ~/linuxdeploy/linuxdeploy-plugin-appimage
+            chmod +x ~/linuxdeploy/linuxdeploy ~/linuxdeploy/linuxdeploy-plugin-qt ~/linuxdeploy/linuxdeploy-plugin-appimage
+          fi
+          echo "$HOME/linuxdeploy" >> $GITHUB_PATH
 
           # Always update submodules so .git/modules is present even on cache hit
           git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/(DirectXShaderCompiler|premake-(androidndk|export-compile-commands))).+' .gitmodules)
@@ -318,27 +337,60 @@ jobs:
             echo "::error::Binary is too small."
           fi
           chmod +x $binary
+          mkdir -p artifacts/xenia_edge
+
+          # Use linuxdeploy to bundle Qt dependencies
+          export QMAKE=/opt/Qt/6.10.1/gcc_arm64/bin/qmake
+          export LD_LIBRARY_PATH=/opt/Qt/6.10.1/gcc_arm64/lib:$LD_LIBRARY_PATH
+
+          # Install icons with proper naming for linuxdeploy
+          mkdir -p artifacts/xenia_edge/usr/share/icons/hicolor/16x16/apps
+          mkdir -p artifacts/xenia_edge/usr/share/icons/hicolor/32x32/apps
+          mkdir -p artifacts/xenia_edge/usr/share/icons/hicolor/48x48/apps
+          mkdir -p artifacts/xenia_edge/usr/share/icons/hicolor/64x64/apps
+          mkdir -p artifacts/xenia_edge/usr/share/icons/hicolor/128x128/apps
+          mkdir -p artifacts/xenia_edge/usr/share/icons/hicolor/256x256/apps
+          mkdir -p artifacts/xenia_edge/usr/share/icons/hicolor/512x512/apps
+          mkdir -p artifacts/xenia_edge/usr/share/icons/hicolor/1024x1024/apps
+
+          cp assets/icon/16.png artifacts/xenia_edge/usr/share/icons/hicolor/16x16/apps/xenia_edge.png
+          cp assets/icon/32.png artifacts/xenia_edge/usr/share/icons/hicolor/32x32/apps/xenia_edge.png
+          cp assets/icon/48.png artifacts/xenia_edge/usr/share/icons/hicolor/48x48/apps/xenia_edge.png
+          cp assets/icon/64.png artifacts/xenia_edge/usr/share/icons/hicolor/64x64/apps/xenia_edge.png
+          cp assets/icon/128.png artifacts/xenia_edge/usr/share/icons/hicolor/128x128/apps/xenia_edge.png
+          cp assets/icon/256.png artifacts/xenia_edge/usr/share/icons/hicolor/256x256/apps/xenia_edge.png
+          cp assets/icon/512.png artifacts/xenia_edge/usr/share/icons/hicolor/512x512/apps/xenia_edge.png
+          cp assets/icon/1024.png artifacts/xenia_edge/usr/share/icons/hicolor/1024x1024/apps/xenia_edge.png
+
+          # Copy all necessary files (excluding build artifacts) next to the binary in AppDir
+          mkdir -p artifacts/xenia_edge/usr/bin
+          # Copy directories (optimized_settings, game_patches, etc.)
+          find build/bin/Linux-ARM64/Release -maxdepth 1 -type d ! -name Release -exec cp -r {} artifacts/xenia_edge/usr/bin/ \;
+          # Copy any additional runtime files if needed (currently just directories are copied)
+
+          # Run linuxdeploy with Qt plugin to deploy all Qt dependencies and create AppImage
+          export EXTRA_PLATFORM_PLUGINS="libqwayland.so"
+          ~/linuxdeploy/linuxdeploy --appdir artifacts/xenia_edge \
+            --executable $binary \
+            --desktop-file assets/xenia_edge.desktop \
+            --icon-file assets/icon/256.png \
+            --plugin qt \
+            --output appimage
+
+          # linuxdeploy creates the AppImage in the current directory
+          # Find and rename it to a standard name
+          appimage_file=$(ls -1 *.AppImage | head -n1)
+          if [ -z "$appimage_file" ]; then
+            echo "::error::AppImage file not found after linuxdeploy"
+            exit 1
+          fi
+
+          # Create final artifacts directory and move the AppImage there
           mkdir -p artifacts/release
-          cp $binary artifacts/release/
-          # Bundle Qt libraries and plugins so the binary can run without system Qt
-          qt_root=/opt/Qt/6.10.1/gcc_arm64
-          mkdir -p artifacts/release/lib
-          mkdir -p artifacts/release/plugins
-          rsync -a "$qt_root/lib/libQt6"*.so* artifacts/release/lib/
-          rsync -a "$qt_root/lib/libicu"*.so* artifacts/release/lib/ || true
-          rsync -a "$qt_root/lib/libdouble-conversion"*.so* artifacts/release/lib/ || true
-          rsync -a "$qt_root/lib/libpcre2-16"*.so* artifacts/release/lib/ || true
-          rsync -a "$qt_root/lib/libharfbuzz"*.so* artifacts/release/lib/ || true
-          rsync -a "$qt_root/lib/libfreetype"*.so* artifacts/release/lib/ || true
-          rsync -a "$qt_root/lib/libpng"*.so* artifacts/release/lib/ || true
-          rsync -a "$qt_root/lib/libjpeg"*.so* artifacts/release/lib/ || true
-          rsync -a "$qt_root/plugins/platforms" artifacts/release/plugins/
-          rsync -a "$qt_root/plugins/imageformats" artifacts/release/plugins/
-          rsync -a "$qt_root/plugins/iconengines" artifacts/release/plugins/
-          printf "[Paths]\nPlugins=plugins\nLibraries=lib\n" > artifacts/release/qt.conf
-          patchelf --force-rpath --set-rpath '$ORIGIN/lib' artifacts/release/xenia_edge
-          find artifacts/release/lib -type f -name "libQt6*.so*" -exec patchelf --force-rpath --set-rpath '$ORIGIN' {} +
-          find artifacts/release/plugins -type f -name "*.so" -exec patchelf --force-rpath --set-rpath '$ORIGIN/../../lib' {} +
+          mv "$appimage_file" artifacts/release/xenia_edge.AppImage
+          chmod +x artifacts/release/xenia_edge.AppImage
+
+          # Also copy LICENSE
           cp LICENSE artifacts/release/
       - name: Upload xenia edge artifacts
         if: steps.prepare_artifacts.outcome == 'success'
@@ -865,7 +917,7 @@ jobs:
           cd linux_x86_64_artifacts
           mv xenia_edge.AppImage ../xenia_edge_linux_x86_64.AppImage
           cd ../linux_arm64_artifacts
-          mv xenia_edge ../xenia_edge_linux_arm64
+          mv xenia_edge.AppImage ../xenia_edge_linux_arm64.AppImage
           cd ../macos_arm64_artifacts
           mv xenia_edge_macos.dmg ../xenia_edge_macos_arm64.dmg
           cd ../macos_x86_64_artifacts
@@ -880,7 +932,7 @@ jobs:
           tag=${GITHUB_SHA::7}
           gh release create $tag \
             xenia_edge_linux_x86_64.AppImage \
-            xenia_edge_linux_arm64 \
+            xenia_edge_linux_arm64.AppImage \
             xenia_edge_macos_arm64.dmg \
             xenia_edge_macos_x86_64.dmg \
             xenia_edge_windows_x86_64.zip \
