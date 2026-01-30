@@ -364,6 +364,8 @@ project("xenia-app")
             .. '" "' .. app_frameworks .. '/"',
         'rsync -a "' .. path.join(qt_dir, "lib/QtGui.framework")
             .. '" "' .. app_frameworks .. '/"',
+        'rsync -a "' .. path.join(qt_dir, "lib/QtDBus.framework")
+            .. '" "' .. app_frameworks .. '/"',
         'rsync -a "' .. path.join(qt_dir, "lib/QtWidgets.framework")
             .. '" "' .. app_frameworks .. '/"',
         'rsync -a "' .. path.join(qt_dir, "plugins/platforms")
