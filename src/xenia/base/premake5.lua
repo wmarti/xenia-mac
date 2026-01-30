@@ -13,6 +13,21 @@ project("xenia-base")
     "console_app_main_*.cc",
     "main_init_*.cc",
   })
+  filter("system:macosx")
+    removefiles({
+      "threading_mac.cc",
+    })
+    files({
+      "threading_posix.cc",
+    })
+  filter({})
+  filter("architecture:ARM64")
+    removefiles({
+      "clock_x64.cc",
+      "platform_amd64.cc",
+      "platform_amd64.h",
+    })
+  filter({})
   files({
     "debug_visualizers.natvis",
   })

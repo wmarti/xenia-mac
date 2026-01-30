@@ -1,5 +1,15 @@
-project_root = "../../.."
+project_root = path.getabsolute("../../..")
 include(project_root.."/tools/build")
+
+-- macOS library paths for Metal backend dependencies.
+local metal_converter_libdir =
+    path.join(project_root, "third_party/metal-shader-converter/lib")
+local dxilconv_libdir_arm64 =
+    path.join(project_root,
+              "third_party/DirectXShaderCompiler/build_dxilconv_macos/lib")
+local dxilconv_libdir_x86_64 =
+    path.join(project_root,
+              "third_party/DirectXShaderCompiler/build_dxilconv_macos_x86_64/lib")
 
 group("src")
 project("xenia-app")
@@ -13,13 +23,11 @@ project("xenia-app")
     "xenia-cpu",
     "xenia-gpu",
     "xenia-gpu-null",
-    "xenia-gpu-vulkan",
     "xenia-hid",
     "xenia-hid-nop",
     "xenia-kernel",
     "xenia-patcher",
     "xenia-ui",
-    "xenia-ui-vulkan",
     "xenia-vfs",
   })
   links({
@@ -88,7 +96,16 @@ project("xenia-app")
     files({
       "main_resources.rc",
     })
+    includedirs({
+      project_root.."/third_party/DirectXShaderCompiler/include",
+    })
     linkoptions({"/ENTRY:mainCRTStartup"})
+
+  filter("not system:macosx")
+    links({
+      "xenia-gpu-vulkan",
+      "xenia-ui-vulkan",
+    })
 
   filter({"architecture:x86_64", "files:../base/main_init_"..platform_suffix..".cc"})
     vectorextensions("SSE2")  -- Disable AVX for main_init_win.cc so our AVX check doesn't use AVX instructions.
@@ -103,16 +120,22 @@ project("xenia-app")
       "xenia-hid-sdl",
     })
 
-  filter("platforms:Linux")
+  filter({"platforms:not Android-*", "architecture:ARM64"})
+    links({
+      "xenia-cpu-backend-a64",
+    })
+
+  filter("platforms:Linux-*")
     links({
       "xenia-apu-alsa",
+      "asound",
       "X11",
       "xcb",
       "X11-xcb",
       "SDL2",
     })
 
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     links({
       "xenia-apu-xaudio2",
       "xenia-debug-gdb",
@@ -122,7 +145,26 @@ project("xenia-app")
       "xenia-ui-d3d12",
     })
 
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
+
+  filter("system:macosx")
+    links({
+      "xenia-gpu-metal",
+      "xenia-ui-metal",
+      "Cocoa.framework",
+      "CoreFoundation.framework",
+      "CoreServices.framework",
+      "Foundation.framework",
+      "Metal.framework",
+      "MetalFX.framework",
+      "MetalKit.framework",
+      "QuartzCore.framework",
+      "SDL2",
+    })
+    libdirs({
+      "/opt/homebrew/opt/sdl2/lib",
+      "/usr/local/opt/sdl2/lib",
+    })
 
   if enableMiscSubprojects then
     filter({"platforms:Windows", SINGLE_LIBRARY_FILTER})
@@ -207,3 +249,48 @@ project("xenia-app")
       '{MKDIR} ' .. assets_font_dst,
       '{COPY} ' .. assets_font_src .. '/* ' .. assets_font_dst
     }
+
+  -- macOS app bundle configuration.
+  filter("platforms:Mac-*")
+    local entitlements_path = path.getabsolute(project_root .. "/xenia.entitlements")
+    local app_bundle = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}"
+    local app_contents = app_bundle .. "/Contents"
+    local app_frameworks = app_contents .. "/Frameworks"
+    files({
+      "Info.plist",
+      project_root.."/xenia.entitlements",
+      project_root.."/assets/icon/xenia.icns",
+    })
+    xcodebuildsettings({
+      ["INFOPLIST_FILE"] = path.getabsolute("Info.plist"),
+      ["MACOSX_DEPLOYMENT_TARGET"] = "15.0",
+      ["PRODUCT_NAME"] = "Xenia",
+      ["EXECUTABLE_NAME"] = "xenia",
+      ["PRODUCT_BUNDLE_IDENTIFIER"] = "com.xenia.xenia-edge",
+      ["CODE_SIGN_STYLE"] = "Automatic",
+      ["CODE_SIGN_ENTITLEMENTS"] = entitlements_path,
+      ["CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION"] = "YES",
+    })
+    postbuildcommands({
+      'mkdir -p "' .. app_frameworks .. '"',
+      'cp -f "' .. path.join(metal_converter_libdir, "libmetalirconverter.dylib")
+          .. '" "' .. app_frameworks .. '/"',
+      'codesign --force --sign - "' .. app_frameworks
+          .. '/libmetalirconverter.dylib"',
+      'codesign --force --deep --sign - --entitlements "'
+          .. entitlements_path .. '" "' .. app_bundle .. '"',
+    })
+  filter({"platforms:Mac-*", "architecture:arm64"})
+    postbuildcommands({
+      'cp -f "' .. path.join(dxilconv_libdir_arm64, "libdxilconv.dylib")
+          .. '" "' .. app_frameworks .. '/"',
+      'codesign --force --sign - "' .. app_frameworks .. '/libdxilconv.dylib"',
+    })
+  filter({"platforms:Mac-*", "architecture:x86_64"})
+    postbuildcommands({
+      'cp -f "' .. path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")
+          .. '" "' .. app_frameworks .. '/"',
+      'codesign --force --sign - "' .. app_frameworks .. '/libdxilconv.dylib"',
+    })
+  filter({"platforms:Mac-*", "files:**.icns"})
+    buildaction("Resources")
