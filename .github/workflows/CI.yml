@@ -266,7 +266,7 @@ jobs:
           sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-21 main"
 
           sudo apt-get -y update
-          sudo apt-get -y install libc++-dev libc++abi-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-21 ninja-build spirv-tools glslang-tools libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfontconfig1-dev libxtst-dev
+          sudo apt-get -y install libc++-dev libc++abi-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-21 ninja-build spirv-tools glslang-tools libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfontconfig1-dev libxtst-dev patchelf
 
           # Install Qt 6.10.1 via aqtinstall (Linux ARM64 host)
           if [ '${{ steps.cache-qt-linux-arm64.outputs.cache-hit }}' != 'true' ]; then
@@ -320,6 +320,25 @@ jobs:
           chmod +x $binary
           mkdir -p artifacts/release
           cp $binary artifacts/release/
+          # Bundle Qt libraries and plugins so the binary can run without system Qt
+          qt_root=/opt/Qt/6.10.1/gcc_arm64
+          mkdir -p artifacts/release/lib
+          mkdir -p artifacts/release/plugins
+          rsync -a "$qt_root/lib/libQt6"*.so* artifacts/release/lib/
+          rsync -a "$qt_root/lib/libicu"*.so* artifacts/release/lib/ || true
+          rsync -a "$qt_root/lib/libdouble-conversion"*.so* artifacts/release/lib/ || true
+          rsync -a "$qt_root/lib/libpcre2-16"*.so* artifacts/release/lib/ || true
+          rsync -a "$qt_root/lib/libharfbuzz"*.so* artifacts/release/lib/ || true
+          rsync -a "$qt_root/lib/libfreetype"*.so* artifacts/release/lib/ || true
+          rsync -a "$qt_root/lib/libpng"*.so* artifacts/release/lib/ || true
+          rsync -a "$qt_root/lib/libjpeg"*.so* artifacts/release/lib/ || true
+          rsync -a "$qt_root/plugins/platforms" artifacts/release/plugins/
+          rsync -a "$qt_root/plugins/imageformats" artifacts/release/plugins/
+          rsync -a "$qt_root/plugins/iconengines" artifacts/release/plugins/
+          printf "[Paths]\nPlugins=plugins\nLibraries=lib\n" > artifacts/release/qt.conf
+          patchelf --force-rpath --set-rpath '$ORIGIN/lib' artifacts/release/xenia_edge
+          find artifacts/release/lib -type f -name "libQt6*.so*" -exec patchelf --force-rpath --set-rpath '$ORIGIN' {} +
+          find artifacts/release/plugins -type f -name "*.so" -exec patchelf --force-rpath --set-rpath '$ORIGIN/../../lib' {} +
           cp LICENSE artifacts/release/
       - name: Upload xenia edge artifacts
         if: steps.prepare_artifacts.outcome == 'success'
