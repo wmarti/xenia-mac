@@ -76,6 +76,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-linuxdeploy-
 
+      - name: Cache submodules
+        id: cache-submodules-linux
+        uses: actions/cache@v3
+        with:
+          path: third_party
+          key: ${{ runner.os }}-${{ runner.arch }}-submodules-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-submodules-
+
       - name: Cache Vulkan SDK
         id: cache-vulkan-sdk-linux
         uses: actions/cache@v3
@@ -268,6 +277,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-linuxdeploy-
 
+      - name: Cache submodules
+        id: cache-submodules-linux-arm64
+        uses: actions/cache@v3
+        with:
+          path: third_party
+          key: ${{ runner.os }}-${{ runner.arch }}-submodules-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-submodules-
+
       - name: Setup
         run: |
           UBUNTU_BASE=$(lsb_release -cs)
@@ -436,6 +454,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-qt6-
 
+      - name: Cache submodules
+        id: cache-submodules-macos
+        uses: actions/cache@v3
+        with:
+          path: third_party
+          key: ${{ runner.os }}-${{ runner.arch }}-submodules-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-submodules-
+
       - name: Setup
         run: |
           retry() {
@@ -549,6 +576,15 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-qt6-6.10.1
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-qt6-
+
+      - name: Cache submodules
+        id: cache-submodules-macos
+        uses: actions/cache@v3
+        with:
+          path: third_party
+          key: ${{ runner.os }}-${{ runner.arch }}-submodules-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-submodules-
 
       - name: Setup
         run: |
