@@ -386,6 +386,21 @@ jobs:
 
       - name: Setup
         run: |
+          retry() {
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ $n -ge 5 ]; then
+                return 1
+              fi
+              sleep 5
+            done
+          }
+
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global http.postBuffer 524288000
+
           # Install dependencies via Homebrew
           brew install sdl2 ninja pipx
 
@@ -404,9 +419,9 @@ jobs:
           echo "QT_DIR=$HOME/Qt/6.10.1/macos" >> $GITHUB_ENV
 
           # Always update submodules so .git/modules is present even on cache hit
-          git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
+          retry git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
           # DirectXShaderCompiler has nested submodules needed for dxilconv
-          git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
+          retry git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
 
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
             ./xenia-build.py premake
@@ -485,6 +500,21 @@ jobs:
 
       - name: Setup
         run: |
+          retry() {
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ $n -ge 5 ]; then
+                return 1
+              fi
+              sleep 5
+            done
+          }
+
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global http.postBuffer 524288000
+
           # Install dependencies via Homebrew
           brew install sdl2 ninja pipx
 
@@ -503,9 +533,9 @@ jobs:
           echo "QT_DIR=$HOME/Qt/6.10.1/macos" >> $GITHUB_ENV
 
           # Always update submodules so .git/modules is present even on cache hit
-          git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
+          retry git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
           # DirectXShaderCompiler has nested submodules needed for dxilconv
-          git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
+          retry git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
 
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
             ./xenia-build.py premake
