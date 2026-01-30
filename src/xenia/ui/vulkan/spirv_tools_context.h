@@ -15,7 +15,6 @@
 #include <vector>
 
 #include <spirv-tools/libspirv.h>
-#include <spirv-tools/optimizer.hpp>
 #include "xenia/base/platform.h"
 
 namespace xe {

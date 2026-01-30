@@ -25,6 +25,9 @@ project("xenia-gpu")
     includedirs({
       "$(VULKAN_SDK)/Include",
     })
+    includedirs({
+      project_root.."/third_party/DirectXShaderCompiler/include",
+    })
   filter({})
 
   local_platform_files()

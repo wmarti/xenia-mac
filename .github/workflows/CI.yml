@@ -337,9 +337,113 @@ jobs:
           path: artifacts\xenia_edge
           if-no-files-found: error
 
+  build-windows-arm64:
+    name: Build Windows ARM64
+    needs: lint
+    runs-on: windows-11-arm
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+    steps:
+      - uses: actions/checkout@main
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Cache build output
+        id: cache-build
+        uses: actions/cache@v3
+        with:
+          path: |
+            build/obj
+            build/bin/Windows-ARM64/Release/*.lib
+          key: ${{ runner.os }}-ARM64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          restore-keys: |
+            ${{ runner.os }}-ARM64-build-
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan-sdk
+        uses: actions/cache@v3
+        with:
+          path: C:\VulkanSDK
+          key: ${{ runner.os }}-${{ runner.arch }}-vulkan-sdk
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-vulkan-sdk-
+
+      - name: Cache Qt6
+        id: cache-qt
+        uses: actions/cache@v3
+        with:
+          path: C:\Qt
+          key: ${{ runner.os }}-${{ runner.arch }}-qt6-6.10.1
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-qt6-
+
+      - name: Cache submodules
+        id: cache-submodules
+        uses: actions/cache@v3
+        with:
+          path: |
+            third_party
+            .git/modules/third_party
+          key: ${{ runner.os }}-${{ runner.arch }}-submodules-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
+
+      - name: Setup
+        run: |
+          # Install Vulkan SDK which includes spirv-tools
+          if (Test-Path -Path "C:\VulkanSDK") {
+            echo "Vulkan SDK found in cache."
+          } else {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile "vulkan-sdk.exe"
+            Start-Process -FilePath "vulkan-sdk.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -Wait
+          }
+          $env:VULKAN_SDK = "C:\VulkanSDK\$(Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Select-Object -First 1 -ExpandProperty Name)"
+          $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
+          echo "VULKAN_SDK=$env:VULKAN_SDK" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "$env:VULKAN_SDK\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          # Install Qt6 for Windows ARM64 (cross-compiled version)
+          $qtCacheHit = '${{ steps.cache-qt.outputs.cache-hit }}'
+          if ($qtCacheHit -ne 'true') {
+            pip install aqtinstall
+            aqt install-qt windows desktop 6.10.1 win64_msvc2022_arm64_cross_compiled -O C:\Qt
+          }
+          # Set up Qt environment
+          $env:QT_DIR = "C:\Qt\6.10.1\msvc2022_arm64"
+          echo "QT_DIR=$env:QT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          # Always run submodule update - it's fast if already present from cache
+          # This ensures any newly added submodules are fetched even with cache hit
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS (Select-String -CaseSensitive '(?<=path = )(?!third_party\/(premake-(androidndk|cmake|export-compile-commands))).+' .gitmodules).Matches.Value
+
+          # DirectXShaderCompiler has nested submodules needed for dxilconv
+          git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
+
+          # Fetch data repos (game-patches, optimized-settings)
+          python xenia-build.py fetchdata
+
+      - name: Build
+        run: python xenia-build.py build --config=Release --target=xenia-app
+      - name: Prepare artifacts
+        id: prepare_artifacts
+        run: |
+          $binary = 'build\bin\Windows-ARM64\Release\xenia_edge.exe'
+          if ((get-item $binary).Length -le 100000) {
+            echo "::error::$binary is too small."
+          }
+          robocopy . build\bin\Windows-ARM64\Release LICENSE /r:0 /w:0
+          robocopy build\bin\Windows-ARM64\Release artifacts\xenia_edge /MIR /r:0 /w:0 /XF *.lib *.idb *.exp /XD generic iconengines imageformats networkinformation styles tls
+          If ($LastExitCode -le 7) { echo "LastExitCode = $LastExitCode";$LastExitCode = 0 }
+      - name: Upload xenia edge artifacts
+        if: steps.prepare_artifacts.outcome == 'success'
+        uses: actions/upload-artifact@main
+        with:
+          name: xenia_edge_windows_arm64
+          path: artifacts\xenia_edge
+          if-no-files-found: error
+
   release:
     name: Create Release
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-windows-arm64]
     runs-on: ubuntu-latest
     if: |
       github.repository == 'has207/xenia-edge' &&
@@ -358,6 +462,12 @@ jobs:
           name: xenia_edge_windows
           path: windows_artifacts
 
+      - name: Download Windows ARM64 artifacts
+        uses: actions/download-artifact@main
+        with:
+          name: xenia_edge_windows_arm64
+          path: windows_arm64_artifacts
+
       - name: Create Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -369,9 +479,11 @@ jobs:
           mv xenia_edge.AppImage ../xenia_edge_linux.AppImage
           cd ../windows_artifacts
           7z a ../xenia_edge_windows.zip * -xr!'*.pdb' -mx9 -bb3
+          cd ../windows_arm64_artifacts
+          7z a ../xenia_edge_windows_arm64.zip * -xr!'*.pdb' -mx9 -bb3
           cd ..
 
           # Create release
           tag=${GITHUB_SHA::7}
-          gh release create $tag xenia_edge_linux.AppImage xenia_edge_windows.zip \
+          gh release create $tag xenia_edge_linux.AppImage xenia_edge_windows.zip xenia_edge_windows_arm64.zip \
             --target $GITHUB_SHA -t "xenia_edge" --generate-notes

@@ -16,8 +16,12 @@ namespace xe {
 namespace debugging {
 
 bool IsDebuggerAttached() {
+#if XE_ARCH_AMD64
   return reinterpret_cast<const bool*>(
       __readgsqword(0x60))[2];  // get BeingDebugged field of PEB
+#else
+  return IsDebuggerPresent() ? true : false;
+#endif
 }
 
 void Break() { __debugbreak(); }

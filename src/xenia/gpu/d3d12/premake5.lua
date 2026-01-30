@@ -15,9 +15,17 @@ project("xenia-gpu-d3d12")
     "xxhash",
   })
   local_platform_files()
+  includedirs({
+    project_root,
+  })
   files({
     "../shaders/bytecode/d3d12_5_1/*.h",
   })
+  filter("platforms:Windows")
+    includedirs({
+      project_root.."/third_party/DirectXShaderCompiler/include",
+    })
+  filter({})
 
 if enableMiscSubprojects then
   group("src")

@@ -88,6 +88,9 @@ project("xenia-app")
     files({
       "main_resources.rc",
     })
+    includedirs({
+      project_root.."/third_party/DirectXShaderCompiler/include",
+    })
     linkoptions({"/ENTRY:mainCRTStartup"})
 
   filter({"architecture:x86_64", "files:../base/main_init_"..platform_suffix..".cc"})
