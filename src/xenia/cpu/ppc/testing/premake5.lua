@@ -12,8 +12,6 @@ project("xenia-cpu-ppc-tests")
     "xenia-base",
     "xenia-core",
     "xenia-cpu",
-    "xenia-gpu",
-    "xenia-gpu-null",
     "xenia-hid",
     "xenia-hid-nop",
     "xenia-kernel",
