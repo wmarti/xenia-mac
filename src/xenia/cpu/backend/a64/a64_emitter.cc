@@ -816,6 +816,115 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     return 0;
   }
 
+  if (cvars::a64_enable_host_guest_stack_synchronization &&
+      target_address <= 0xFFFFFFFFu) {
+    auto processor = thread_state->processor();
+    auto module_for_address =
+        processor->LookupModule(static_cast<uint32_t>(target_address));
+    if (module_for_address) {
+      auto* xexmod = dynamic_cast<XexModule*>(module_for_address);
+      if (xexmod) {
+        InfoCacheFlags* flags = xexmod->GetInstructionAddressFlags(
+            static_cast<uint32_t>(target_address));
+        if (flags && flags->is_return_site) {
+          auto ones_with_address = processor->FindFunctionsWithAddress(
+              static_cast<uint32_t>(target_address));
+          if (!ones_with_address.empty()) {
+            A64Function* candidate = nullptr;
+            uintptr_t host_address = 0;
+            for (auto&& entry : ones_with_address) {
+              auto* afunc = static_cast<A64Function*>(entry);
+              host_address = afunc->MapGuestAddressToMachineCode(
+                  static_cast<uint32_t>(target_address));
+              if (host_address &&
+                  afunc->machine_code() !=
+                      reinterpret_cast<const uint8_t*>(host_address)) {
+                candidate = afunc;
+                break;
+              }
+            }
+
+            if (candidate && host_address) {
+              auto* backend =
+                  static_cast<A64Backend*>(processor->backend());
+              auto* backend_context =
+                  backend->BackendContextForGuestContext(guest_context);
+              if (backend_context->stackpoints &&
+                  backend_context->current_stackpoint_depth > 0) {
+                uint32_t current_stackpoint_index =
+                    backend_context->current_stackpoint_depth - 1;
+                uint32_t current_guest_stackpointer =
+                    static_cast<uint32_t>(guest_context->r[1]);
+                uint32_t num_frames_bigger = 0;
+
+                while (current_stackpoint_index != 0xFFFFFFFF) {
+                  if (current_guest_stackpointer >
+                      backend_context->stackpoints[current_stackpoint_index]
+                          .guest_sp) {
+                    --current_stackpoint_index;
+                    ++num_frames_bigger;
+                  } else {
+                    break;
+                  }
+                }
+
+                if (num_frames_bigger > 1 &&
+                    current_stackpoint_index != 0xFFFFFFFF) {
+                  // Try to match the guest LR to disambiguate same-guest-sp
+                  // frames.
+                  uint32_t guest_lr =
+                      static_cast<uint32_t>(guest_context->lr);
+                  uint32_t scan_index = current_stackpoint_index;
+                  while (scan_index != 0xFFFFFFFF) {
+                    const auto& sp_entry =
+                        backend_context->stackpoints[scan_index];
+                    if (sp_entry.guest_sp != current_guest_stackpointer) {
+                      break;
+                    }
+                    if (sp_entry.guest_return_address == guest_lr) {
+                      current_stackpoint_index = scan_index;
+                      break;
+                    }
+                    if (scan_index == 0) {
+                      break;
+                    }
+                    --scan_index;
+                  }
+
+                  const auto& sp_entry =
+                      backend_context->stackpoints[current_stackpoint_index];
+                  backend_context->pending_stack_sync = 1;
+                  backend_context->pending_stack_sync_sp = sp_entry.host_sp;
+                  backend_context->pending_stack_sync_fp = sp_entry.host_fp;
+                  backend_context->pending_stack_sync_target = host_address;
+                  backend_context->current_stackpoint_depth =
+                      current_stackpoint_index + 1;
+                  if (cvars::a64_stack_sync_log) {
+                    static std::atomic<int32_t> sync_log_count{0};
+                    const int32_t limit = cvars::a64_stack_sync_log_limit;
+                    const int32_t count =
+                        sync_log_count.fetch_add(1, std::memory_order_relaxed);
+                    if (limit <= 0 || count < limit) {
+                      XELOGI(
+                          "A64 stack sync: guest=0x{:08X} host=0x{:016X} "
+                          "guest_sp=0x{:08X} depth={} index={}",
+                          static_cast<uint32_t>(target_address),
+                          host_address, current_guest_stackpointer,
+                          backend_context->current_stackpoint_depth,
+                          current_stackpoint_index);
+                    }
+                  }
+                  return reinterpret_cast<uint64_t>(
+                      backend->stack_sync_thunk());
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   auto fn = thread_state->processor()->ResolveFunction(guest_address);
   if (!fn) {
     XELOGE(
@@ -1159,6 +1268,52 @@ void A64Emitter::ReloadContext() {
 void A64Emitter::ReloadMembase() {
   LDR(GetMembaseReg(), GetContextReg(),
       offsetof(ppc::PPCContext, virtual_membase));
+}
+
+void A64Emitter::PushStackpoint() {
+  if (!cvars::a64_enable_host_guest_stack_synchronization) {
+    return;
+  }
+  oaknut::Label done;
+  // backend_ctx = context - sizeof(A64BackendContext)
+  SUB(X9, GetContextReg(), sizeof(A64BackendContext));
+  LDR(X10, X9, offsetof(A64BackendContext, stackpoints));
+  CBZ(X10, done);
+
+  LDR(W11, X9, offsetof(A64BackendContext, current_stackpoint_depth));
+  MOV(W12, static_cast<uint32_t>(cvars::max_stackpoints));
+  CMP(W11, W12);
+  B(oaknut::Cond::HS, done);
+
+  // entry = stackpoints + (depth * sizeof(A64BackendStackpoint))
+  LSL(X12, X11, 5);  // sizeof(A64BackendStackpoint) == 32
+  ADD(X10, X10, X12);
+
+  MOV(X13, SP);
+  STR(X13, X10, offsetof(A64BackendStackpoint, host_sp));
+  STR(X29, X10, offsetof(A64BackendStackpoint, host_fp));
+  LDR(W13, GetContextReg(), offsetof(ppc::PPCContext, r[1]));
+  LDR(W14, GetContextReg(), offsetof(ppc::PPCContext, lr));
+  STR(W13, X10, offsetof(A64BackendStackpoint, guest_sp));
+  STR(W14, X10, offsetof(A64BackendStackpoint, guest_return_address));
+
+  ADD(W11, W11, 1);
+  STR(W11, X9, offsetof(A64BackendContext, current_stackpoint_depth));
+
+  l(done);
+}
+
+void A64Emitter::PopStackpoint() {
+  if (!cvars::a64_enable_host_guest_stack_synchronization) {
+    return;
+  }
+  oaknut::Label done;
+  SUB(X9, GetContextReg(), sizeof(A64BackendContext));
+  LDR(W10, X9, offsetof(A64BackendContext, current_stackpoint_depth));
+  CBZ(W10, done);
+  SUB(W10, W10, 1);
+  STR(W10, X9, offsetof(A64BackendContext, current_stackpoint_depth));
+  l(done);
 }
 
 bool A64Emitter::ConstantFitsIn32Reg(uint64_t v) {

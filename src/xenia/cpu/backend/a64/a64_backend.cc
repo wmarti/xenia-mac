@@ -42,6 +42,12 @@ DEFINE_int32(a64_extension_mask, -1,
              "    2 = F16C\n"
              "   -1 = Detect and utilize all possible processor features\n",
              "a64");
+DEFINE_bool(a64_enable_host_guest_stack_synchronization, false,
+            "Enable host/guest stack synchronization for A64 (disabled by "
+            "default pending stability fixes).",
+            "a64");
+DEFINE_int64(max_stackpoints, 65536,
+             "Maximum number of stackpoints in host/guest stack sync.", "a64");
 
 namespace xe {
 namespace cpu {
@@ -448,6 +454,182 @@ void A64Backend::UninstallBreakpoint(Breakpoint* breakpoint) {
     xe::store_and_swap<uint32_t>(ptr, static_cast<uint32_t>(pair.second));
   }
   breakpoint->backend_data().clear();
+}
+
+void A64Backend::InitializeBackendContext(void* ctx) {
+  auto* bctx = BackendContextForGuestContext(ctx);
+  if (cvars::a64_enable_host_guest_stack_synchronization &&
+      cvars::max_stackpoints > 0) {
+    bctx->stackpoints = new A64BackendStackpoint[
+        static_cast<size_t>(cvars::max_stackpoints)]{};
+  } else {
+    bctx->stackpoints = nullptr;
+  }
+  bctx->current_stackpoint_depth = 0;
+  bctx->pending_stack_sync = 0;
+  bctx->pending_stack_sync_sp = 0;
+  bctx->pending_stack_sync_fp = 0;
+  bctx->pending_stack_sync_target = 0;
+  // Default to PPC rounding mode 0 (nearest, IEEE) and sync host FPCR.
+  SetGuestRoundingMode(ctx, 0);
+}
+
+void A64Backend::DeinitializeBackendContext(void* ctx) {
+  auto* bctx = BackendContextForGuestContext(ctx);
+  delete[] bctx->stackpoints;
+  bctx->stackpoints = nullptr;
+  bctx->current_stackpoint_depth = 0;
+  bctx->pending_stack_sync = 0;
+  bctx->pending_stack_sync_sp = 0;
+  bctx->pending_stack_sync_fp = 0;
+  bctx->pending_stack_sync_target = 0;
+}
+
+void A64Backend::PrepareForReentry(void* ctx) {
+  auto* bctx = BackendContextForGuestContext(ctx);
+  bctx->current_stackpoint_depth = 0;
+  bctx->pending_stack_sync = 0;
+  bctx->pending_stack_sync_sp = 0;
+  bctx->pending_stack_sync_fp = 0;
+  bctx->pending_stack_sync_target = 0;
+}
+
+void A64Backend::SetGuestRoundingMode(void* ctx, unsigned int mode) {
+  uint32_t control = mode & 7;
+
+#if XE_ARCH_ARM64
+  // Map PPC rounding+non-IEEE to ARM FPCR bits (same mapping as in sequences).
+  static const uint8_t fpcr_table[] = {
+      0b0'00,  // nearest
+      0b0'11,  // toward zero
+      0b0'01,  // toward +infinity
+      0b0'10,  // toward -infinity
+      0b1'00,  // FZ + nearest
+      0b1'11,  // FZ + toward zero
+      0b1'01,  // FZ + toward +infinity
+      0b1'10,  // FZ + toward -infinity
+  };
+  uint64_t fpcr;
+  asm volatile("mrs %0, fpcr" : "=r"(fpcr));
+  fpcr &= ~(uint64_t(0x7) << 23);
+  fpcr |= (uint64_t(fpcr_table[control]) << 23);
+  asm volatile("msr fpcr, %0" :: "r"(fpcr));
+#endif
+
+  if (!ctx) {
+    return;
+  }
+  size_t ctx_len = sizeof(ppc::PPCContext);
+  xe::memory::PageAccess ctx_access;
+  if (!xe::memory::QueryProtect(ctx, ctx_len, ctx_access) ||
+      ctx_access == xe::memory::PageAccess::kNoAccess) {
+    return;
+  }
+
+  auto ppc_context = reinterpret_cast<ppc::PPCContext*>(ctx);
+  ppc_context->fpscr.bits.rn = control & 3;
+  ppc_context->fpscr.bits.ni = (control >> 2) & 1;
+}
+
+uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
+                                           void* userdata1, void* userdata2,
+                                           bool long_term) {
+  size_t new_index = long_term ? guest_trampoline_address_bitmap_.AcquireFromBack()
+                               : guest_trampoline_address_bitmap_.Acquire();
+  xenia_assert(new_index != static_cast<size_t>(-1));
+
+  uint8_t* write_pos =
+      &guest_trampoline_memory_[kGuestTrampolineCodeSize * new_index];
+// MAP_JIT requires write protection to be disabled for codegen.
+#if XE_PLATFORM_MAC && defined(__aarch64__)
+  pthread_jit_write_protect_np(0);
+#endif
+  EmitGuestTrampoline(write_pos, proc, userdata1, userdata2,
+                      guest_to_host_thunk_);
+#if XE_PLATFORM_MAC && defined(__aarch64__)
+  pthread_jit_write_protect_np(1);
+#endif
+
+  uint32_t guest_addr =
+      kGuestTrampolineBase +
+      static_cast<uint32_t>(new_index) * kGuestTrampolineMinLen;
+#if XE_A64_INDIRECTION_64BIT
+  code_cache()->AddIndirection64(
+      guest_addr, reinterpret_cast<uint64_t>(write_pos));
+#else
+  code_cache()->AddIndirection(
+      guest_addr, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(write_pos)));
+#endif
+  return guest_addr;
+}
+
+void A64Backend::FreeGuestTrampoline(uint32_t trampoline_addr) {
+  xenia_assert(trampoline_addr >= kGuestTrampolineBase &&
+               trampoline_addr < kGuestTrampolineEnd);
+  size_t index =
+      (trampoline_addr - kGuestTrampolineBase) / kGuestTrampolineMinLen;
+  guest_trampoline_address_bitmap_.Release(index);
+}
+
+void A64Backend::RecordMMIOExceptionForGuestInstruction(void* host_address) {
+  static std::atomic<uint32_t> log_count{0};
+  const uint64_t host_pc = reinterpret_cast<uint64_t>(host_address);
+  auto function = code_cache_->LookupFunction(host_pc);
+  if (!function) {
+    if (cvars::log_mmio_recording && log_count.fetch_add(1) < 10) {
+      XELOGI("A64 MMIO record: no function for host_pc=0x{:016X}", host_pc);
+    }
+    return;
+  }
+
+  uint32_t guestaddr =
+      function->MapMachineCodeToGuestAddress(uintptr_t(host_pc));
+  Module* guest_module = function->module();
+  if (!guest_module) {
+    if (cvars::log_mmio_recording && log_count.fetch_add(1) < 10) {
+      XELOGI("A64 MMIO record: no module for host_pc=0x{:016X} guest=0x{:08X}",
+             host_pc, guestaddr);
+    }
+    return;
+  }
+  auto xex_guest_module = dynamic_cast<XexModule*>(guest_module);
+  if (!xex_guest_module) {
+    if (cvars::log_mmio_recording && log_count.fetch_add(1) < 10) {
+      XELOGI(
+          "A64 MMIO record: non-Xex module for host_pc=0x{:016X} "
+          "guest=0x{:08X}",
+          host_pc, guestaddr);
+    }
+    return;
+  }
+  cpu::InfoCacheFlags* icf =
+      xex_guest_module->GetInstructionAddressFlags(guestaddr);
+  if (icf) {
+    const bool was_mmio = icf->accessed_mmio;
+    icf->accessed_mmio = true;
+    if (!was_mmio) {
+      xex_guest_module->FlushInfoCache();
+    }
+    if (cvars::log_mmio_recording && log_count.fetch_add(1) < 10) {
+      const uint32_t raw_flags = *reinterpret_cast<uint32_t*>(icf);
+      const uint32_t low = xex_guest_module->low_address();
+      const uint32_t high = xex_guest_module->high_address();
+      uint32_t file_off = 0;
+      if (guestaddr >= low && guestaddr < high) {
+        file_off = 0x100 + (guestaddr - low);
+      }
+      XELOGI(
+          "A64 MMIO record: host_pc=0x{:016X} guest=0x{:08X} module={} "
+          "raw=0x{:08X} low=0x{:08X} off=0x{:08X} infocache={}",
+          host_pc, guestaddr, xex_guest_module->name(), raw_flags, low,
+          file_off, xex_guest_module->infocache_path());
+    }
+  } else if (cvars::log_mmio_recording && log_count.fetch_add(1) < 10) {
+    XELOGI(
+        "A64 MMIO record: no flags for host_pc=0x{:016X} guest=0x{:08X} "
+        "module={}",
+        host_pc, guestaddr, xex_guest_module->name());
+  }
 }
 
 bool A64Backend::ExceptionCallbackThunk(Exception* ex, void* data) {

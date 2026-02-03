@@ -16,6 +16,8 @@
 #include "xenia/cpu/backend/backend.h"
 
 DECLARE_int32(a64_extension_mask);
+DECLARE_bool(a64_enable_host_guest_stack_synchronization);
+DECLARE_int64(max_stackpoints);
 
 namespace xe {
 class Exception;
