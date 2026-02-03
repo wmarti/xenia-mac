@@ -14,6 +14,26 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
 
+namespace {
+
+XE_FORCEINLINE uint64_t LoadValidFlag(uint64_t* ptr) {
+  return std::atomic_ref<uint64_t>(*ptr).load(std::memory_order_relaxed);
+}
+
+XE_FORCEINLINE void StoreValidFlag(uint64_t* ptr, uint64_t value) {
+  std::atomic_ref<uint64_t>(*ptr).store(value, std::memory_order_relaxed);
+}
+
+XE_FORCEINLINE void OrValidFlag(uint64_t* ptr, uint64_t value) {
+  std::atomic_ref<uint64_t>(*ptr).fetch_or(value, std::memory_order_relaxed);
+}
+
+XE_FORCEINLINE void AndValidFlag(uint64_t* ptr, uint64_t value) {
+  std::atomic_ref<uint64_t>(*ptr).fetch_and(value, std::memory_order_relaxed);
+}
+
+}  // namespace
+
 namespace xe {
 namespace gpu {
 
@@ -132,10 +152,11 @@ void SharedMemory::InvalidateAllPages() {
   uint64_t* active = active_valid_flags_.load(std::memory_order_relaxed);
   uint64_t* staging = staging_valid_flags_.load(std::memory_order_relaxed);
 
-  std::memset(active, 0, num_system_page_flags_ * sizeof(uint64_t));
-  std::memset(staging, 0, num_system_page_flags_ * sizeof(uint64_t));
-  std::memset(system_page_flags_valid_and_gpu_written_, 0,
-              num_system_page_flags_ * sizeof(uint64_t));
+  for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
+    StoreValidFlag(&active[i], 0);
+    StoreValidFlag(&staging[i], 0);
+    StoreValidFlag(&system_page_flags_valid_and_gpu_written_[i], 0);
+  }
 
   // Mark all blocks as dirty and set dirty flag
   dirty_blocks_.store(0xFFFFFFFF, std::memory_order_relaxed);
@@ -181,27 +202,27 @@ void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
   uint32_t dirty_count = xe::bit_count(dirty_mask);
 
   // Threshold: if >50% of blocks are dirty, full copy is more efficient.
-  // vastcpy has overhead that's only worthwhile for large copies.
   if (dirty_count == 0 || dirty_count > 16) {
     // Full copy: either no blocks marked (race/init) or many blocks dirty.
-    uint32_t copy_size = num_system_page_flags_ * sizeof(uint64_t);
-    memory::vastcpy(
-        reinterpret_cast<uint8_t*>(staging),
-        reinterpret_cast<uint8_t*>(system_page_flags_valid_and_gpu_written_),
-        copy_size);
+    for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
+      StoreValidFlag(&staging[i],
+                     LoadValidFlag(&system_page_flags_valid_and_gpu_written_[i]));
+    }
   } else {
-    // Partial copy: only copy dirty blocks using memcpy (efficient for 512-byte
-    // chunks).
+    // Partial copy: only copy dirty blocks (64 entries per block).
     while (dirty_mask) {
       uint32_t block_index;
       xe::bit_scan_forward(dirty_mask, &block_index);
       dirty_mask &= ~(1u << block_index);  // Clear this bit
 
-      // Each block is 64 entries * 8 bytes = 512 bytes
+      // Each block is 64 entries.
       uint32_t entry_offset = block_index * 64;
-      std::memcpy(&staging[entry_offset],
-                  &system_page_flags_valid_and_gpu_written_[entry_offset],
-                  64 * sizeof(uint64_t));
+      for (uint32_t i = 0; i < 64; ++i) {
+        uint32_t entry = entry_offset + i;
+        StoreValidFlag(
+            &staging[entry],
+            LoadValidFlag(&system_page_flags_valid_and_gpu_written_[entry]));
+      }
     }
   }
 
@@ -415,9 +436,9 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
       // SystemPageFlagsBlock& block = system_page_flags_[i];
       uint64_t* valid_flags =
           active_valid_flags_.load(std::memory_order_relaxed);
-      valid_flags[i] |= valid_bits;
+      OrValidFlag(&valid_flags[i], valid_bits);
       if (written_by_gpu) {
-        system_page_flags_valid_and_gpu_written_[i] |= valid_bits;
+        OrValidFlag(&system_page_flags_valid_and_gpu_written_[i], valid_bits);
         // Mark as dirty to trigger copy in
         // SetSystemPageBlocksValidWithGpuDataWritten.
         gpu_written_data_dirty_.store(true, std::memory_order_relaxed);
@@ -426,7 +447,7 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
         uint32_t dirty_block_bit = 1u << (i >> 6);
         dirty_blocks_.fetch_or(dirty_block_bit, std::memory_order_relaxed);
       } else {
-        system_page_flags_valid_and_gpu_written_[i] &= ~valid_bits;
+        AndValidFlag(&system_page_flags_valid_and_gpu_written_[i], ~valid_bits);
       }
     }
   }
@@ -491,7 +512,7 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   if (valid_flags) {
     bool all_valid = true;
     for (uint32_t i = block_first; i <= block_last && all_valid; ++i) {
-      uint64_t block_valid = valid_flags[i];
+      uint64_t block_valid = LoadValidFlag(&valid_flags[i]);
       if (i == block_first) {
         // Mask out pages before page_first
         uint64_t block_before = (uint64_t(1) << (page_first & 63)) - 1;
@@ -557,7 +578,7 @@ void SharedMemory::TryFindUploadRange(const uint32_t& block_first,
   uint64_t* valid_flags = active_valid_flags_.load(std::memory_order_relaxed);
 
   for (uint32_t i = block_first; i <= block_last; ++i) {
-    uint64_t block_valid = valid_flags[i];
+    uint64_t block_valid = LoadValidFlag(&valid_flags[i]);
     if (i == block_first) {
       uint64_t block_before = mod_shift_left(uint64_t(1), page_first) - 1;
       block_valid |= block_before;
@@ -661,14 +682,14 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     // 0.7 ms.
     if (page_first & 63) {
       uint64_t gpu_written_start =
-          system_page_flags_valid_and_gpu_written_[block_first];
+          LoadValidFlag(&system_page_flags_valid_and_gpu_written_[block_first]);
       gpu_written_start &= (uint64_t(1) << (page_first & 63)) - 1;
       page_first =
           (page_first & ~uint32_t(63)) + (64 - xe::lzcnt(gpu_written_start));
     }
     if ((page_last & 63) != 63) {
       uint64_t gpu_written_end =
-          system_page_flags_valid_and_gpu_written_[block_last];
+          LoadValidFlag(&system_page_flags_valid_and_gpu_written_[block_last]);
       gpu_written_end &= ~((uint64_t(1) << ((page_last & 63) + 1)) - 1);
       page_last = (page_last & ~uint32_t(63)) +
                   (std::max(xe::tzcnt(gpu_written_end), uint8_t(1)) - 1);
@@ -685,8 +706,8 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
       invalidate_bits &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
     }
     uint64_t* valid_flags = active_valid_flags_.load(std::memory_order_relaxed);
-    valid_flags[i] &= ~invalidate_bits;
-    system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
+    AndValidFlag(&valid_flags[i], ~invalidate_bits);
+    AndValidFlag(&system_page_flags_valid_and_gpu_written_[i], ~invalidate_bits);
     // Track which 64-entry blocks are dirty for partial copying.
     dirty_blocks_mask |= (1u << (i >> 6));
   }
@@ -716,9 +737,10 @@ void SharedMemory::PrepareForTraceDownload() {
   uint64_t* valid_flags = active_valid_flags_.load(std::memory_order_relaxed);
   for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
     // SystemPageFlagsBlock& page_flags_block = system_page_flags_[i];
-    uint64_t previously_valid_block = valid_flags[i];
-    uint64_t gpu_written_block = system_page_flags_valid_and_gpu_written_[i];
-    valid_flags[i] = gpu_written_block;
+    uint64_t previously_valid_block = LoadValidFlag(&valid_flags[i]);
+    uint64_t gpu_written_block =
+        LoadValidFlag(&system_page_flags_valid_and_gpu_written_[i]);
+    StoreValidFlag(&valid_flags[i], gpu_written_block);
 
     // Fire watches on the invalidated pages.
     uint64_t fire_watches_block = previously_valid_block & ~gpu_written_block;
