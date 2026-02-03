@@ -180,6 +180,131 @@ bool ShouldLogRateLimited(std::atomic<int64_t>& last_log_ns,
   return false;
 }
 
+void PopulatePipelineFormatsFromRenderPassDescriptor(
+    MTL::RenderPassDescriptor* pass_descriptor,
+    MTL::PixelFormat* color_formats, uint32_t color_count,
+    MTL::PixelFormat* depth_format, MTL::PixelFormat* stencil_format,
+    uint32_t* sample_count) {
+  if (!pass_descriptor) {
+    return;
+  }
+
+  auto update_sample_count = [&](MTL::Texture* texture) {
+    if (!texture || !sample_count) {
+      return;
+    }
+    NS::UInteger sc = texture->sampleCount();
+    if (sc > 0) {
+      *sample_count =
+          std::max<uint32_t>(*sample_count, static_cast<uint32_t>(sc));
+    }
+  };
+
+  if (color_formats) {
+    auto* color_attachments = pass_descriptor->colorAttachments();
+    for (uint32_t i = 0; i < color_count; ++i) {
+      auto* attachment = color_attachments ? color_attachments->object(i)
+                                           : nullptr;
+      if (!attachment) {
+        continue;
+      }
+      MTL::Texture* texture = attachment->texture();
+      if (!texture) {
+        continue;
+      }
+      color_formats[i] = texture->pixelFormat();
+      update_sample_count(texture);
+    }
+  }
+
+  if (depth_format) {
+    if (auto* depth_attachment = pass_descriptor->depthAttachment()) {
+      MTL::Texture* texture = depth_attachment->texture();
+      if (texture) {
+        *depth_format = texture->pixelFormat();
+        update_sample_count(texture);
+      }
+    }
+  }
+
+  if (stencil_format) {
+    if (auto* stencil_attachment = pass_descriptor->stencilAttachment()) {
+      MTL::Texture* texture = stencil_attachment->texture();
+      if (texture) {
+        *stencil_format = texture->pixelFormat();
+        update_sample_count(texture);
+      }
+    }
+  }
+
+  if (depth_format && stencil_format) {
+    if (*depth_format != MTL::PixelFormatInvalid &&
+        *stencil_format == MTL::PixelFormatInvalid) {
+      switch (*depth_format) {
+        case MTL::PixelFormatDepth32Float_Stencil8:
+        case MTL::PixelFormatDepth24Unorm_Stencil8:
+        case MTL::PixelFormatX32_Stencil8:
+          *stencil_format = *depth_format;
+          break;
+        default:
+          break;
+      }
+    } else if (*stencil_format != MTL::PixelFormatInvalid &&
+               *depth_format == MTL::PixelFormatInvalid) {
+      switch (*stencil_format) {
+        case MTL::PixelFormatDepth32Float_Stencil8:
+        case MTL::PixelFormatDepth24Unorm_Stencil8:
+        case MTL::PixelFormatX32_Stencil8:
+          *depth_format = *stencil_format;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+}
+
+MTL::ComputePipelineState* CreateComputePipelineFromEmbeddedLibrary(
+    MTL::Device* device, const void* metallib_data, size_t metallib_size,
+    const char* debug_name) {
+  if (!device || !metallib_data || !metallib_size) {
+    return nullptr;
+  }
+
+  NS::Error* error = nullptr;
+  dispatch_data_t data = dispatch_data_create(
+      metallib_data, metallib_size, nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+  MTL::Library* lib = device->newLibrary(data, &error);
+  dispatch_release(data);
+  if (!lib) {
+    XELOGE("Metal: failed to create {} library: {}", debug_name,
+           error ? error->localizedDescription()->utf8String() : "unknown");
+    return nullptr;
+  }
+
+  // XeSL compute entrypoint name used in the embedded metallibs.
+  NS::String* fn_name = NS::String::string("entry_xe", NS::UTF8StringEncoding);
+  MTL::Function* fn = lib->newFunction(fn_name);
+  if (!fn) {
+    XELOGE("Metal: {} missing entry_xe", debug_name);
+    lib->release();
+    return nullptr;
+  }
+
+  MTL::ComputePipelineState* pipeline =
+      device->newComputePipelineState(fn, &error);
+  fn->release();
+  lib->release();
+
+  if (!pipeline) {
+    XELOGE("Metal: failed to create {} pipeline: {}", debug_name,
+           error ? error->localizedDescription()->utf8String() : "unknown");
+    return nullptr;
+  }
+
+  return pipeline;
+}
+
 constexpr uint32_t kPipelineDiskCacheMagic = 0x43504D58;  // 'XMPC'
 constexpr uint32_t kPipelineDiskCacheVersion = 2;
 constexpr size_t kPipelineDiskCacheMaxEntrySize = 1 << 20;
@@ -5222,14 +5347,45 @@ void MetalCommandProcessor::ApplyDepthStencilState(
   auto stencil_ref_mask_front = regs.Get<reg::RB_STENCILREFMASK>();
   auto stencil_ref_mask_back =
       regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF);
+  auto depth_control = normalized_depth_control;
+
+  bool has_stencil_attachment = false;
+  if (current_render_pass_descriptor_) {
+    if (auto* stencil_attachment =
+            current_render_pass_descriptor_->stencilAttachment()) {
+      has_stencil_attachment = stencil_attachment->texture() != nullptr;
+    }
+  }
+
+  if (!has_stencil_attachment && depth_control.stencil_enable) {
+    static bool no_stencil_logged = false;
+    if (!no_stencil_logged) {
+      no_stencil_logged = true;
+      XELOGW(
+          "Metal: stencil enabled but no stencil attachment bound; disabling "
+          "stencil for this pass");
+    }
+    depth_control.stencil_enable = 0;
+    depth_control.backface_enable = 0;
+    depth_control.stencilfunc = xenos::CompareFunction::kAlways;
+    depth_control.stencilfail = xenos::StencilOp::kKeep;
+    depth_control.stencilzpass = xenos::StencilOp::kKeep;
+    depth_control.stencilzfail = xenos::StencilOp::kKeep;
+    depth_control.stencilfunc_bf = xenos::CompareFunction::kAlways;
+    depth_control.stencilfail_bf = xenos::StencilOp::kKeep;
+    depth_control.stencilzpass_bf = xenos::StencilOp::kKeep;
+    depth_control.stencilzfail_bf = xenos::StencilOp::kKeep;
+    stencil_ref_mask_front.value = 0;
+    stencil_ref_mask_back.value = 0;
+  }
 
   DepthStencilStateKey key;
-  key.depth_control = normalized_depth_control.value;
+  key.depth_control = depth_control.value;
   key.stencil_ref_mask_front = stencil_ref_mask_front.value;
   key.stencil_ref_mask_back = stencil_ref_mask_back.value;
   key.polygonal_and_backface =
       (primitive_polygonal ? 1u : 0u) |
-      (normalized_depth_control.backface_enable ? 2u : 0u);
+      (depth_control.backface_enable ? 2u : 0u);
 
   MTL::DepthStencilState* state = nullptr;
   auto it = depth_stencil_state_cache_.find(key);
@@ -5238,41 +5394,40 @@ void MetalCommandProcessor::ApplyDepthStencilState(
   } else {
     MTL::DepthStencilDescriptor* ds_desc =
         MTL::DepthStencilDescriptor::alloc()->init();
-    if (normalized_depth_control.z_enable) {
+    if (depth_control.z_enable) {
       ds_desc->setDepthCompareFunction(
-          ToMetalCompareFunction(normalized_depth_control.zfunc));
-      ds_desc->setDepthWriteEnabled(normalized_depth_control.z_write_enable !=
-                                    0);
+          ToMetalCompareFunction(depth_control.zfunc));
+      ds_desc->setDepthWriteEnabled(depth_control.z_write_enable != 0);
     } else {
       ds_desc->setDepthCompareFunction(MTL::CompareFunctionAlways);
       ds_desc->setDepthWriteEnabled(false);
     }
 
-    if (normalized_depth_control.stencil_enable) {
+    if (depth_control.stencil_enable) {
       auto* front = MTL::StencilDescriptor::alloc()->init();
       front->setStencilCompareFunction(
-          ToMetalCompareFunction(normalized_depth_control.stencilfunc));
+          ToMetalCompareFunction(depth_control.stencilfunc));
       front->setStencilFailureOperation(
-          ToMetalStencilOperation(normalized_depth_control.stencilfail));
+          ToMetalStencilOperation(depth_control.stencilfail));
       front->setDepthFailureOperation(
-          ToMetalStencilOperation(normalized_depth_control.stencilzfail));
+          ToMetalStencilOperation(depth_control.stencilzfail));
       front->setDepthStencilPassOperation(
-          ToMetalStencilOperation(normalized_depth_control.stencilzpass));
+          ToMetalStencilOperation(depth_control.stencilzpass));
       front->setReadMask(stencil_ref_mask_front.stencilmask);
       front->setWriteMask(stencil_ref_mask_front.stencilwritemask);
 
       ds_desc->setFrontFaceStencil(front);
 
-      if (primitive_polygonal && normalized_depth_control.backface_enable) {
+      if (primitive_polygonal && depth_control.backface_enable) {
         auto* back = MTL::StencilDescriptor::alloc()->init();
         back->setStencilCompareFunction(
-            ToMetalCompareFunction(normalized_depth_control.stencilfunc_bf));
+            ToMetalCompareFunction(depth_control.stencilfunc_bf));
         back->setStencilFailureOperation(
-            ToMetalStencilOperation(normalized_depth_control.stencilfail_bf));
+            ToMetalStencilOperation(depth_control.stencilfail_bf));
         back->setDepthFailureOperation(
-            ToMetalStencilOperation(normalized_depth_control.stencilzfail_bf));
+            ToMetalStencilOperation(depth_control.stencilzfail_bf));
         back->setDepthStencilPassOperation(
-            ToMetalStencilOperation(normalized_depth_control.stencilzpass_bf));
+            ToMetalStencilOperation(depth_control.stencilzpass_bf));
         back->setReadMask(stencil_ref_mask_back.stencilmask);
         back->setWriteMask(stencil_ref_mask_back.stencilwritemask);
         ds_desc->setBackFaceStencil(back);
@@ -5296,16 +5451,16 @@ void MetalCommandProcessor::ApplyDepthStencilState(
 
   current_render_encoder_->setDepthStencilState(state);
 
-  if (normalized_depth_control.stencil_enable) {
+  if (depth_control.stencil_enable) {
     uint32_t ref_front = stencil_ref_mask_front.stencilref;
     uint32_t ref_back = stencil_ref_mask_back.stencilref;
     auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
     uint32_t ref = ref_front;
-    if (primitive_polygonal && normalized_depth_control.backface_enable &&
+    if (primitive_polygonal && depth_control.backface_enable &&
         pa_su_sc_mode_cntl.cull_front && !pa_su_sc_mode_cntl.cull_back) {
       ref = ref_back;
     } else if (primitive_polygonal &&
-               normalized_depth_control.backface_enable &&
+               depth_control.backface_enable &&
                ref_front != ref_back) {
       static bool mismatch_logged = false;
       if (!mismatch_logged) {
@@ -5447,6 +5602,14 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreatePipelineState(
       }
     }
   }
+
+  MTL::RenderPassDescriptor* pass_descriptor = current_render_pass_descriptor_;
+  if (!pass_descriptor) {
+    pass_descriptor = render_pass_descriptor_;
+  }
+  PopulatePipelineFormatsFromRenderPassDescriptor(
+      pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
+      &sample_count);
 
   struct PipelineKey {
     const void* vs;
@@ -5817,6 +5980,14 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
       }
     }
   }
+
+  MTL::RenderPassDescriptor* pass_descriptor = current_render_pass_descriptor_;
+  if (!pass_descriptor) {
+    pass_descriptor = render_pass_descriptor_;
+  }
+  PopulatePipelineFormatsFromRenderPassDescriptor(
+      pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
+      &sample_count);
 
   struct GeometryPipelineKey {
     const void* vs;
@@ -6402,6 +6573,14 @@ MetalCommandProcessor::GetOrCreateTessellationPipelineState(
       }
     }
   }
+
+  MTL::RenderPassDescriptor* pass_descriptor = current_render_pass_descriptor_;
+  if (!pass_descriptor) {
+    pass_descriptor = render_pass_descriptor_;
+  }
+  PopulatePipelineFormatsFromRenderPassDescriptor(
+      pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
+      &sample_count);
 
   struct TessellationPipelineKey {
     const void* ds;
