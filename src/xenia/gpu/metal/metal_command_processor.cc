@@ -7311,14 +7311,32 @@ void MetalCommandProcessor::ScheduleDrawRingRelease(
   if (!command_buffer || command_buffer_draw_rings_.empty()) {
     return;
   }
-  auto rings = std::move(command_buffer_draw_rings_);
-  command_buffer->addCompletedHandler(
-      [this, rings](MTL::CommandBuffer*) mutable {
-        std::lock_guard<std::mutex> lock(draw_ring_mutex_);
-        for (auto& ring : rings) {
-          draw_ring_pool_.push_back(ring);
-        }
-      });
+  std::vector<std::shared_ptr<DrawRingBuffers>> rings;
+  rings.swap(command_buffer_draw_rings_);
+  bool add_handler = false;
+  {
+    std::lock_guard<std::mutex> lock(draw_ring_mutex_);
+    auto& pending = pending_draw_ring_releases_[command_buffer];
+    add_handler = pending.empty();
+    pending.reserve(pending.size() + rings.size());
+    for (auto& ring : rings) {
+      pending.push_back(std::move(ring));
+    }
+  }
+  if (add_handler) {
+    command_buffer->addCompletedHandler(
+        [this](MTL::CommandBuffer* completed_cmd) {
+          std::lock_guard<std::mutex> lock(draw_ring_mutex_);
+          auto it = pending_draw_ring_releases_.find(completed_cmd);
+          if (it == pending_draw_ring_releases_.end()) {
+            return;
+          }
+          for (auto& ring : it->second) {
+            draw_ring_pool_.push_back(std::move(ring));
+          }
+          pending_draw_ring_releases_.erase(it);
+        });
+  }
 }
 
 void MetalCommandProcessor::PopulateIRConverterBuffers() {

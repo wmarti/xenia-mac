@@ -612,6 +612,9 @@ class MetalCommandProcessor : public CommandProcessor {
   std::shared_ptr<DrawRingBuffers> active_draw_ring_;
   std::vector<std::shared_ptr<DrawRingBuffers>> draw_ring_pool_;
   std::vector<std::shared_ptr<DrawRingBuffers>> command_buffer_draw_rings_;
+  std::unordered_map<MTL::CommandBuffer*,
+                     std::vector<std::shared_ptr<DrawRingBuffers>>>
+      pending_draw_ring_releases_;
   std::mutex draw_ring_mutex_;
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
