@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <limits>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -321,10 +322,18 @@ class MetalTextureCache::UploadBufferPool
       ReleaseImmediate(buffer);
       return;
     }
-    std::shared_ptr<UploadBufferPool> self = shared_from_this();
-    cmd->addCompletedHandler(^(MTL::CommandBuffer*) {
-      self->ReleaseImmediate(buffer);
-    });
+    bool add_handler = false;
+    {
+      std::lock_guard<std::mutex> lock(pending_releases_mutex_);
+      auto& pending = pending_releases_[cmd];
+      add_handler = pending.empty();
+      pending.push_back({shared_from_this(), buffer});
+    }
+    if (add_handler) {
+      cmd->addCompletedHandler(^(MTL::CommandBuffer* completed_cmd) {
+        UploadBufferPool::HandleCommandBufferCompleted(completed_cmd);
+      });
+    }
   }
 
   void Shutdown() {
@@ -359,10 +368,42 @@ class MetalTextureCache::UploadBufferPool
     bool in_use = false;
   };
 
+  struct PendingRelease {
+    std::shared_ptr<UploadBufferPool> pool;
+    MTL::Buffer* buffer = nullptr;
+  };
+
+  static void HandleCommandBufferCompleted(MTL::CommandBuffer* cmd);
+  static std::mutex pending_releases_mutex_;
+  static std::unordered_map<MTL::CommandBuffer*, std::vector<PendingRelease>>
+      pending_releases_;
+
   mutable std::mutex mutex_;
   std::vector<Entry> entries_;
   MTL::Device* device_ = nullptr;
 };
+
+std::mutex MetalTextureCache::UploadBufferPool::pending_releases_mutex_;
+std::unordered_map<MTL::CommandBuffer*,
+                   std::vector<MetalTextureCache::UploadBufferPool::PendingRelease>>
+    MetalTextureCache::UploadBufferPool::pending_releases_;
+
+void MetalTextureCache::UploadBufferPool::HandleCommandBufferCompleted(
+    MTL::CommandBuffer* cmd) {
+  std::vector<PendingRelease> releases;
+  {
+    std::lock_guard<std::mutex> lock(pending_releases_mutex_);
+    auto it = pending_releases_.find(cmd);
+    if (it == pending_releases_.end()) {
+      return;
+    }
+    releases = std::move(it->second);
+    pending_releases_.erase(it);
+  }
+  for (auto& release : releases) {
+    release.pool->ReleaseImmediate(release.buffer);
+  }
+}
 
 MetalTextureCache::MetalTextureCache(MetalCommandProcessor* command_processor,
                                      const RegisterFile& register_file,
@@ -800,7 +841,11 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     return false;
   }
 
-  auto buffer_pool = upload_buffer_pool_;
+  std::shared_ptr<UploadBufferPool> buffer_pool;
+  {
+    std::lock_guard<std::mutex> lock(upload_buffer_pool_mutex_);
+    buffer_pool = upload_buffer_pool_;
+  }
   auto acquire_buffer = [&](size_t size) -> MTL::Buffer* {
     if (buffer_pool) {
       return buffer_pool->Acquire(size);
@@ -1345,7 +1390,10 @@ bool MetalTextureCache::Initialize() {
         "disabled; forcing shared textures");
   }
 
-  upload_buffer_pool_ = std::make_shared<UploadBufferPool>(device);
+  {
+    std::lock_guard<std::mutex> lock(upload_buffer_pool_mutex_);
+    upload_buffer_pool_ = std::make_shared<UploadBufferPool>(device);
+  }
   if (::cvars::metal_use_heaps) {
     size_t min_heap_bytes = std::max<int32_t>(0, ::cvars::metal_heap_min_bytes);
     texture_heap_pool_ = std::make_unique<MetalHeapPool>(
@@ -1673,9 +1721,15 @@ void MetalTextureCache::Shutdown() {
     null_texture_cube_ = nullptr;
   }
 
-  if (upload_buffer_pool_) {
-    upload_buffer_pool_->Shutdown();
-    upload_buffer_pool_.reset();
+  {
+    std::shared_ptr<UploadBufferPool> buffer_pool;
+    {
+      std::lock_guard<std::mutex> lock(upload_buffer_pool_mutex_);
+      buffer_pool = std::move(upload_buffer_pool_);
+    }
+    if (buffer_pool) {
+      buffer_pool->Shutdown();
+    }
   }
   if (texture_heap_pool_) {
     texture_heap_pool_->Shutdown();
@@ -1693,16 +1747,35 @@ void MetalTextureCache::ClearScaledResolveBuffers() {
     }
   }
   scaled_resolve_buffers_.clear();
-  for (auto& buffer : scaled_resolve_retired_buffers_) {
-    if (buffer.buffer) {
-      buffer.buffer->release();
-      buffer.buffer = nullptr;
+  for (auto& retired : scaled_resolve_retired_buffers_) {
+    if (retired.buffer) {
+      retired.buffer->release();
+      retired.buffer = nullptr;
     }
   }
   scaled_resolve_retired_buffers_.clear();
   scaled_resolve_current_buffer_index_ = size_t(-1);
   scaled_resolve_current_range_start_scaled_ = 0;
   scaled_resolve_current_range_length_scaled_ = 0;
+}
+
+void MetalTextureCache::CompletedSubmissionUpdated(
+    uint64_t completed_submission_index) {
+  TextureCache::CompletedSubmissionUpdated(completed_submission_index);
+  if (scaled_resolve_retired_buffers_.empty()) {
+    return;
+  }
+  for (auto it = scaled_resolve_retired_buffers_.begin();
+       it != scaled_resolve_retired_buffers_.end();) {
+    if (it->submission_id <= completed_submission_index) {
+      if (it->buffer) {
+        it->buffer->release();
+      }
+      it = scaled_resolve_retired_buffers_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void MetalTextureCache::ClearCache() {
@@ -2851,7 +2924,10 @@ bool MetalTextureCache::EnsureScaledResolveBufferRange(uint64_t start_scaled,
     }
     if (overlapping) {
       if (retain_overlaps) {
-        scaled_resolve_retired_buffers_.push_back(scaled_resolve_buffers_[i]);
+        RetiredScaledResolveBuffer retired;
+        retired.buffer = scaled_resolve_buffers_[i].buffer;
+        retired.submission_id = command_processor_->GetCurrentSubmission();
+        scaled_resolve_retired_buffers_.push_back(retired);
       } else if (scaled_resolve_buffers_[i].buffer) {
         scaled_resolve_buffers_[i].buffer->release();
       }
