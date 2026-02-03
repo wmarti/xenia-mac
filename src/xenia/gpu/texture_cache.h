@@ -278,16 +278,20 @@ class TextureCache {
     uint64_t last_usage_time() const { return last_usage_time_; }
 
     bool base_outdated(const global_unique_lock_type& global_lock) const {
-      return base_outdated_;
+      return base_outdated_.load(std::memory_order_relaxed);
     }
     bool mips_outdated(const global_unique_lock_type& global_lock) const {
-      return mips_outdated_;
+      return mips_outdated_.load(std::memory_order_relaxed);
     }
     // Lockless accessors for pre-check optimization.
     // Safe to read without lock - worst case is false positive (outdated when
     // not).
-    bool base_outdated_lockless() const { return base_outdated_; }
-    bool mips_outdated_lockless() const { return mips_outdated_; }
+    bool base_outdated_lockless() const {
+      return base_outdated_.load(std::memory_order_relaxed);
+    }
+    bool mips_outdated_lockless() const {
+      return mips_outdated_.load(std::memory_order_relaxed);
+    }
     void MakeUpToDateAndWatch(const global_unique_lock_type& global_lock);
 
     void WatchCallback(const global_unique_lock_type& global_lock, bool is_mip);
@@ -337,9 +341,9 @@ class TextureCache {
     // These are to be accessed within the global critical region to synchronize
     // with shared memory.
     // Whether the recent base level data needs reloading from the memory.
-    bool base_outdated_ = false;
+    std::atomic<bool> base_outdated_{false};
     // Whether the recent mip data needs reloading from the memory.
-    bool mips_outdated_ = false;
+    std::atomic<bool> mips_outdated_{false};
     // Watch handles for the memory ranges.
     SharedMemory::WatchHandle base_watch_handle_ = nullptr;
     SharedMemory::WatchHandle mips_watch_handle_ = nullptr;

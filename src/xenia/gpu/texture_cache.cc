@@ -523,8 +523,10 @@ TextureCache::Texture::Texture(TextureCache& texture_cache,
   }
 
   // Never try to upload data that doesn't exist.
-  base_outdated_ = guest_layout().base.level_data_extent_bytes != 0;
-  mips_outdated_ = guest_layout().mips_total_extent_bytes != 0;
+  base_outdated_.store(guest_layout().base.level_data_extent_bytes != 0,
+                       std::memory_order_relaxed);
+  mips_outdated_.store(guest_layout().mips_total_extent_bytes != 0,
+                       std::memory_order_relaxed);
 }
 
 TextureCache::Texture::~Texture() {
@@ -555,16 +557,16 @@ TextureCache::Texture::~Texture() {
 void TextureCache::Texture::MakeUpToDateAndWatch(
     const global_unique_lock_type& global_lock) {
   SharedMemory& shared_memory = texture_cache().shared_memory();
-  if (base_outdated_) {
+  if (base_outdated_.load(std::memory_order_relaxed)) {
     assert_not_zero(GetGuestBaseSize());
-    base_outdated_ = false;
+    base_outdated_.store(false, std::memory_order_relaxed);
     base_watch_handle_ = shared_memory.WatchMemoryRange(
         key().base_page << 12, GetGuestBaseSize(), TextureCache::WatchCallback,
         this, nullptr, 0);
   }
-  if (mips_outdated_) {
+  if (mips_outdated_.load(std::memory_order_relaxed)) {
     assert_not_zero(GetGuestMipsSize());
-    mips_outdated_ = false;
+    mips_outdated_.store(false, std::memory_order_relaxed);
     mips_watch_handle_ = shared_memory.WatchMemoryRange(
         key().mip_page << 12, GetGuestMipsSize(), TextureCache::WatchCallback,
         this, nullptr, 1);
@@ -605,11 +607,11 @@ void TextureCache::Texture::WatchCallback(
     [[maybe_unused]] const global_unique_lock_type& global_lock, bool is_mip) {
   if (is_mip) {
     assert_not_zero(GetGuestMipsSize());
-    mips_outdated_ = true;
+    mips_outdated_.store(true, std::memory_order_relaxed);
     mips_watch_handle_ = nullptr;
   } else {
     assert_not_zero(GetGuestBaseSize());
-    base_outdated_ = true;
+    base_outdated_.store(true, std::memory_order_relaxed);
     base_watch_handle_ = nullptr;
   }
 }
