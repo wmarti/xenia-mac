@@ -179,7 +179,6 @@ bool ShouldLogRateLimited(std::atomic<int64_t>& last_log_ns,
   }
   return false;
 }
-
 void PopulatePipelineFormatsFromRenderPassDescriptor(
     MTL::RenderPassDescriptor* pass_descriptor,
     MTL::PixelFormat* color_formats, uint32_t color_count,
