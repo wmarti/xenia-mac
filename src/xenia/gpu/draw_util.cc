@@ -979,10 +979,29 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
     assert_always();
     return false;
   }
+  if (!memory.physical_membase()) {
+    XELOGE("GetResolveInfo: physical_membase is null");
+    return false;
+  }
+  const uint32_t vertex_bytes = fetch.size * sizeof(uint32_t);
+  const uint32_t vertex_address_bytes = fetch.address * sizeof(uint32_t);
+  if (vertex_address_bytes >= 0x20000000u ||
+      vertex_address_bytes > 0x20000000u - vertex_bytes) {
+    XELOGE(
+        "GetResolveInfo: vertex fetch address out of range (addr=0x{:08X}, "
+        "bytes=0x{:X})",
+        vertex_address_bytes, vertex_bytes);
+    return false;
+  }
   trace_writer.WriteMemoryRead(fetch.address * sizeof(uint32_t),
                                fetch.size * sizeof(uint32_t));
   const float* vertices_guest = reinterpret_cast<const float*>(
-      memory.TranslatePhysical(fetch.address * sizeof(uint32_t)));
+      memory.TranslatePhysical(vertex_address_bytes));
+  if (!vertices_guest) {
+    XELOGE("GetResolveInfo: failed to translate vertex fetch address 0x{:08X}",
+           vertex_address_bytes);
+    return false;
+  }
   // Most vertices have a negative half-pixel offset applied, which we reverse.
   float half_pixel_offset =
       regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero
