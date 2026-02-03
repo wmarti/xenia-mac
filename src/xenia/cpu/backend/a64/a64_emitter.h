@@ -190,6 +190,7 @@ class A64Emitter : public oaknut::VectorCodeGenerator {
   void DebugBreak();
   void Trap(uint16_t trap_type = 0);
   void UnimplementedInstr(const hir::Instr* i);
+  static void HandleStackpointOverflowError(ppc::PPCContext* context);
 
   void Call(const hir::Instr* instr, GuestFunction* function);
   void CallIndirect(const hir::Instr* instr, const oaknut::XReg& reg);
@@ -208,6 +209,9 @@ class A64Emitter : public oaknut::VectorCodeGenerator {
   static oaknut::XReg GetMembaseReg();
   void ReloadContext();
   void ReloadMembase();
+  void PushStackpoint();
+  void PopStackpoint();
+  void EnsureSynchronizedGuestAndHostStack();
 
   // Moves a 64bit immediate into memory.
   static bool ConstantFitsIn32Reg(uint64_t v);

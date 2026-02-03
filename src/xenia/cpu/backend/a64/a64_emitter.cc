@@ -263,6 +263,8 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
   STP(X29, X30, SP, PRE_INDEXED, -16);
   MOV(X29, SP);
 
+  PushStackpoint();
+
   AdjustStackPointer(*this, stack_size, false);
 
   code_offsets.prolog_stack_alloc = offset();
@@ -410,6 +412,15 @@ void A64Emitter::EmitGetCurrentThreadId() {
 void A64Emitter::EmitTraceUserCallReturn() {}
 
 void A64Emitter::DebugBreak() { BRK(0xF000); }
+
+void A64Emitter::HandleStackpointOverflowError(ppc::PPCContext* context) {
+  if (debugging::IsDebuggerAttached()) {
+    debugging::Break();
+  }
+  xe::FatalError(
+      "Overflowed stackpoints! Please report this error for this title to "
+      "Xenia developers.");
+}
 
 uint64_t TrapDebugPrint(void* raw_context, uint64_t address) {
   auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
@@ -891,14 +902,6 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
                     --scan_index;
                   }
 
-                  const auto& sp_entry =
-                      backend_context->stackpoints[current_stackpoint_index];
-                  backend_context->pending_stack_sync = 1;
-                  backend_context->pending_stack_sync_sp = sp_entry.host_sp;
-                  backend_context->pending_stack_sync_fp = sp_entry.host_fp;
-                  backend_context->pending_stack_sync_target = host_address;
-                  backend_context->current_stackpoint_depth =
-                      current_stackpoint_index + 1;
                   if (cvars::a64_stack_sync_log) {
                     static std::atomic<int32_t> sync_log_count{0};
                     const int32_t limit = cvars::a64_stack_sync_log_limit;
@@ -914,8 +917,7 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
                           current_stackpoint_index);
                     }
                   }
-                  return reinterpret_cast<uint64_t>(
-                      backend->stack_sync_thunk());
+                  return host_address;
                 }
               }
             }
@@ -1071,6 +1073,13 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     LDR(X0, SP, StackLayout::GUEST_CALL_RET_ADDR);
 
     BLR(X16);
+
+    EnsureSynchronizedGuestAndHostStack();
+
+    if (cvars::a64_stack_sync_check) {
+      MOV(GetNativeParam(0), instr->GuestAddressFor());
+      CallNativeSafe(reinterpret_cast<void*>(CheckStackSync));
+    }
   }
 }
 
@@ -1139,6 +1148,13 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
     LDR(X0, SP, StackLayout::GUEST_CALL_RET_ADDR);
 
     BLR(X16);
+
+    EnsureSynchronizedGuestAndHostStack();
+
+    if (cvars::a64_stack_sync_check) {
+      MOV(GetNativeParam(0), instr->GuestAddressFor());
+      CallNativeSafe(reinterpret_cast<void*>(CheckStackSync));
+    }
   }
 }
 
@@ -1275,6 +1291,7 @@ void A64Emitter::PushStackpoint() {
     return;
   }
   oaknut::Label done;
+  oaknut::Label overflowed;
   // backend_ctx = context - sizeof(A64BackendContext)
   SUB(X9, GetContextReg(), sizeof(A64BackendContext));
   LDR(X10, X9, offsetof(A64BackendContext, stackpoints));
@@ -1283,7 +1300,7 @@ void A64Emitter::PushStackpoint() {
   LDR(W11, X9, offsetof(A64BackendContext, current_stackpoint_depth));
   MOV(W12, static_cast<uint32_t>(cvars::max_stackpoints));
   CMP(W11, W12);
-  B(oaknut::Cond::HS, done);
+  B(oaknut::Cond::HS, overflowed);
 
   // entry = stackpoints + (depth * sizeof(A64BackendStackpoint))
   LSL(X12, X11, 5);  // sizeof(A64BackendStackpoint) == 32
@@ -1296,10 +1313,15 @@ void A64Emitter::PushStackpoint() {
   LDR(W14, GetContextReg(), offsetof(ppc::PPCContext, lr));
   STR(W13, X10, offsetof(A64BackendStackpoint, guest_sp));
   STR(W14, X10, offsetof(A64BackendStackpoint, guest_return_address));
+  MOV(W15, static_cast<uint32_t>(stack_size()));
+  STR(W15, X10, offsetof(A64BackendStackpoint, stack_size));
 
   ADD(W11, W11, 1);
   STR(W11, X9, offsetof(A64BackendContext, current_stackpoint_depth));
 
+  B(done);
+  l(overflowed);
+  CallNativeSafe(reinterpret_cast<void*>(HandleStackpointOverflowError));
   l(done);
 }
 
@@ -1313,6 +1335,40 @@ void A64Emitter::PopStackpoint() {
   CBZ(W10, done);
   SUB(W10, W10, 1);
   STR(W10, X9, offsetof(A64BackendContext, current_stackpoint_depth));
+  l(done);
+}
+
+void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
+  if (!cvars::a64_enable_host_guest_stack_synchronization) {
+    return;
+  }
+  auto* helper = backend()->stack_sync_helper();
+  if (!helper) {
+    return;
+  }
+  oaknut::Label done;
+  // backend_ctx = context - sizeof(A64BackendContext)
+  SUB(X9, GetContextReg(), sizeof(A64BackendContext));
+  LDR(X10, X9, offsetof(A64BackendContext, stackpoints));
+  CBZ(X10, done);
+  LDR(W11, X9, offsetof(A64BackendContext, current_stackpoint_depth));
+  CBZ(W11, done);
+
+  // Compare guest SP against the top stackpoint.
+  SUB(W11, W11, 1);
+  LSL(X12, X11, 5);  // sizeof(A64BackendStackpoint) == 32
+  ADD(X12, X10, X12);
+  LDR(W13, GetContextReg(), offsetof(ppc::PPCContext, r[1]));
+  LDR(W14, X12, offsetof(A64BackendStackpoint, guest_sp));
+  CMP(W13, W14);
+  B(oaknut::Cond::LS, done);
+
+  // Call helper to resynchronize host SP/FP to guest stack.
+  MOV(X0, GetContextReg());
+  MOV(X1, static_cast<uint64_t>(stack_size()));
+  MOV(X16, reinterpret_cast<uint64_t>(helper));
+  BLR(X16);
+
   l(done);
 }
 

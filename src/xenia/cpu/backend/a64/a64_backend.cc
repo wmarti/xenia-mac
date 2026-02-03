@@ -42,10 +42,8 @@ DEFINE_int32(a64_extension_mask, -1,
              "    2 = F16C\n"
              "   -1 = Detect and utilize all possible processor features\n",
              "a64");
-DEFINE_bool(a64_enable_host_guest_stack_synchronization, false,
-            "Enable host/guest stack synchronization for A64 (disabled by "
-            "default pending stability fixes).",
-            "a64");
+DEFINE_bool(a64_enable_host_guest_stack_synchronization, true,
+            "Enable host/guest stack synchronization for A64.", "a64");
 DEFINE_int64(max_stackpoints, 65536,
              "Maximum number of stackpoints in host/guest stack sync.", "a64");
 
@@ -63,6 +61,8 @@ class A64ThunkEmitter : public A64Emitter {
   HostToGuestThunk EmitHostToGuestThunk();
   GuestToHostThunk EmitGuestToHostThunk();
   ResolveFunctionThunk EmitResolveFunctionThunk();
+  StackSyncThunk EmitStackSyncThunk();
+  StackSyncThunk EmitStackSyncHelper();
 
  private:
   // The following four functions provide save/load functionality for registers.
@@ -133,6 +133,8 @@ bool A64Backend::Initialize(Processor* processor) {
   host_to_guest_thunk_ = thunk_emitter.EmitHostToGuestThunk();
   guest_to_host_thunk_ = thunk_emitter.EmitGuestToHostThunk();
   resolve_function_thunk_ = thunk_emitter.EmitResolveFunctionThunk();
+  stack_sync_thunk_ = thunk_emitter.EmitStackSyncThunk();
+  stack_sync_helper_ = thunk_emitter.EmitStackSyncHelper();
 
 #if XE_A64_INDIRECTION_64BIT
   // On ARM64 platforms, we use 64-bit addresses and the indirection table now
@@ -1002,6 +1004,172 @@ ResolveFunctionThunk A64ThunkEmitter::EmitResolveFunctionThunk() {
 
   void* fn = Emplace(func_info);
   return (ResolveFunctionThunk)fn;
+}
+
+StackSyncThunk A64ThunkEmitter::EmitStackSyncThunk() {
+  // X0 = context
+  struct _code_offsets {
+    size_t prolog;
+    size_t prolog_stack_alloc;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+  } code_offsets = {};
+
+  const size_t stack_size = 0;
+
+  code_offsets.prolog = offset();
+  code_offsets.prolog_stack_alloc = offset();
+  code_offsets.body = offset();
+
+  // backend_ctx = context - sizeof(A64BackendContext)
+  SUB(X1, X0, sizeof(A64BackendContext));
+  LDR(W2, X1, offsetof(A64BackendContext, pending_stack_sync));
+  oaknut::Label no_sync;
+  CBZ(W2, no_sync);
+
+  LDR(X3, X1, offsetof(A64BackendContext, pending_stack_sync_target));
+  LDR(X4, X1, offsetof(A64BackendContext, pending_stack_sync_sp));
+  LDR(X5, X1, offsetof(A64BackendContext, pending_stack_sync_fp));
+
+  MOV(W2, 0);
+  STR(W2, X1, offsetof(A64BackendContext, pending_stack_sync));
+
+  // Restore context/membase for the resumed guest code.
+  MOV(GetContextReg(), X0);
+  LDR(GetMembaseReg(), GetContextReg(),
+      offsetof(ppc::PPCContext, virtual_membase));
+
+  // Restore host frame and stack.
+  MOV(X29, X5);
+  MOV(SP, X4);
+  BR(X3);
+
+  l(no_sync);
+  RET();
+
+  code_offsets.epilog = offset();
+  code_offsets.tail = offset();
+
+  assert_zero(code_offsets.prolog);
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = offset();
+  func_info.code_size.prolog = code_offsets.body - code_offsets.prolog;
+  func_info.code_size.body = code_offsets.epilog - code_offsets.body;
+  func_info.code_size.epilog = code_offsets.tail - code_offsets.epilog;
+  func_info.code_size.tail = offset() - code_offsets.tail;
+  func_info.prolog_stack_alloc_offset =
+      code_offsets.prolog_stack_alloc - code_offsets.prolog;
+  func_info.stack_size = stack_size;
+
+  void* fn = Emplace(func_info);
+  return (StackSyncThunk)fn;
+}
+
+StackSyncThunk A64ThunkEmitter::EmitStackSyncHelper() {
+  // X0 = context, X1 = caller stack size
+  struct _code_offsets {
+    size_t prolog;
+    size_t prolog_stack_alloc;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+  } code_offsets = {};
+
+  const size_t stack_size = 0;
+
+  code_offsets.prolog = offset();
+  code_offsets.prolog_stack_alloc = offset();
+  code_offsets.body = offset();
+
+  oaknut::Label done;
+  oaknut::Label loop;
+  oaknut::Label check_lr;
+  oaknut::Label scan_loop;
+  oaknut::Label scan_done;
+  oaknut::Label scan_found;
+
+  // backend_ctx = context - sizeof(A64BackendContext)
+  SUB(X2, X0, sizeof(A64BackendContext));
+  LDR(X3, X2, offsetof(A64BackendContext, stackpoints));
+  CBZ(X3, done);
+  LDR(W4, X2, offsetof(A64BackendContext, current_stackpoint_depth));
+  CBZ(W4, done);
+  SUB(W4, W4, 1);  // current index = depth - 1
+
+  // guest_sp
+  LDR(W5, X0, offsetof(ppc::PPCContext, r[1]));
+  MOV(W6, 0);  // num_frames_bigger
+
+  l(loop);
+  // entry = stackpoints + (index * sizeof(A64BackendStackpoint))
+  LSL(X7, X4, 5);  // sizeof(A64BackendStackpoint) == 32
+  ADD(X7, X3, X7);
+  LDR(W8, X7, offsetof(A64BackendStackpoint, guest_sp));
+  CMP(W8, W5);
+  B(oaknut::Cond::GE, check_lr);
+  ADD(W6, W6, 1);
+  CBZ(W4, done);
+  SUB(W4, W4, 1);
+  B(loop);
+
+  l(check_lr);
+  CMP(W6, 1);
+  B(oaknut::Cond::LE, done);
+
+  // Disambiguate same-guest-sp frames via guest LR.
+  LDR(W9, X0, offsetof(ppc::PPCContext, lr));
+  MOV(W10, W4);  // scan index
+
+  l(scan_loop);
+  LSL(X7, X10, 5);
+  ADD(X7, X3, X7);
+  LDR(W11, X7, offsetof(A64BackendStackpoint, guest_sp));
+  CMP(W11, W5);
+  B(oaknut::Cond::NE, scan_done);
+  LDR(W12, X7, offsetof(A64BackendStackpoint, guest_return_address));
+  CMP(W12, W9);
+  B(oaknut::Cond::EQ, scan_found);
+  CBZ(W10, scan_done);
+  SUB(W10, W10, 1);
+  B(scan_loop);
+
+  l(scan_found);
+  MOV(W4, W10);
+
+  l(scan_done);
+  // Restore host frame and stack.
+  LSL(X7, X4, 5);
+  ADD(X7, X3, X7);
+  LDR(X13, X7, offsetof(A64BackendStackpoint, host_sp));
+  LDR(X14, X7, offsetof(A64BackendStackpoint, host_fp));
+  MOV(SP, X13);
+  MOV(X29, X14);
+  // Adjust for caller stack size.
+  SUB(SP, SP, X1);
+
+  ADD(W4, W4, 1);
+  STR(W4, X2, offsetof(A64BackendContext, current_stackpoint_depth));
+
+  l(done);
+  RET();
+
+  code_offsets.epilog = offset();
+  code_offsets.tail = offset();
+
+  assert_zero(code_offsets.prolog);
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = offset();
+  func_info.code_size.prolog = code_offsets.body - code_offsets.prolog;
+  func_info.code_size.body = code_offsets.epilog - code_offsets.body;
+  func_info.code_size.epilog = code_offsets.tail - code_offsets.epilog;
+  func_info.code_size.tail = offset() - code_offsets.tail;
+  func_info.prolog_stack_alloc_offset =
+      code_offsets.prolog_stack_alloc - code_offsets.prolog;
+  func_info.stack_size = stack_size;
+
+  void* fn = Emplace(func_info);
+  return (StackSyncThunk)fn;
 }
 
 void A64ThunkEmitter::EmitSaveVolatileRegs() {

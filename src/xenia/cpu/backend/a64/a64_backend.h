@@ -32,6 +32,27 @@ class A64CodeCache;
 typedef void* (*HostToGuestThunk)(void* target, void* arg0, void* arg1);
 typedef void* (*GuestToHostThunk)(void* target, void* arg0, void* arg1);
 typedef void (*ResolveFunctionThunk)();
+typedef void (*StackSyncThunk)();
+
+struct A64BackendStackpoint {
+  uint64_t host_sp;
+  uint64_t host_fp;
+  uint32_t guest_sp;
+  uint32_t guest_return_address;
+  uint32_t stack_size;
+  uint32_t reserved;
+};
+static_assert(sizeof(A64BackendStackpoint) == 32,
+              "A64BackendStackpoint must be 32 bytes");
+
+struct A64BackendContext {
+  A64BackendStackpoint* stackpoints = nullptr;
+  uint64_t pending_stack_sync_sp = 0;
+  uint64_t pending_stack_sync_fp = 0;
+  uint64_t pending_stack_sync_target = 0;
+  uint32_t current_stackpoint_depth = 0;
+  uint32_t pending_stack_sync = 0;
+};
 
 class A64Backend : public Backend {
  public:
@@ -51,6 +72,8 @@ class A64Backend : public Backend {
   ResolveFunctionThunk resolve_function_thunk() const {
     return resolve_function_thunk_;
   }
+  StackSyncThunk stack_sync_thunk() const { return stack_sync_thunk_; }
+  StackSyncThunk stack_sync_helper() const { return stack_sync_helper_; }
 
   bool Initialize(Processor* processor) override;
 
@@ -80,6 +103,11 @@ class A64Backend : public Backend {
   HostToGuestThunk host_to_guest_thunk_;
   GuestToHostThunk guest_to_host_thunk_;
   ResolveFunctionThunk resolve_function_thunk_;
+  StackSyncThunk stack_sync_thunk_ = nullptr;
+  StackSyncThunk stack_sync_helper_ = nullptr;
+
+  uint8_t* guest_trampoline_memory_ = nullptr;
+  BitMap guest_trampoline_address_bitmap_;
 };
 
 }  // namespace a64
