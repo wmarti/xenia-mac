@@ -10,12 +10,18 @@
 #include "xenia/cpu/backend/a64/a64_backend.h"
 
 #include <cstddef>
+#include <cstring>
+#if XE_PLATFORM_MAC || XE_PLATFORM_LINUX
+#include <dlfcn.h>
+#endif
 
 #include "third_party/capstone/include/capstone/arm64.h"
 #include "third_party/capstone/include/capstone/capstone.h"
 
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/memory.h"
+#include "xenia/base/string_buffer.h"
 #include "xenia/cpu/backend/a64/a64_assembler.h"
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
@@ -23,6 +29,8 @@
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/breakpoint.h"
+#include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/stack_walker.h"
 
@@ -472,6 +480,133 @@ bool A64Backend::ExceptionCallback(Exception* ex) {
         thread_context ? thread_context->x[21] : 0,
         thread_context ? thread_context->x[27] : 0,
         thread_context ? thread_context->x[28] : 0);
+    const bool in_guest_code = function != nullptr;
+    const ppc::PPCContext* ppc_context = nullptr;
+    if (in_guest_code && thread_context && thread_context->x[27]) {
+      void* ctx_ptr = reinterpret_cast<void*>(thread_context->x[27]);
+      if ((reinterpret_cast<uintptr_t>(ctx_ptr) &
+           (alignof(ppc::PPCContext) - 1)) == 0) {
+        size_t ctx_len = sizeof(ppc::PPCContext);
+        xe::memory::PageAccess ctx_access;
+        if (xe::memory::QueryProtect(ctx_ptr, ctx_len, ctx_access) &&
+            ctx_access != xe::memory::PageAccess::kNoAccess) {
+          ppc_context = reinterpret_cast<const ppc::PPCContext*>(ctx_ptr);
+        }
+      }
+    }
+    if (ppc_context && ppc_context->virtual_membase) {
+      const uint64_t membase =
+          reinterpret_cast<uint64_t>(ppc_context->virtual_membase);
+      uint32_t guest_fault = 0;
+      if (fault_address >= membase &&
+          fault_address < membase + 0x100000000ull) {
+        guest_fault = static_cast<uint32_t>(fault_address - membase);
+        if (xe::memory::allocation_granularity() > 0x1000 &&
+            guest_fault >= 0xE0000000u) {
+          guest_fault -= 0x1000u;
+        }
+        const uint32_t sp = static_cast<uint32_t>(ppc_context->r[1]);
+        XELOGE("A64 AV: guest=0x{:08X} sp=0x{:08X} sp_to_fault=0x{:X}",
+               guest_fault, sp,
+               static_cast<uint32_t>(guest_fault - sp));
+        if (auto* memory = processor()->memory()) {
+          if (auto* heap = memory->LookupHeap(guest_fault)) {
+            uint32_t protect = 0;
+            heap->QueryProtect(guest_fault, &protect);
+            HeapAllocationInfo info = {};
+            heap->QueryRegionInfo(guest_fault, &info);
+            XELOGE(
+                "A64 AV: heap={} base=0x{:08X} size=0x{:08X} page=0x{:X} "
+                "protect=0x{:X} alloc_base=0x{:08X} alloc_size=0x{:08X} "
+                "region=0x{:08X} state=0x{:X}",
+                static_cast<int>(heap->heap_type()), heap->heap_base(),
+                heap->heap_size(), heap->page_size(), protect,
+                info.allocation_base, info.allocation_size, info.region_size,
+                info.state);
+          }
+        }
+      }
+      if (guest_pc) {
+        constexpr int kWindow = 12;
+        for (int i = -kWindow; i <= kWindow; ++i) {
+          const uint32_t pc = guest_pc + (i * 4);
+          auto* code_ptr = ppc_context->TranslateVirtual<const uint32_t*>(pc);
+          if (!code_ptr) {
+            continue;
+          }
+          size_t length = sizeof(uint32_t);
+          xe::memory::PageAccess access;
+          if (!xe::memory::QueryProtect(const_cast<uint32_t*>(code_ptr),
+                                        length, access) ||
+              access == xe::memory::PageAccess::kNoAccess) {
+            continue;
+          }
+          const uint32_t instruction = xe::load_and_swap<uint32_t>(code_ptr);
+          StringBuffer disasm;
+          if (cpu::ppc::DisasmPPC(pc, instruction, &disasm)) {
+            XELOGE("A64 AV: guest_insn{} 0x{:08X} {}",
+                   (i == 0) ? "*" : " ", instruction, disasm.to_string());
+          } else {
+            XELOGE("A64 AV: guest_insn{} 0x{:08X}",
+                   (i == 0) ? "*" : " ", instruction);
+          }
+
+          if (i <= 0) {
+            const uint32_t op = instruction >> 26;
+            auto log_ea = [&](const char* tag, int offset, uint32_t ra,
+                              uint32_t base, uint32_t ea) {
+              uint32_t value = 0;
+              const uint8_t* host_ptr =
+                  reinterpret_cast<const uint8_t*>(membase + ea);
+              size_t ea_length = sizeof(uint32_t);
+              if (xe::memory::QueryProtect(const_cast<uint8_t*>(host_ptr),
+                                           ea_length, access) &&
+                  access != xe::memory::PageAccess::kNoAccess) {
+                std::memcpy(&value, host_ptr, sizeof(uint32_t));
+              }
+              XELOGE(
+                  "A64 AV: {} i={} ra=r{} base=0x{:08X} ea=0x{:08X} "
+                  "bytes={:02X} {:02X} {:02X} {:02X}",
+                  tag, offset, ra, base, ea, value & 0xFF, (value >> 8) & 0xFF,
+                  (value >> 16) & 0xFF, (value >> 24) & 0xFF);
+            };
+
+            if (op == 32 || op == 40 || op == 36 || op == 44 || op == 48 ||
+                op == 52) {
+              const uint32_t ra = (instruction >> 16) & 0x1F;
+              const int16_t simm = static_cast<int16_t>(instruction & 0xFFFF);
+              const uint32_t base = ra ? ppc_context->r[ra] : 0;
+              const uint32_t ea = base + simm;
+              log_ea("D-form", i, ra, base, ea);
+            } else if (op == 31) {
+              const uint32_t xo = (instruction >> 1) & 0x3FF;
+              if (xo == 23 || xo == 151 || xo == 279 || xo == 535) {
+                const uint32_t ra = (instruction >> 16) & 0x1F;
+                const uint32_t rb = (instruction >> 11) & 0x1F;
+                const uint32_t base = ra ? ppc_context->r[ra] : 0;
+                const uint32_t index = ppc_context->r[rb];
+                const uint32_t ea = base + index;
+                log_ea("X-form", i, ra, base, ea);
+              }
+            }
+          }
+        }
+      }
+    }
+#if XE_PLATFORM_MAC || XE_PLATFORM_LINUX
+    if (!function) {
+      const uint64_t code_base = code_cache_->execute_base_address();
+      const uint64_t code_end = code_base + code_cache_->total_size();
+      XELOGE(
+          "A64 AV: host_pc in code cache range? {} base=0x{:016X} end=0x{:016X}",
+          (host_pc >= code_base && host_pc < code_end), code_base, code_end);
+      Dl_info info;
+      if (dladdr(reinterpret_cast<void*>(host_pc), &info) && info.dli_fname) {
+        XELOGE("A64 AV: dladdr image={} sym={}", info.dli_fname,
+               info.dli_sname ? info.dli_sname : "unknown");
+      }
+    }
+#endif
 #else
     XELOGE(
         "A64 AV: host_pc=0x{:016X} guest_pc=0x{:08X} host_off=0x{:X} "
