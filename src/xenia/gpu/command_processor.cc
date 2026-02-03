@@ -408,7 +408,9 @@ void CommandProcessor::WorkerThreadMain() {
     }
 
     uint32_t write_ptr_index = write_ptr_index_.load();
-    if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
+    uint32_t read_ptr_index =
+        read_ptr_index_.load(std::memory_order_relaxed);
+    if (write_ptr_index == 0xBAADF00D || read_ptr_index == write_ptr_index) {
       SCOPE_profile_cpu_i("gpu", "xe::gpu::CommandProcessor::Stall");
       // We've run out of commands to execute.
       // We spin here waiting for new ones, as the overhead of waiting on our
@@ -426,26 +428,30 @@ void CommandProcessor::WorkerThreadMain() {
         }
         loop_count++;
         write_ptr_index = write_ptr_index_.load();
+        read_ptr_index = read_ptr_index_.load(std::memory_order_relaxed);
       } while (worker_running_ && pending_fns_.empty() &&
                (write_ptr_index == 0xBAADF00D ||
-                read_ptr_index_ == write_ptr_index));
+                read_ptr_index == write_ptr_index));
       ReturnFromWait();
       if (!worker_running_ || !pending_fns_.empty()) {
         continue;
       }
     }
-    assert_true(read_ptr_index_ != write_ptr_index);
+    assert_true(read_ptr_index != write_ptr_index);
 
     // Execute. Note that we handle wraparound transparently.
-    read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+    read_ptr_index = ExecutePrimaryBuffer(read_ptr_index, write_ptr_index);
+    read_ptr_index_.store(read_ptr_index, std::memory_order_relaxed);
 
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
     //     that many indices.
     // Keep in mind that the gpu also updates the cpu-side copy if the write
     // pointer and read pointer would be equal
-    if (read_ptr_writeback_ptr_) {
+    uint32_t read_ptr_writeback_ptr =
+        read_ptr_writeback_ptr_.load(std::memory_order_relaxed);
+    if (read_ptr_writeback_ptr) {
       xe::store_and_swap<uint32_t>(
-          memory_->TranslatePhysical(read_ptr_writeback_ptr_), read_ptr_index_);
+          memory_->TranslatePhysical(read_ptr_writeback_ptr), read_ptr_index);
     }
 
     // FIXME: We're supposed to process the WAIT_UNTIL register at this point,
@@ -482,11 +488,15 @@ void CommandProcessor::Resume() {
 bool CommandProcessor::Save(ByteStream* stream) {
   assert_true(paused_);
 
-  stream->Write<uint32_t>(primary_buffer_ptr_);
-  stream->Write<uint32_t>(primary_buffer_size_);
-  stream->Write<uint32_t>(read_ptr_index_);
-  stream->Write<uint32_t>(read_ptr_update_freq_);
-  stream->Write<uint32_t>(read_ptr_writeback_ptr_);
+  stream->Write<uint32_t>(
+      primary_buffer_ptr_.load(std::memory_order_relaxed));
+  stream->Write<uint32_t>(
+      primary_buffer_size_.load(std::memory_order_relaxed));
+  stream->Write<uint32_t>(read_ptr_index_.load(std::memory_order_relaxed));
+  stream->Write<uint32_t>(
+      read_ptr_update_freq_.load(std::memory_order_relaxed));
+  stream->Write<uint32_t>(
+      read_ptr_writeback_ptr_.load(std::memory_order_relaxed));
   stream->Write<uint32_t>(write_ptr_index_.load());
 
   return true;
@@ -495,11 +505,16 @@ bool CommandProcessor::Save(ByteStream* stream) {
 bool CommandProcessor::Restore(ByteStream* stream) {
   assert_true(paused_);
 
-  primary_buffer_ptr_ = stream->Read<uint32_t>();
-  primary_buffer_size_ = stream->Read<uint32_t>();
-  read_ptr_index_ = stream->Read<uint32_t>();
-  read_ptr_update_freq_ = stream->Read<uint32_t>();
-  read_ptr_writeback_ptr_ = stream->Read<uint32_t>();
+  primary_buffer_ptr_.store(stream->Read<uint32_t>(),
+                            std::memory_order_relaxed);
+  primary_buffer_size_.store(stream->Read<uint32_t>(),
+                             std::memory_order_relaxed);
+  read_ptr_index_.store(stream->Read<uint32_t>(),
+                        std::memory_order_relaxed);
+  read_ptr_update_freq_.store(stream->Read<uint32_t>(),
+                              std::memory_order_relaxed);
+  read_ptr_writeback_ptr_.store(stream->Read<uint32_t>(),
+                                std::memory_order_relaxed);
   write_ptr_index_.store(stream->Read<uint32_t>());
 
   return true;
@@ -510,23 +525,26 @@ bool CommandProcessor::SetupContext() { return true; }
 void CommandProcessor::ShutdownContext() {}
 
 void CommandProcessor::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
-  read_ptr_index_ = 0;
-  primary_buffer_ptr_ = ptr;
-  primary_buffer_size_ = uint32_t(1) << (size_log2 + 3);
+  read_ptr_index_.store(0, std::memory_order_relaxed);
+  const uint32_t buffer_ptr = ptr;
+  const uint32_t buffer_size = uint32_t(1) << (size_log2 + 3);
+  primary_buffer_ptr_.store(buffer_ptr, std::memory_order_relaxed);
+  primary_buffer_size_.store(buffer_size, std::memory_order_relaxed);
 
-  std::memset(kernel_state_->memory()->TranslatePhysical(primary_buffer_ptr_),
-              0, primary_buffer_size_);
+  std::memset(kernel_state_->memory()->TranslatePhysical(buffer_ptr), 0,
+              buffer_size);
 }
 
 void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr,
                                                   uint32_t block_size_log2) {
   // CP_RB_RPTR_ADDR Ring Buffer Read Pointer Address 0x70C
   // ptr = RB_RPTR_ADDR, pointer to write back the address to.
-  read_ptr_writeback_ptr_ = ptr;
+  read_ptr_writeback_ptr_.store(ptr, std::memory_order_relaxed);
   // CP_RB_CNTL Ring Buffer Control 0x704
   // block_size = RB_BLKSZ, log2 of number of quadwords read between updates of
   //              the read pointer.
-  read_ptr_update_freq_ = uint32_t(1) << block_size_log2 >> 2;
+  read_ptr_update_freq_.store(uint32_t(1) << block_size_log2 >> 2,
+                              std::memory_order_relaxed);
 }
 
 XE_NOINLINE XE_COLD void CommandProcessor::LogKickoffInitator(uint32_t value) {

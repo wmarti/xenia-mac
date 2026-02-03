@@ -1645,18 +1645,22 @@ uint32_t COMMAND_PROCESSOR::ExecutePrimaryBuffer(uint32_t read_index,
   }
 #endif
   // Adjust pointer base.
-  uint32_t start_ptr = primary_buffer_ptr_ + read_index * sizeof(uint32_t);
-  start_ptr = (primary_buffer_ptr_ & ~0x1FFFFFFF) | (start_ptr & 0x1FFFFFFF);
-  uint32_t end_ptr = primary_buffer_ptr_ + write_index * sizeof(uint32_t);
-  end_ptr = (primary_buffer_ptr_ & ~0x1FFFFFFF) | (end_ptr & 0x1FFFFFFF);
+  const uint32_t primary_buffer_ptr =
+      primary_buffer_ptr_.load(std::memory_order_relaxed);
+  const uint32_t primary_buffer_size =
+      primary_buffer_size_.load(std::memory_order_relaxed);
+  uint32_t start_ptr = primary_buffer_ptr + read_index * sizeof(uint32_t);
+  start_ptr = (primary_buffer_ptr & ~0x1FFFFFFF) | (start_ptr & 0x1FFFFFFF);
+  uint32_t end_ptr = primary_buffer_ptr + write_index * sizeof(uint32_t);
+  end_ptr = (primary_buffer_ptr & ~0x1FFFFFFF) | (end_ptr & 0x1FFFFFFF);
 
   trace_writer_.WritePrimaryBufferStart(start_ptr, write_index - read_index);
 
   // Execute commands!
 
   RingBuffer old_reader = reader_;
-  new (&reader_) RingBuffer(memory_->TranslatePhysical(primary_buffer_ptr_),
-                            primary_buffer_size_);
+  new (&reader_) RingBuffer(memory_->TranslatePhysical(primary_buffer_ptr),
+                            primary_buffer_size);
 
   reader_.set_read_offset(read_index * sizeof(uint32_t));
   reader_.set_write_offset(write_index * sizeof(uint32_t));
