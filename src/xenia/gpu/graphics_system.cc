@@ -353,14 +353,17 @@ void GraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr,
 
 void GraphicsSystem::SetInterruptCallback(uint32_t callback,
                                           uint32_t user_data) {
-  interrupt_callback_ = callback;
-  interrupt_callback_data_ = user_data;
+  interrupt_callback_.store(callback, std::memory_order_relaxed);
+  interrupt_callback_data_.store(user_data, std::memory_order_relaxed);
   XELOGGPU("SetInterruptCallback({:08X}, {:08X})", callback, user_data);
 }
 
 void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
-  kernel_state()->EmulateCPInterruptDPC(interrupt_callback_,
-                                        interrupt_callback_data_, source, cpu);
+  const uint32_t callback =
+      interrupt_callback_.load(std::memory_order_relaxed);
+  const uint32_t user_data =
+      interrupt_callback_data_.load(std::memory_order_relaxed);
+  kernel_state()->EmulateCPInterruptDPC(callback, user_data, source, cpu);
 }
 
 void GraphicsSystem::MarkVblank() {
@@ -444,15 +447,18 @@ void GraphicsSystem::Resume() {
 }
 
 bool GraphicsSystem::Save(ByteStream* stream) {
-  stream->Write<uint32_t>(interrupt_callback_);
-  stream->Write<uint32_t>(interrupt_callback_data_);
+  stream->Write<uint32_t>(interrupt_callback_.load(std::memory_order_relaxed));
+  stream->Write<uint32_t>(
+      interrupt_callback_data_.load(std::memory_order_relaxed));
 
   return command_processor_->Save(stream);
 }
 
 bool GraphicsSystem::Restore(ByteStream* stream) {
-  interrupt_callback_ = stream->Read<uint32_t>();
-  interrupt_callback_data_ = stream->Read<uint32_t>();
+  interrupt_callback_.store(stream->Read<uint32_t>(),
+                            std::memory_order_relaxed);
+  interrupt_callback_data_.store(stream->Read<uint32_t>(),
+                                 std::memory_order_relaxed);
 
   return command_processor_->Restore(stream);
 }

@@ -143,8 +143,8 @@ class GraphicsSystem {
   ui::WindowedAppContext* app_context_ = nullptr;
   std::unique_ptr<ui::GraphicsProvider> provider_;
 
-  uint32_t interrupt_callback_ = 0;
-  uint32_t interrupt_callback_data_ = 0;
+  std::atomic<uint32_t> interrupt_callback_{0};
+  std::atomic<uint32_t> interrupt_callback_data_{0};
 
   std::atomic<bool> frame_limiter_worker_running_;
   kernel::object_ref<kernel::XHostThread> frame_limiter_worker_thread_;
