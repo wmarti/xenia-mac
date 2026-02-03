@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstring>
 
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
@@ -147,44 +148,67 @@ int lzx_decompress(const void* lzx_data, size_t lzx_len, void* dest,
 
 int lzxdelta_apply_patch(xe::xex2_delta_patch* patch, size_t patch_len,
                          uint32_t window_size, void* dest) {
-  void* patch_end = (char*)patch + patch_len;
-  auto* cur_patch = patch;
+  const uint8_t* cur = reinterpret_cast<const uint8_t*>(patch);
+  const uint8_t* end = cur + patch_len;
 
-  while (patch_end > cur_patch) {
-    int patch_sz = -4;  // 0 byte patches need us to remove 4 byte from next
-                        // patch addr because of patch_data field
-    if (cur_patch->compressed_len == 0 && cur_patch->uncompressed_len == 0 &&
-        cur_patch->new_addr == 0 && cur_patch->old_addr == 0)
+  auto read_u32be = [](const uint8_t* p) -> uint32_t {
+    uint32_t v = 0;
+    std::memcpy(&v, p, sizeof(v));
+    return xe::byte_swap(v);
+  };
+  auto read_u16be = [](const uint8_t* p) -> uint16_t {
+    uint16_t v = 0;
+    std::memcpy(&v, p, sizeof(v));
+    return xe::byte_swap(v);
+  };
+
+  // Patch entry header is 12 bytes (old/new addr + uncompressed/compressed len).
+  while (cur + 12 <= end) {
+    const uint32_t old_addr = read_u32be(cur + 0);
+    const uint32_t new_addr = read_u32be(cur + 4);
+    const uint16_t uncompressed_len = read_u16be(cur + 8);
+    const uint16_t compressed_len = read_u16be(cur + 10);
+
+    if (compressed_len == 0 && uncompressed_len == 0 && new_addr == 0 &&
+        old_addr == 0) {
       break;
-    switch (cur_patch->compressed_len) {
+    }
+
+    const uint8_t* patch_data = cur + 12;
+    size_t entry_size = 12;
+    if (compressed_len > 1) {
+      entry_size += compressed_len;
+      if (cur + entry_size > end) {
+        XELOGE("LZX delta patch truncated (need {} bytes, have {}).",
+               entry_size, static_cast<size_t>(end - cur));
+        return 1;
+      }
+    }
+
+    switch (compressed_len) {
       case 0:  // fill with 0
-        std::memset((char*)dest + cur_patch->new_addr, 0,
-                    cur_patch->uncompressed_len);
+        std::memset(reinterpret_cast<char*>(dest) + new_addr, 0,
+                    uncompressed_len);
         break;
-      case 1:  // copy from old -> new
-        std::memcpy((char*)dest + cur_patch->new_addr,
-                    (char*)dest + cur_patch->old_addr,
-                    cur_patch->uncompressed_len);
+      case 1:  // copy from old -> new (overlap allowed)
+        std::memmove(reinterpret_cast<char*>(dest) + new_addr,
+                     reinterpret_cast<char*>(dest) + old_addr,
+                     uncompressed_len);
         break;
-      default:  // delta patch
-        patch_sz =
-            cur_patch->compressed_len - 4;  // -4 because of patch_data field
-
+      default: {  // delta patch
         int result = lzx_decompress(
-            cur_patch->patch_data, cur_patch->compressed_len,
-            (char*)dest + cur_patch->new_addr, cur_patch->uncompressed_len,
-            window_size, (char*)dest + cur_patch->old_addr,
-            cur_patch->uncompressed_len);
-
+            patch_data, compressed_len,
+            reinterpret_cast<char*>(dest) + new_addr, uncompressed_len,
+            window_size, reinterpret_cast<char*>(dest) + old_addr,
+            uncompressed_len);
         if (result) {
           return result;
         }
         break;
+      }
     }
 
-    cur_patch++;
-    cur_patch = (xe::xex2_delta_patch*)((char*)cur_patch +
-                                        patch_sz);  // TODO: make this less ugly
+    cur += entry_size;
   }
 
   return 0;
