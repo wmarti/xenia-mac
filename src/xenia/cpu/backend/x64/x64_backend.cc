@@ -26,11 +26,7 @@
 #include "xenia/cpu/stack_walker.h"
 #include "xenia/cpu/xex_module.h"
 
-DEFINE_bool(record_mmio_access_exceptions, true,
-            "For guest addresses records whether we caught any mmio accesses "
-            "for them. This info can then be used on a subsequent run to "
-            "instruct the recompiler to emit checks",
-            "x64");
+DECLARE_bool(record_mmio_access_exceptions);
 
 DEFINE_int64(max_stackpoints, 65536,
              "Max number of host->guest stack mappings we can record.", "x64");
@@ -579,7 +575,11 @@ void X64Backend::RecordMMIOExceptionForGuestInstruction(void* host_address) {
             xex_guest_module->GetInstructionAddressFlags(guestaddr);
 
         if (icf) {
+          const bool was_mmio = icf->accessed_mmio;
           icf->accessed_mmio = true;
+          if (!was_mmio) {
+            xex_guest_module->FlushInfoCache();
+          }
         }
       }
     }

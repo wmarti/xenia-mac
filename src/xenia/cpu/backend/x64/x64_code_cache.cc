@@ -336,10 +336,18 @@ uint32_t X64CodeCache::PlaceData(const void* data, size_t length) {
 }
 
 GuestFunction* X64CodeCache::LookupFunction(uint64_t host_pc) {
-  uint32_t key = uint32_t(host_pc - kGeneratedCodeExecuteBase);
+  if (generated_code_map_.empty()) {
+    return nullptr;
+  }
+  const uint64_t code_base = kGeneratedCodeExecuteBase;
+  const uint64_t code_end = code_base + kGeneratedCodeSize;
+  if (host_pc < code_base || host_pc >= code_end) {
+    return nullptr;
+  }
+  uint32_t key = uint32_t(host_pc - code_base);
   void* fn_entry = std::bsearch(
       &key, generated_code_map_.data(), generated_code_map_.size(),
-      sizeof(std::pair<uint32_t, Function*>),
+      sizeof(generated_code_map_[0]),
       [](const void* key_ptr, const void* element_ptr) {
         auto key = *reinterpret_cast<const uint32_t*>(key_ptr);
         auto element =

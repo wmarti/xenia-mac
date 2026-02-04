@@ -11,6 +11,23 @@
 
 #include <cstring>
 
+#include "xenia/base/cvar.h"
+
+DEFINE_bool(record_mmio_access_exceptions, true,
+            "For guest addresses records whether we caught any MMIO accesses "
+            "for them. This info can then be used on a subsequent run to "
+            "instruct the recompiler to emit checks",
+            "CPU");
+
+DEFINE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses, true,
+            "Uses info gathered via record_mmio_access_exceptions to emit "
+            "special loads/stores that are faster than trapping the exception",
+            "CPU");
+
+DEFINE_bool(log_mmio_recording, false,
+            "Log a small number of MMIO recording events for diagnostics.",
+            "CPU");
+
 namespace xe {
 namespace cpu {
 namespace backend {

@@ -27,10 +27,7 @@ DEFINE_bool(enable_rmw_context_merging, false,
             "Permit merging read-modify-write HIR instr sequences together "
             "into x86 instructions that use a memory operand.",
             "x64");
-DEFINE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses, true,
-            "Uses info gathered via record_mmio_access_exceptions to emit "
-            "special stores that are faster than trapping the exception",
-            "CPU");
+DECLARE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses);
 
 namespace xe {
 namespace cpu {
