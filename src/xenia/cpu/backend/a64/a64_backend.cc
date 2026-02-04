@@ -9,10 +9,15 @@
 
 #include "xenia/cpu/backend/a64/a64_backend.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #if XE_PLATFORM_MAC || XE_PLATFORM_LINUX
 #include <dlfcn.h>
+#endif
+#if XE_PLATFORM_MAC
+#include <libkern/OSCacheControl.h>
+#include <pthread.h>
 #endif
 
 #include "third_party/capstone/include/capstone/arm64.h"
@@ -29,10 +34,15 @@
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/breakpoint.h"
+#include "xenia/cpu/function.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/stack_walker.h"
+#include "xenia/cpu/xex_module.h"
+
+DECLARE_bool(record_mmio_access_exceptions);
+DECLARE_bool(log_mmio_recording);
 
 DEFINE_int32(a64_extension_mask, -1,
              "Allow the detection and utilization of specific instruction set "
@@ -83,6 +93,45 @@ class A64ThunkEmitter : public A64Emitter {
   void EmitLoadNonvolatileRegs();
 };
 
+static constexpr uint32_t kGuestTrampolineCodeSize = 68;
+
+static inline uint32_t EncodeMovz(uint32_t reg, uint16_t imm, uint32_t shift) {
+  const uint32_t hw = (shift / 16) & 0x3;
+  return 0xD2800000 | (uint32_t(imm) << 5) | (reg & 31) | (hw << 21);
+}
+
+static inline uint32_t EncodeMovk(uint32_t reg, uint16_t imm, uint32_t shift) {
+  const uint32_t hw = (shift / 16) & 0x3;
+  return 0xF2800000 | (uint32_t(imm) << 5) | (reg & 31) | (hw << 21);
+}
+
+static void EmitMovSequence(uint32_t*& out, uint32_t reg, uint64_t value) {
+  out[0] = EncodeMovz(reg, static_cast<uint16_t>(value & 0xFFFF), 0);
+  out[1] = EncodeMovk(reg, static_cast<uint16_t>((value >> 16) & 0xFFFF), 16);
+  out[2] = EncodeMovk(reg, static_cast<uint16_t>((value >> 32) & 0xFFFF), 32);
+  out[3] = EncodeMovk(reg, static_cast<uint16_t>((value >> 48) & 0xFFFF), 48);
+  out += 4;
+}
+
+static void EmitGuestTrampoline(uint8_t* dst,
+                                backend::GuestTrampolineProc proc,
+                                void* userdata1, void* userdata2,
+                                backend::a64::GuestToHostThunk thunk) {
+  uint32_t* out = reinterpret_cast<uint32_t*>(dst);
+  EmitMovSequence(out, 0, reinterpret_cast<uint64_t>(proc));       // X0
+  EmitMovSequence(out, 1, reinterpret_cast<uint64_t>(userdata1));  // X1
+  EmitMovSequence(out, 2, reinterpret_cast<uint64_t>(userdata2));  // X2
+  EmitMovSequence(out, 16, reinterpret_cast<uint64_t>(thunk));     // X16
+  *out++ = 0xD61F0000 | (16 << 5);  // BR X16
+#if XE_PLATFORM_MAC
+  sys_icache_invalidate(dst, kGuestTrampolineCodeSize);
+#else
+  __builtin___clear_cache(reinterpret_cast<char*>(dst),
+                          reinterpret_cast<char*>(dst) +
+                              kGuestTrampolineCodeSize);
+#endif
+}
+
 A64Backend::A64Backend() : Backend(), code_cache_(nullptr) {
   cs_err err =
       cs_open(CS_ARCH_AARCH64, CS_MODE_LITTLE_ENDIAN, &capstone_handle_);
@@ -93,6 +142,14 @@ A64Backend::A64Backend() : Backend(), code_cache_(nullptr) {
   cs_option(capstone_handle_, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
   cs_option(capstone_handle_, CS_OPT_DETAIL, CS_OPT_ON);
   cs_option(capstone_handle_, CS_OPT_SKIPDATA, CS_OPT_OFF);
+
+  const size_t tramp_bytes =
+      static_cast<size_t>(kGuestTrampolineCodeSize) * kMaxGuestTrampolines;
+  guest_trampoline_memory_ = reinterpret_cast<uint8_t*>(memory::AllocFixed(
+      nullptr, tramp_bytes, memory::AllocationType::kReserveCommit,
+      memory::PageAccess::kExecuteReadWrite));
+  xenia_assert(guest_trampoline_memory_);
+  guest_trampoline_address_bitmap_.Resize(kMaxGuestTrampolines);
 }
 
 A64Backend::~A64Backend() {
@@ -102,6 +159,13 @@ A64Backend::~A64Backend() {
 
   A64Emitter::FreeConstData(emitter_data_);
   ExceptionHandler::Uninstall(&ExceptionCallbackThunk, this);
+  if (guest_trampoline_memory_) {
+    memory::DeallocFixed(guest_trampoline_memory_,
+                         static_cast<size_t>(kGuestTrampolineCodeSize) *
+                             kMaxGuestTrampolines,
+                         memory::DeallocationType::kRelease);
+    guest_trampoline_memory_ = nullptr;
+  }
 }
 
 bool A64Backend::Initialize(Processor* processor) {
@@ -149,6 +213,8 @@ bool A64Backend::Initialize(Processor* processor) {
 
   // Allocate some special indirections.
   code_cache_->CommitExecutableRange(0x9FFF0000, 0x9FFFFFFF);
+  code_cache_->CommitExecutableRange(kGuestTrampolineBase,
+                                     kGuestTrampolineEnd);
 
   // Allocate emitter constant data.
   emitter_data_ = A64Emitter::PlaceConstData();
@@ -645,7 +711,26 @@ bool A64Backend::ExceptionCallback(Exception* ex) {
     const uint64_t fault_address = ex->fault_address();
     uint64_t guest_pc = 0;
     uint32_t host_offset = 0;
-    auto function = code_cache_->LookupFunction(host_pc);
+    bool in_trampoline_stub = false;
+    if (guest_trampoline_memory_) {
+      const uint64_t tramp_base =
+          reinterpret_cast<uint64_t>(guest_trampoline_memory_);
+      const uint64_t tramp_end =
+          tramp_base +
+          static_cast<uint64_t>(kGuestTrampolineCodeSize) *
+              static_cast<uint64_t>(kMaxGuestTrampolines);
+      if (host_pc >= tramp_base && host_pc < tramp_end) {
+        const size_t stub_index =
+            static_cast<size_t>((host_pc - tramp_base) /
+                                kGuestTrampolineCodeSize);
+        guest_pc = kGuestTrampolineBase +
+                   static_cast<uint32_t>(stub_index) *
+                       kGuestTrampolineMinLen;
+        in_trampoline_stub = true;
+      }
+    }
+    auto function = in_trampoline_stub ? nullptr
+                                       : code_cache_->LookupFunction(host_pc);
     if (function && function->machine_code()) {
       const uint64_t function_pc =
           reinterpret_cast<uint64_t>(function->machine_code());
@@ -664,6 +749,11 @@ bool A64Backend::ExceptionCallback(Exception* ex) {
         thread_context ? thread_context->x[21] : 0,
         thread_context ? thread_context->x[27] : 0,
         thread_context ? thread_context->x[28] : 0);
+    if (in_trampoline_stub) {
+      XELOGE(
+          "A64 AV: host_pc in guest trampoline stub range (guest=0x{:08X})",
+          static_cast<uint32_t>(guest_pc));
+    }
     const bool in_guest_code = function != nullptr;
     const ppc::PPCContext* ppc_context = nullptr;
     if (in_guest_code && thread_context && thread_context->x[27]) {

@@ -12,6 +12,7 @@
 
 #include <memory>
 
+#include "xenia/base/bit_map.h"
 #include "xenia/base/cvar.h"
 #include "xenia/cpu/backend/backend.h"
 
@@ -57,6 +58,13 @@ struct A64BackendContext {
 class A64Backend : public Backend {
  public:
   static const uint32_t kForceReturnAddress = 0x9FFF0000u;
+  // Guest trampoline range mirrors x64 to keep kernel expectations consistent.
+  static constexpr uint32_t kGuestTrampolineBase = 0x80000000;
+  static constexpr uint32_t kGuestTrampolineEnd = 0x80040000;
+  static constexpr uint32_t kGuestTrampolineMinLen = 8;
+  static constexpr uint32_t kMaxGuestTrampolines =
+      (kGuestTrampolineEnd - kGuestTrampolineBase) /
+      kGuestTrampolineMinLen;
 
   explicit A64Backend();
   ~A64Backend() override;
@@ -90,6 +98,19 @@ class A64Backend : public Backend {
   void InstallBreakpoint(Breakpoint* breakpoint) override;
   void InstallBreakpoint(Breakpoint* breakpoint, Function* fn) override;
   void UninstallBreakpoint(Breakpoint* breakpoint) override;
+  void RecordMMIOExceptionForGuestInstruction(void* host_address);
+  void InitializeBackendContext(void* ctx) override;
+  void DeinitializeBackendContext(void* ctx) override;
+  void PrepareForReentry(void* ctx) override;
+  void SetGuestRoundingMode(void* ctx, unsigned int mode) override;
+  uint32_t CreateGuestTrampoline(GuestTrampolineProc proc, void* userdata1,
+                                 void* userdata2,
+                                 bool long_term = false) override;
+  void FreeGuestTrampoline(uint32_t trampoline_addr) override;
+  A64BackendContext* BackendContextForGuestContext(void* ctx) {
+    return reinterpret_cast<A64BackendContext*>(
+        reinterpret_cast<intptr_t>(ctx) - sizeof(A64BackendContext));
+  }
 
  private:
   static bool ExceptionCallbackThunk(Exception* ex, void* data);
