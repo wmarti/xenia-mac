@@ -10,7 +10,7 @@ test_suite("xenia-cpu-tests", project_root, ".", {
     "xenia-base",
     "xenia-core",
     "xenia-cpu",
-    "xenia-gpu",
+    "xenia-gpu",  -- Required by xenia-kernel (video syscalls)
     "xenia-hid-skylander",
 
     -- TODO(benvanik): cut these dependencies?
