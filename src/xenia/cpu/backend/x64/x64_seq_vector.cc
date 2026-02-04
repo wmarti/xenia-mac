@@ -214,7 +214,9 @@ struct LOAD_VECTOR_SHL_I8
     } else {
       // TODO(benvanik): find a cheaper way of doing this.
       // chrispy: removed mask, ppc_emit_altivec already pre-ands it.
-      e.vmovd(e.xmm0, i.src1.reg().cvt32());
+      e.mov(e.eax, i.src1.reg().cvt32());
+      e.and_(e.eax, 0xF);
+      e.vmovd(e.xmm0, e.eax);
       // broadcast byte
       // dont use broadcastb with avx2, its slower than shuf
       e.vpshufb(e.xmm0, e.xmm0, e.GetXmmConstPtr(XMMZero));
@@ -261,7 +263,9 @@ struct LOAD_VECTOR_SHR_I8
 
       // chrispy: removed mask, ppc_emit_altivec already pre-ands it. removed
       // lookup as well, compute from LVSR base instead
-      e.vmovd(e.xmm0, i.src1.reg().cvt32());
+      e.mov(e.eax, i.src1.reg().cvt32());
+      e.and_(e.eax, 0xF);
+      e.vmovd(e.xmm0, e.eax);
       e.vmovdqa(e.xmm1, e.GetXmmConstPtr(XMMLVSRTableBase));
       // broadcast byte
       // dont use broadcastb with avx2, its slower than shuf
@@ -2771,12 +2775,6 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
 
   static void EmitFLOAT16_4(X64Emitter& e, const EmitArgType& i) {
     if (!i.src1.is_constant) {
-#if XE_ARCH_AMD64
-      // TODO(has207): this code has an off-by-1 in rounding
-      // compared to the fallback which is accurate, but
-      // keeping it as default. Should be fixed.
-      emit_fast_f16_pack(e, i, XMMPackFLOAT16_4);
-#else
       auto src1 = GetInputRegOrConstant(e, i.src1, e.xmm3);
 #if XE_PLATFORM_WIN32
       e.lea(e.GetNativeParam(0), e.StashXmm(0, src1));
@@ -2785,7 +2783,6 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
 #endif
       e.CallNativeSafe(reinterpret_cast<void*>(EmulateFLOAT16_4_RoundToEven));
       e.vmovdqa(i.dest, e.xmm0);
-#endif
     } else {
       vec128_t result = vec128b(0);
       for (unsigned idx = 0; idx < 4; ++idx) {
@@ -2805,9 +2802,14 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     } else {
       src = i.src1;
     }
+    // Preserve exact zeros before saturating (mantissa trick doesn't).
+    e.vpxor(e.xmm2, e.xmm2, e.xmm2);
+    e.vpcmpeqd(e.xmm1, src, e.xmm2);
     // Saturate.
     e.vmaxps(i.dest, src, e.GetXmmConstPtr(XMMPackSHORT_Min));
     e.vminps(i.dest, i.dest, e.GetXmmConstPtr(XMMPackSHORT_Max));
+    // Clear elements that were originally zero.
+    e.vpandn(i.dest, e.xmm1, i.dest);
     // Pack.
     e.vpshufb(i.dest, i.dest, e.GetXmmConstPtr(XMMPackSHORT_2));
   }
@@ -2820,9 +2822,14 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     } else {
       src = i.src1;
     }
+    // Preserve exact zeros before saturating (mantissa trick doesn't).
+    e.vpxor(e.xmm2, e.xmm2, e.xmm2);
+    e.vpcmpeqd(e.xmm1, src, e.xmm2);
     // Saturate.
     e.vmaxps(i.dest, src, e.GetXmmConstPtr(XMMPackSHORT_Min));
     e.vminps(i.dest, i.dest, e.GetXmmConstPtr(XMMPackSHORT_Max));
+    // Clear elements that were originally zero.
+    e.vpandn(i.dest, e.xmm1, i.dest);
     // Pack.
     e.vpshufb(i.dest, i.dest, e.GetXmmConstPtr(XMMPackSHORT_4));
   }
