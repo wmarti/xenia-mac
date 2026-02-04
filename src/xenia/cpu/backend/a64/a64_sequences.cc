@@ -1532,28 +1532,78 @@ struct DIV_I16 : Sequence<DIV_I16, I<OPCODE_DIV, I16Op, I16Op, I16Op>> {
 struct DIV_I32 : Sequence<DIV_I32, I<OPCODE_DIV, I32Op, I32Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.instr->flags & ARITHMETIC_UNSIGNED) {
-      if (i.src1.is_constant) {
-        assert_true(!i.src2.is_constant);
-        e.MOV(W0, i.src1.constant());
-        e.UDIV(i.dest, W0, i.src2);
-      } else if (i.src2.is_constant) {
+      if (i.src2.is_constant) {
+        if (i.src2.constant() == 0) {
+          e.MOV(i.dest, 0);
+          return;
+        }
         assert_true(!i.src1.is_constant);
         e.MOV(W0, i.src2.constant());
         e.UDIV(i.dest, i.src1, W0);
       } else {
-        e.UDIV(i.dest, i.src1, i.src2);
+        oaknut::Label div_zero, done;
+        e.CBZ(i.src2, div_zero);
+        if (i.src1.is_constant) {
+          e.MOV(W0, i.src1.constant());
+          e.UDIV(i.dest, W0, i.src2);
+        } else {
+          e.UDIV(i.dest, i.src1, i.src2);
+        }
+        e.B(done);
+        e.l(div_zero);
+        e.MOV(i.dest, 0);
+        e.l(done);
       }
     } else {
-      if (i.src1.is_constant) {
-        assert_true(!i.src2.is_constant);
-        e.MOV(W0, i.src1.constant());
-        e.SDIV(i.dest, W0, i.src2);
-      } else if (i.src2.is_constant) {
+      if (i.src2.is_constant) {
+        const int32_t divisor = i.src2.constant();
+        if (divisor == 0) {
+          e.MOV(i.dest, 0);
+          return;
+        }
         assert_true(!i.src1.is_constant);
-        e.MOV(W0, i.src2.constant());
+        if (divisor == -1) {
+          oaknut::Label do_div, done;
+          e.MOV(W1, 0x80000000u);
+          e.CMP(i.src1, W1);
+          e.B(Cond::NE, do_div);
+          e.MOV(i.dest, 0);
+          e.B(done);
+          e.l(do_div);
+          e.MOV(W0, divisor);
+          e.SDIV(i.dest, i.src1, W0);
+          e.l(done);
+          return;
+        }
+        e.MOV(W0, divisor);
         e.SDIV(i.dest, i.src1, W0);
       } else {
-        e.SDIV(i.dest, i.src1, i.src2);
+        oaknut::Label div_zero, do_div, done;
+        e.CBZ(i.src2, div_zero);
+        e.MOV(W2, static_cast<uint32_t>(-1));
+        e.CMP(i.src2, W2);
+        e.B(Cond::NE, do_div);
+        e.MOV(W1, 0x80000000u);
+        if (i.src1.is_constant) {
+          e.MOV(W0, i.src1.constant());
+          e.CMP(W0, W1);
+        } else {
+          e.CMP(i.src1, W1);
+        }
+        e.B(Cond::NE, do_div);
+        e.MOV(i.dest, 0);
+        e.B(done);
+        e.l(do_div);
+        if (i.src1.is_constant) {
+          e.MOV(W0, i.src1.constant());
+          e.SDIV(i.dest, W0, i.src2);
+        } else {
+          e.SDIV(i.dest, i.src1, i.src2);
+        }
+        e.B(done);
+        e.l(div_zero);
+        e.MOV(i.dest, 0);
+        e.l(done);
       }
     }
   }
@@ -1561,28 +1611,78 @@ struct DIV_I32 : Sequence<DIV_I32, I<OPCODE_DIV, I32Op, I32Op, I32Op>> {
 struct DIV_I64 : Sequence<DIV_I64, I<OPCODE_DIV, I64Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     if (i.instr->flags & ARITHMETIC_UNSIGNED) {
-      if (i.src1.is_constant) {
-        assert_true(!i.src2.is_constant);
-        e.MOV(X0, i.src1.constant());
-        e.UDIV(i.dest, X0, i.src2);
-      } else if (i.src2.is_constant) {
+      if (i.src2.is_constant) {
+        if (i.src2.constant() == 0) {
+          e.MOV(i.dest, 0);
+          return;
+        }
         assert_true(!i.src1.is_constant);
         e.MOV(X0, i.src2.constant());
         e.UDIV(i.dest, i.src1, X0);
       } else {
-        e.UDIV(i.dest, i.src1, i.src2);
+        oaknut::Label div_zero, done;
+        e.CBZ(i.src2, div_zero);
+        if (i.src1.is_constant) {
+          e.MOV(X0, i.src1.constant());
+          e.UDIV(i.dest, X0, i.src2);
+        } else {
+          e.UDIV(i.dest, i.src1, i.src2);
+        }
+        e.B(done);
+        e.l(div_zero);
+        e.MOV(i.dest, 0);
+        e.l(done);
       }
     } else {
-      if (i.src1.is_constant) {
-        assert_true(!i.src2.is_constant);
-        e.MOV(X0, i.src1.constant());
-        e.SDIV(i.dest, X0, i.src2);
-      } else if (i.src2.is_constant) {
+      if (i.src2.is_constant) {
+        const int64_t divisor = i.src2.constant();
+        if (divisor == 0) {
+          e.MOV(i.dest, 0);
+          return;
+        }
         assert_true(!i.src1.is_constant);
-        e.MOV(X0, i.src2.constant());
+        if (divisor == -1) {
+          oaknut::Label do_div, done;
+          e.MOV(X1, 0x8000000000000000ull);
+          e.CMP(i.src1, X1);
+          e.B(Cond::NE, do_div);
+          e.MOV(i.dest, 0);
+          e.B(done);
+          e.l(do_div);
+          e.MOV(X0, divisor);
+          e.SDIV(i.dest, i.src1, X0);
+          e.l(done);
+          return;
+        }
+        e.MOV(X0, divisor);
         e.SDIV(i.dest, i.src1, X0);
       } else {
-        e.SDIV(i.dest, i.src1, i.src2);
+        oaknut::Label div_zero, do_div, done;
+        e.CBZ(i.src2, div_zero);
+        e.MOV(X2, static_cast<uint64_t>(-1));
+        e.CMP(i.src2, X2);
+        e.B(Cond::NE, do_div);
+        e.MOV(X1, 0x8000000000000000ull);
+        if (i.src1.is_constant) {
+          e.MOV(X0, i.src1.constant());
+          e.CMP(X0, X1);
+        } else {
+          e.CMP(i.src1, X1);
+        }
+        e.B(Cond::NE, do_div);
+        e.MOV(i.dest, 0);
+        e.B(done);
+        e.l(do_div);
+        if (i.src1.is_constant) {
+          e.MOV(X0, i.src1.constant());
+          e.SDIV(i.dest, X0, i.src2);
+        } else {
+          e.SDIV(i.dest, i.src1, i.src2);
+        }
+        e.B(done);
+        e.l(div_zero);
+        e.MOV(i.dest, 0);
+        e.l(done);
       }
     }
   }
@@ -2584,6 +2684,7 @@ struct SHA_I16 : Sequence<SHA_I16, I<OPCODE_SHA, I16Op, I16Op, I8Op>> {
           e.ASR(dest_src, dest_src, src);
         },
         [](A64Emitter& e, WReg dest_src, int8_t constant) {
+          e.SXTH(dest_src, dest_src);
           e.ASR(dest_src, dest_src, constant);
         });
   }
@@ -2618,42 +2719,46 @@ EMITTER_OPCODE_TABLE(OPCODE_SHA, SHA_I8, SHA_I16, SHA_I32, SHA_I64);
 // OPCODE_ROTATE_LEFT
 // ============================================================================
 // TODO(benvanik): put dest/src1 together, src2 in cl.
-template <typename SEQ, typename REG, typename ARGS>
-void EmitRotateLeftXX(A64Emitter& e, const ARGS& i) {
-  // ; rotate r1 left by r2, producing r0
-  // ; (destroys r2)
-  //                                     ; r1 = ABCDEFGH
-  // lslv    r0, r1, r2                  ; r0 = EFGH0000
-  // mvn     r2, r2                      ; r2 = leftover bits
-  // lsrv    r2, r1, r2                  ; r2 = 0000ABCD
-  // orr     r0, r0, r2                  ; r0 = EFGHABCD
+template <typename SEQ, typename ARGS>
+void EmitRotateLeftNarrow(A64Emitter& e, const ARGS& i, uint32_t width) {
+  const uint32_t value_mask = (uint32_t(1) << width) - 1;
+  const uint32_t shift_mask = width - 1;
+
   if (i.src1.is_constant) {
-    e.MOV(REG(0), i.src1.constant());
+    e.MOV(W0, uint32_t(i.src1.constant()));
   } else {
-    e.MOV(REG(0), i.src1.reg());
+    e.MOV(W0, i.src1.reg().toW());
   }
+  e.MOV(W4, value_mask);
+  e.AND(W0, W0, W4);
 
   if (i.src2.is_constant) {
-    e.MOV(REG(1), i.src2.constant());
+    e.MOV(W1, uint32_t(i.src2.constant()));
   } else {
     e.MOV(W1, i.src2.reg().toW());
   }
+  e.MOV(W4, shift_mask);
+  e.AND(W1, W1, W4);
 
-  e.LSLV(i.dest, REG(0), REG(1));
-  e.MVN(REG(1), REG(1));
-  e.LSRV(REG(1), REG(0), REG(1));
-  e.ORR(i.dest, i.dest, REG(1));
+  // left = (value << sh), right = (value >> (width - sh))
+  e.MOV(W2, width);
+  e.SUB(W2, W2, W1);
+  e.LSLV(W3, W0, W1);
+  e.LSRV(W1, W0, W2);
+  e.ORR(W3, W3, W1);
+  e.MOV(W4, value_mask);
+  e.AND(i.dest, W3, W4);
 }
 struct ROTATE_LEFT_I8
     : Sequence<ROTATE_LEFT_I8, I<OPCODE_ROTATE_LEFT, I8Op, I8Op, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    EmitRotateLeftXX<ROTATE_LEFT_I8, WReg>(e, i);
+    EmitRotateLeftNarrow<ROTATE_LEFT_I8>(e, i, 8);
   }
 };
 struct ROTATE_LEFT_I16
     : Sequence<ROTATE_LEFT_I16, I<OPCODE_ROTATE_LEFT, I16Op, I16Op, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    EmitRotateLeftXX<ROTATE_LEFT_I16, WReg>(e, i);
+    EmitRotateLeftNarrow<ROTATE_LEFT_I16>(e, i, 16);
   }
 };
 struct ROTATE_LEFT_I32
