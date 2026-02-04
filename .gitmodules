@@ -46,7 +46,7 @@
 	url = https://github.com/fmtlib/fmt.git
 [submodule "third_party/disruptorplus"]
 	path = third_party/disruptorplus
-	url = https://github.com/xenia-canary/disruptorplus.git
+	url = https://github.com/wmarti/disruptorplus-xenia-mac.git
 [submodule "third_party/DirectXShaderCompiler"]
 	path = third_party/DirectXShaderCompiler
 	url = https://github.com/microsoft/DirectXShaderCompiler.git
