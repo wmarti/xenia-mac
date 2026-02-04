@@ -29,7 +29,7 @@ class StackLayout {
    * Thunk stack:
    *      Non-Volatile         Volatile
    *  +------------------+------------------+
-   *  | arg temp, 3 * 8  | arg temp, 3 * 8  | sp + 0x000
+   *  | arg temp, 4 * 8  | arg temp, 4 * 8  | sp + 0x000
    *  |                  |                  |
    *  |                  |                  |
    *  +------------------+------------------+
@@ -83,9 +83,9 @@ class StackLayout {
    *  +------------------+------------------+
    */
   XEPACKEDSTRUCT(Thunk, {
-    uint64_t arg_temp[3];
-    uint64_t r[17];
-    vec128_t xmm[22];
+    uint64_t arg_temp[4];
+    uint64_t r[18];
+    vec128_t xmm[31];
   });
   static_assert(sizeof(Thunk) % 16 == 0,
                 "sizeof(Thunk) must be a multiple of 16!");

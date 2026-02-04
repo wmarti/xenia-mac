@@ -850,6 +850,9 @@ HostToGuestThunk A64ThunkEmitter::EmitHostToGuestThunk() {
 
   MOV(X16, X0);
   MOV(GetContextReg(), X1);  // context
+  // Ensure membase is set for guest memory accesses.
+  LDR(GetMembaseReg(), GetContextReg(),
+      offsetof(ppc::PPCContext, virtual_membase));
   MOV(X0, X2);               // return address
   BLR(X16);
 
@@ -909,6 +912,9 @@ GuestToHostThunk A64ThunkEmitter::EmitGuestToHostThunk() {
   BLR(X16);
 
   EmitLoadVolatileRegs();
+  // Reload membase in case the host clobbered it.
+  LDR(GetMembaseReg(), GetContextReg(),
+      offsetof(ppc::PPCContext, virtual_membase));
 
   code_offsets.epilog = offset();
 
@@ -974,6 +980,9 @@ ResolveFunctionThunk A64ThunkEmitter::EmitResolveFunctionThunk() {
   MOV(X16, X0);
 
   EmitLoadVolatileRegs();
+  // Reload membase in case ResolveFunction clobbered it.
+  LDR(GetMembaseReg(), GetContextReg(),
+      offsetof(ppc::PPCContext, virtual_membase));
 
   code_offsets.epilog = offset();
 
@@ -1184,21 +1193,28 @@ void A64ThunkEmitter::EmitSaveVolatileRegs() {
   STP(X11, X12, SP, offsetof(StackLayout::Thunk, r[10]));
   STP(X13, X14, SP, offsetof(StackLayout::Thunk, r[12]));
   STP(X15, X30, SP, offsetof(StackLayout::Thunk, r[14]));
+  // Preserve context/membase registers explicitly in case host code clobbers them.
+  STR(X27, SP, offsetof(StackLayout::Thunk, r[16]));
+  STR(X28, SP, offsetof(StackLayout::Thunk, r[17]));
 
   // Preserve arguments passed to and returned from a subroutine
   // STR(Q0, SP, offsetof(StackLayout::Thunk, xmm[0]));
   STP(Q1, Q2, SP, offsetof(StackLayout::Thunk, xmm[0]));
   STP(Q3, Q4, SP, offsetof(StackLayout::Thunk, xmm[2]));
   STP(Q5, Q6, SP, offsetof(StackLayout::Thunk, xmm[4]));
-  STP(Q7, Q16, SP, offsetof(StackLayout::Thunk, xmm[6]));
-  STP(Q17, Q18, SP, offsetof(StackLayout::Thunk, xmm[8]));
-  STP(Q19, Q20, SP, offsetof(StackLayout::Thunk, xmm[10]));
-  STP(Q21, Q22, SP, offsetof(StackLayout::Thunk, xmm[12]));
-  STP(Q23, Q24, SP, offsetof(StackLayout::Thunk, xmm[14]));
-  STP(Q25, Q26, SP, offsetof(StackLayout::Thunk, xmm[16]));
-  STP(Q27, Q28, SP, offsetof(StackLayout::Thunk, xmm[18]));
-  STP(Q29, Q30, SP, offsetof(StackLayout::Thunk, xmm[20]));
-  STR(Q31, SP, offsetof(StackLayout::Thunk, xmm[21]));
+  STP(Q7, Q8, SP, offsetof(StackLayout::Thunk, xmm[6]));
+  STP(Q9, Q10, SP, offsetof(StackLayout::Thunk, xmm[8]));
+  STP(Q11, Q12, SP, offsetof(StackLayout::Thunk, xmm[10]));
+  STP(Q13, Q14, SP, offsetof(StackLayout::Thunk, xmm[12]));
+  STP(Q15, Q16, SP, offsetof(StackLayout::Thunk, xmm[14]));
+  STP(Q17, Q18, SP, offsetof(StackLayout::Thunk, xmm[16]));
+  STP(Q19, Q20, SP, offsetof(StackLayout::Thunk, xmm[18]));
+  STP(Q21, Q22, SP, offsetof(StackLayout::Thunk, xmm[20]));
+  STP(Q23, Q24, SP, offsetof(StackLayout::Thunk, xmm[22]));
+  STP(Q25, Q26, SP, offsetof(StackLayout::Thunk, xmm[24]));
+  STP(Q27, Q28, SP, offsetof(StackLayout::Thunk, xmm[26]));
+  STP(Q29, Q30, SP, offsetof(StackLayout::Thunk, xmm[28]));
+  STR(Q31, SP, offsetof(StackLayout::Thunk, xmm[30]));
 }
 
 void A64ThunkEmitter::EmitLoadVolatileRegs() {
@@ -1212,21 +1228,27 @@ void A64ThunkEmitter::EmitLoadVolatileRegs() {
   LDP(X11, X12, SP, offsetof(StackLayout::Thunk, r[10]));
   LDP(X13, X14, SP, offsetof(StackLayout::Thunk, r[12]));
   LDP(X15, X30, SP, offsetof(StackLayout::Thunk, r[14]));
+  LDR(X27, SP, offsetof(StackLayout::Thunk, r[16]));
+  LDR(X28, SP, offsetof(StackLayout::Thunk, r[17]));
 
   // Preserve arguments passed to and returned from a subroutine
   // LDR(Q0, SP, offsetof(StackLayout::Thunk, xmm[0]));
   LDP(Q1, Q2, SP, offsetof(StackLayout::Thunk, xmm[0]));
   LDP(Q3, Q4, SP, offsetof(StackLayout::Thunk, xmm[2]));
   LDP(Q5, Q6, SP, offsetof(StackLayout::Thunk, xmm[4]));
-  LDP(Q7, Q16, SP, offsetof(StackLayout::Thunk, xmm[6]));
-  LDP(Q17, Q18, SP, offsetof(StackLayout::Thunk, xmm[8]));
-  LDP(Q19, Q20, SP, offsetof(StackLayout::Thunk, xmm[10]));
-  LDP(Q21, Q22, SP, offsetof(StackLayout::Thunk, xmm[12]));
-  LDP(Q23, Q24, SP, offsetof(StackLayout::Thunk, xmm[14]));
-  LDP(Q25, Q26, SP, offsetof(StackLayout::Thunk, xmm[16]));
-  LDP(Q27, Q28, SP, offsetof(StackLayout::Thunk, xmm[18]));
-  LDP(Q29, Q30, SP, offsetof(StackLayout::Thunk, xmm[20]));
-  LDR(Q31, SP, offsetof(StackLayout::Thunk, xmm[21]));
+  LDP(Q7, Q8, SP, offsetof(StackLayout::Thunk, xmm[6]));
+  LDP(Q9, Q10, SP, offsetof(StackLayout::Thunk, xmm[8]));
+  LDP(Q11, Q12, SP, offsetof(StackLayout::Thunk, xmm[10]));
+  LDP(Q13, Q14, SP, offsetof(StackLayout::Thunk, xmm[12]));
+  LDP(Q15, Q16, SP, offsetof(StackLayout::Thunk, xmm[14]));
+  LDP(Q17, Q18, SP, offsetof(StackLayout::Thunk, xmm[16]));
+  LDP(Q19, Q20, SP, offsetof(StackLayout::Thunk, xmm[18]));
+  LDP(Q21, Q22, SP, offsetof(StackLayout::Thunk, xmm[20]));
+  LDP(Q23, Q24, SP, offsetof(StackLayout::Thunk, xmm[22]));
+  LDP(Q25, Q26, SP, offsetof(StackLayout::Thunk, xmm[24]));
+  LDP(Q27, Q28, SP, offsetof(StackLayout::Thunk, xmm[26]));
+  LDP(Q29, Q30, SP, offsetof(StackLayout::Thunk, xmm[28]));
+  LDR(Q31, SP, offsetof(StackLayout::Thunk, xmm[30]));
 }
 
 void A64ThunkEmitter::EmitSaveNonvolatileRegs() {
