@@ -32,6 +32,11 @@ class Processor;
 
 namespace xe {
 namespace cpu {
+class XexModule;
+}  // namespace cpu
+}  // namespace xe
+namespace xe {
+namespace cpu {
 namespace backend {
 namespace a64 {
 
@@ -237,6 +242,7 @@ class A64Emitter : public oaknut::VectorCodeGenerator {
   }
 
   FunctionDebugInfo* debug_info() const { return debug_info_; }
+  XexModule* GuestModule() { return guest_module_; }
 
   size_t stack_size() const { return stack_size_; }
 
@@ -265,6 +271,7 @@ class A64Emitter : public oaknut::VectorCodeGenerator {
   FunctionDebugInfo* debug_info_ = nullptr;
   uint32_t debug_info_flags_ = 0;
   FunctionTraceData* trace_data_ = nullptr;
+  XexModule* guest_module_ = nullptr;
   Arena source_map_arena_;
 
   size_t stack_size_ = 0;

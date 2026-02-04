@@ -41,6 +41,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/cpu/xex_module.h"
 
 #include "oaknut/feature_detection/cpu_feature.hpp"
 #include "oaknut/feature_detection/feature_detection.hpp"
@@ -59,6 +60,12 @@ DEFINE_bool(a64_resolve_function_log, false,
             "Log A64 ResolveFunction failures with module ranges.", "CPU");
 DEFINE_int32(a64_resolve_function_log_limit, 8,
              "Maximum ResolveFunction failure logs.", "CPU");
+DEFINE_bool(a64_stack_sync_log, false, "Log A64 stack sync events.", "CPU");
+DEFINE_int32(a64_stack_sync_log_limit, 16,
+             "Maximum A64 stack sync logs.", "CPU");
+DEFINE_bool(a64_stack_sync_check, false,
+            "Emit runtime checks for guest/host stack mismatches after calls.",
+            "CPU");
 
 namespace xe {
 namespace cpu {
@@ -161,6 +168,8 @@ bool A64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
                       void** out_code_address, size_t* out_code_size,
                       std::vector<SourceMapEntry>* out_source_map) {
   SCOPE_profile_cpu_f("cpu");
+
+  guest_module_ = dynamic_cast<XexModule*>(function->module());
 
   // Reset.
   debug_info_ = debug_info;
@@ -347,6 +356,7 @@ bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
   epilog_label_ = nullptr;
   EmitTraceUserCallReturn();
   LDR(GetContextReg(), SP, StackLayout::GUEST_CTX_HOME);
+  PopStackpoint();
 
   code_offsets.epilog = offset();
 
@@ -448,11 +458,17 @@ uint64_t TrapLogRegs(void* raw_context, uint64_t address) {
   }
   auto thread_state = guest_context->thread_state;
   XELOGI(
-      "TraceOnInstruction 0x{:08X}: r3=0x{:016X} r4=0x{:016X} r11=0x{:016X} "
-      "r30=0x{:016X} r31=0x{:016X} lr=0x{:016X} ctr=0x{:016X}",
+      "TraceOnInstruction 0x{:08X}: r3=0x{:016X} r4=0x{:016X} r9=0x{:016X} "
+      "r10=0x{:016X} r11=0x{:016X} r30=0x{:016X} r31=0x{:016X} lr=0x{:016X} "
+      "ctr=0x{:016X} cr=0x{:08X} xer=0x{:08X}",
       static_cast<uint32_t>(cvars::break_on_instruction), guest_context->r[3],
-      guest_context->r[4], guest_context->r[11], guest_context->r[30],
-      guest_context->r[31], guest_context->lr, guest_context->ctr);
+      guest_context->r[4], guest_context->r[9], guest_context->r[10],
+      guest_context->r[11], guest_context->r[30], guest_context->r[31],
+      guest_context->lr, guest_context->ctr,
+      static_cast<uint32_t>(guest_context->cr()),
+      static_cast<uint32_t>((uint32_t(guest_context->xer_so & 1) << 31) |
+                            (uint32_t(guest_context->xer_ov & 1) << 30) |
+                            (uint32_t(guest_context->xer_ca & 1) << 29)));
   if (thread_state) {
     auto memory = thread_state->memory();
     if (memory) {
@@ -751,6 +767,41 @@ uint64_t TrapDebugBreak(void* raw_context, uint64_t address) {
     xe::debugging::Break();
   }
   return 0;
+}
+
+static void CheckStackSync(void* raw_context, uint64_t guest_pc) {
+  if (!cvars::a64_stack_sync_check || !raw_context) {
+    return;
+  }
+  auto* context = reinterpret_cast<ppc::PPCContext*>(raw_context);
+  auto* processor = context->processor;
+  if (!processor) {
+    return;
+  }
+  auto* backend = static_cast<A64Backend*>(processor->backend());
+  if (!backend) {
+    return;
+  }
+  auto* backend_context = backend->BackendContextForGuestContext(context);
+  if (!backend_context || !backend_context->stackpoints ||
+      backend_context->current_stackpoint_depth == 0) {
+    return;
+  }
+  const uint32_t depth = backend_context->current_stackpoint_depth;
+  const auto& top = backend_context->stackpoints[depth - 1];
+  const uint32_t guest_sp = static_cast<uint32_t>(context->r[1]);
+  if (guest_sp <= top.guest_sp) {
+    return;
+  }
+  static std::atomic<int32_t> log_count{0};
+  const int32_t count = log_count.fetch_add(1, std::memory_order_relaxed);
+  if (count < 64) {
+    XELOGW(
+        "A64 stack check: guest_sp grew (pc=0x{:08X} sp=0x{:08X} "
+        "top_sp=0x{:08X} depth={} lr=0x{:08X})",
+        static_cast<uint32_t>(guest_pc), guest_sp, top.guest_sp, depth,
+        static_cast<uint32_t>(context->lr));
+  }
 }
 
 void A64Emitter::Trap(uint16_t trap_type) {
@@ -1062,6 +1113,7 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // Pass the callers return address over.
     LDR(X0, SP, StackLayout::GUEST_RET_ADDR);
 
+    PopStackpoint();
     AdjustStackPointer(*this, stack_size(), true);
 
     MOV(SP, X29);
@@ -1121,11 +1173,9 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
   } else {
     // Old-style resolve.
     // Not too important because indirection table is almost always available.
-    MOV(X0, GetContextReg());
     MOV(W1, reg.toW());
-
-    MOV(X16, reinterpret_cast<uint64_t>(ResolveFunction));
-    BLR(X16);
+    CallNativeSafe(reinterpret_cast<void*>(ResolveFunction));
+    ReloadMembase();
     MOV(X16, X0);
   }
 
@@ -1137,6 +1187,7 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
     // Pass the callers return address over.
     LDR(X0, SP, StackLayout::GUEST_RET_ADDR);
 
+    PopStackpoint();
     AdjustStackPointer(*this, stack_size(), true);
 
     MOV(SP, X29);
