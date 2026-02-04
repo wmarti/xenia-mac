@@ -781,6 +781,16 @@ workspace("xenia")
           "_XOPEN_SOURCE=700",
         })
       filter({})
+
+      -- Ensure FFmpeg uses its compat atomics on Windows even before build-plumbing.
+      filter("system:windows")
+        includedirs({
+          "third_party/FFmpeg/compat/atomics/win32",
+        })
+        forceincludes({
+          "stdatomic.h",
+        })
+      filter({})
     end
 
     if prj.name == "libavcodec" then
