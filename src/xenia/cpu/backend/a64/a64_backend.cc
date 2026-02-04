@@ -168,6 +168,11 @@ A64Backend::~A64Backend() {
   }
 }
 
+static void ForwardMMIOAccessForRecording(void* context, void* hostaddr) {
+  reinterpret_cast<A64Backend*>(context)
+      ->RecordMMIOExceptionForGuestInstruction(hostaddr);
+}
+
 bool A64Backend::Initialize(Processor* processor) {
   if (!Backend::Initialize(processor)) {
     return false;
@@ -221,6 +226,10 @@ bool A64Backend::Initialize(Processor* processor) {
 
   // Setup exception callback
   ExceptionHandler::Install(&ExceptionCallbackThunk, this);
+  if (cvars::record_mmio_access_exceptions) {
+    processor->memory()->SetMMIOExceptionRecordingCallback(
+        ForwardMMIOAccessForRecording, (void*)this);
+  }
 
   return true;
 }
