@@ -13,7 +13,7 @@ project("xenia-kernel")
     "ASIO_STANDALONE",
     "ASIO_NO_DEPRECATED",
   })
-  filter("platforms:Windows")
+  filter("platforms:Windows-*")
     defines({
       "_WIN32_WINNT=0x0A00",  -- Windows 10+ for Asio
       "_WINSOCK_DEPRECATED_NO_WARNINGS",  -- Suppress deprecated Winsock API warnings
