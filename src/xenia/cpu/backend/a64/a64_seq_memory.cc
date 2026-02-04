@@ -10,11 +10,37 @@
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
+#include "xenia/base/byte_order.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
 #include "xenia/cpu/backend/a64/a64_tracers.h"
+#include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/processor.h"
+#include "xenia/cpu/xex_module.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/memory.h"
+
+DECLARE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses);
+DEFINE_bool(a64_force_mmio_aware_byteswap_loads, false,
+            "Force MMIO-aware helper loads for byte-swapped I32 loads.",
+            "CPU");
+DEFINE_bool(a64_log_reservation_failures, false,
+            "Log failed A64 reservation stores (ldarx/stdcx).", "CPU");
+DEFINE_uint32(a64_reservation_log_rate, 4096,
+              "Log 1 in N failed A64 reservation stores (0 = log all).",
+              "CPU");
+DEFINE_uint32(a64_reservation_watch_address, 0,
+              "If non-zero, only log failed A64 reservation stores for this "
+              "guest address.",
+              "CPU");
+DEFINE_uint32(a64_watch_store_address, 0,
+              "If non-zero, log 32-bit guest stores to this address.",
+              "CPU");
 
 namespace xe {
 namespace cpu {
@@ -22,6 +48,220 @@ namespace backend {
 namespace a64 {
 
 volatile int anchor_memory = 0;
+
+static bool IsPossibleMMIOInstruction(A64Emitter& e, const hir::Instr* i) {
+  if (!cvars::emit_mmio_aware_stores_for_recorded_exception_addresses) {
+    return false;
+  }
+  if (IsTracingData()) {
+    return false;
+  }
+  uint32_t guestaddr = i->GuestAddressFor();
+  if (!guestaddr) {
+    return false;
+  }
+
+  auto guest_module = e.GuestModule();
+  if (!guest_module) {
+    return false;
+  }
+  auto flags = guest_module->GetInstructionAddressFlags(guestaddr);
+  return flags && flags->accessed_mmio;
+}
+
+template <typename T, bool swap>
+static void MMIOAwareStore(void* _ctx, unsigned int guestaddr, T value) {
+  if (swap) {
+    value = xe::byte_swap(value);
+  }
+  if (guestaddr >= 0xE0000000) {
+    guestaddr += 0x1000;
+  }
+
+  auto ctx = reinterpret_cast<ppc::PPCContext*>(_ctx);
+  auto gaddr = ctx->processor->memory()->LookupVirtualMappedRange(guestaddr);
+  if (!gaddr) {
+    *reinterpret_cast<T*>(ctx->virtual_membase + guestaddr) = value;
+  } else {
+    value = xe::byte_swap(value);
+    gaddr->write(nullptr, gaddr->callback_context, guestaddr, value);
+  }
+}
+
+template <typename T, bool swap>
+static T MMIOAwareLoad(void* _ctx, unsigned int guestaddr) {
+  T value;
+
+  if (guestaddr >= 0xE0000000) {
+    guestaddr += 0x1000;
+  }
+
+  auto ctx = reinterpret_cast<ppc::PPCContext*>(_ctx);
+  auto gaddr = ctx->processor->memory()->LookupVirtualMappedRange(guestaddr);
+  if (!gaddr) {
+    value = *reinterpret_cast<T*>(ctx->virtual_membase + guestaddr);
+    if (swap) {
+      value = xe::byte_swap(value);
+    }
+  } else {
+    value = gaddr->read(nullptr, gaddr->callback_context, guestaddr);
+  }
+  return value;
+}
+
+static void LogReservationStore32(void* raw_context, uint64_t guest_addr,
+                                  uint64_t value, uint64_t status) {
+  if (!cvars::a64_log_reservation_failures) {
+    return;
+  }
+  if (status == 0) {
+    return;
+  }
+  uint32_t watch = cvars::a64_reservation_watch_address;
+  if (watch && uint32_t(guest_addr) != watch) {
+    return;
+  }
+  uint32_t rate = cvars::a64_reservation_log_rate;
+  if (rate) {
+    static std::atomic<uint32_t> log_count{0};
+    if ((log_count.fetch_add(1) % rate) != 0) {
+      return;
+    }
+  }
+  uint32_t thread_id = 0;
+  if (raw_context) {
+    thread_id = reinterpret_cast<ppc::PPCContext*>(raw_context)->thread_id;
+  }
+  XELOGI(
+      "A64 reservation store failed: guest=0x{:08X} size=4 value=0x{:08X} "
+      "status=0x{:X} tid=0x{:08X}",
+      uint32_t(guest_addr), uint32_t(value), uint32_t(status), thread_id);
+}
+
+static void LogStoreWatch32(void* raw_context, uint64_t guest_addr,
+                            uint64_t value, uint64_t guest_pc) {
+  uint32_t thread_id = 0;
+  const ppc::PPCContext* context =
+      reinterpret_cast<ppc::PPCContext*>(raw_context);
+  if (context) {
+    thread_id = context->thread_id;
+  }
+  XELOGI(
+      "A64 store watch: guest_pc=0x{:08X} addr=0x{:08X} value=0x{:08X} "
+      "tid=0x{:08X}",
+      uint32_t(guest_pc), uint32_t(guest_addr), uint32_t(value), thread_id);
+  if (context && uint32_t(value) == 0) {
+    static std::atomic<bool> logged_dump{false};
+    const uint32_t r11 = uint32_t(context->r[11]);
+    const uint32_t r31 = uint32_t(context->r[31]);
+    uint32_t raw = 0;
+    uint32_t prot = 0;
+    bool read_ok = false;
+    if (context->kernel_state && context->kernel_state->memory()) {
+      auto* memory = context->kernel_state->memory();
+      auto* heap = memory->LookupHeap(r11);
+      if (heap && heap->QueryProtect(r11, &prot) &&
+          (prot & kMemoryProtectRead)) {
+        std::memcpy(&raw, memory->TranslateVirtual(r11), sizeof(raw));
+        read_ok = true;
+      }
+    }
+    if (read_ok) {
+      XELOGI(
+          "A64 store watch zero: guest_pc=0x{:08X} r30=0x{:08X} "
+          "r31=0x{:08X} r9=0x{:08X} r10=0x{:08X} r11=0x{:08X} "
+          "lr=0x{:08X} [r11]=0x{:08X} be=0x{:08X} prot=0x{:X}",
+          uint32_t(guest_pc), uint32_t(context->r[30]),
+          uint32_t(context->r[31]), uint32_t(context->r[9]),
+          uint32_t(context->r[10]), r11, uint32_t(context->lr), raw,
+          xe::byte_swap(raw), prot);
+    } else {
+      XELOGI(
+          "A64 store watch zero: guest_pc=0x{:08X} r30=0x{:08X} "
+          "r31=0x{:08X} r9=0x{:08X} r10=0x{:08X} r11=0x{:08X} "
+          "lr=0x{:08X} [r11]=<unreadable>",
+          uint32_t(guest_pc), uint32_t(context->r[30]),
+          uint32_t(context->r[31]), uint32_t(context->r[9]),
+          uint32_t(context->r[10]), r11, uint32_t(context->lr));
+    }
+    if (context->kernel_state && context->kernel_state->memory() &&
+        !logged_dump.exchange(true)) {
+      auto* memory = context->kernel_state->memory();
+      auto* heap = memory->LookupHeap(r31);
+      uint32_t dump_words[16] = {};
+      bool dump_ok = false;
+      if (heap && heap->QueryProtect(r31, &prot) &&
+          (prot & kMemoryProtectRead)) {
+        std::memcpy(dump_words, memory->TranslateVirtual(r31),
+                    sizeof(dump_words));
+        dump_ok = true;
+      }
+      if (dump_ok) {
+        XELOGI(
+            "A64 store watch zero dump r31=0x{:08X}: "
+            "{:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} "
+            "{:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+            r31, dump_words[0], dump_words[1], dump_words[2], dump_words[3],
+            dump_words[4], dump_words[5], dump_words[6], dump_words[7],
+            dump_words[8], dump_words[9], dump_words[10], dump_words[11],
+            dump_words[12], dump_words[13], dump_words[14], dump_words[15]);
+      } else {
+        XELOGI("A64 store watch zero dump r31=0x{:08X}: <unreadable>", r31);
+      }
+    }
+  }
+}
+
+static void LogStoreWatch64(void* raw_context, uint64_t guest_addr,
+                            uint64_t value, uint64_t guest_pc) {
+  uint32_t thread_id = 0;
+  const ppc::PPCContext* context =
+      reinterpret_cast<ppc::PPCContext*>(raw_context);
+  if (context) {
+    thread_id = context->thread_id;
+  }
+  uint32_t watch_addr = cvars::a64_watch_store_address;
+  uint32_t addr32 = uint32_t(guest_addr);
+  const uint32_t low = uint32_t(value);
+  const uint32_t high = uint32_t(value >> 32);
+  const char* which = "base";
+  if (watch_addr && addr32 + 4 == watch_addr) {
+    which = "base+4";
+  }
+  XELOGI(
+      "A64 store watch64: guest_pc=0x{:08X} addr=0x{:08X} {} "
+      "value=0x{:016X} low=0x{:08X} high=0x{:08X} tid=0x{:08X}",
+      uint32_t(guest_pc), addr32, which, value, low, high, thread_id);
+}
+
+static void LogReservationStore64(void* raw_context, uint64_t guest_addr,
+                                  uint64_t value, uint64_t status) {
+  if (!cvars::a64_log_reservation_failures) {
+    return;
+  }
+  if (status == 0) {
+    return;
+  }
+  uint32_t watch = cvars::a64_reservation_watch_address;
+  if (watch && uint32_t(guest_addr) != watch) {
+    return;
+  }
+  uint32_t rate = cvars::a64_reservation_log_rate;
+  if (rate) {
+    static std::atomic<uint32_t> log_count{0};
+    if ((log_count.fetch_add(1) % rate) != 0) {
+      return;
+    }
+  }
+  uint32_t thread_id = 0;
+  if (raw_context) {
+    thread_id = reinterpret_cast<ppc::PPCContext*>(raw_context)->thread_id;
+  }
+  XELOGI(
+      "A64 reservation store failed: guest=0x{:08X} size=8 value=0x{:016X} "
+      "status=0x{:X} tid=0x{:08X}",
+      uint32_t(guest_addr), value, uint32_t(status), thread_id);
+}
 
 // vec128b stores bytes in reversed 32-bit chunks; use reversed args for 0..15.
 static const vec128_t kStvlShuffle =
@@ -119,8 +359,60 @@ XReg ComputeMemoryAddress(A64Emitter& e, const T& guest,
 // ============================================================================
 // Note that the address we use here is a real, host address!
 // This is weird, and should be fixed.
-template <typename SEQ, typename REG, typename ARGS, typename FN>
-void EmitAtomicExchangeXX(A64Emitter& e, const ARGS& i, const FN& fn) {
+static void EmitAtomicExchangeFallbackI8(A64Emitter& e, WReg dest,
+                                         XReg address) {
+  oaknut::Label retry;
+  e.l(retry);
+  e.LDAXRB(W4, address);
+  e.STLXRB(W5, dest, address);
+  e.CBNZ(W5, retry);
+  e.MOV(dest, W4);
+  e.UXTB(dest, dest);
+}
+
+static void EmitAtomicExchangeFallbackI16(A64Emitter& e, WReg dest,
+                                          XReg address) {
+  oaknut::Label retry;
+  e.l(retry);
+  e.LDAXRH(W4, address);
+  e.STLXRH(W5, dest, address);
+  e.CBNZ(W5, retry);
+  e.MOV(dest, W4);
+  e.UXTH(dest, dest);
+}
+
+static void EmitAtomicExchangeFallbackI32(A64Emitter& e, WReg dest,
+                                          XReg address) {
+  oaknut::Label retry;
+  e.l(retry);
+  e.LDAXR(W4, address);
+  e.STLXR(W5, dest, address);
+  e.CBNZ(W5, retry);
+  e.MOV(dest, W4);
+}
+
+static void EmitAtomicExchangeFallbackI64(A64Emitter& e, XReg dest,
+                                          XReg address) {
+  oaknut::Label retry;
+  e.l(retry);
+  e.LDAXR(X4, address);
+  e.STLXR(W5, dest, address);
+  e.CBNZ(W5, retry);
+  e.MOV(dest, X4);
+}
+
+template <typename SEQ, typename REG, typename ARGS, typename FN_LSE,
+          typename FN_FALLBACK>
+void EmitAtomicExchangeXX(A64Emitter& e, const ARGS& i,
+                          const FN_LSE& lse_fn,
+                          const FN_FALLBACK& fallback_fn) {
+  auto emit_exchange = [&](const XReg& address_reg) {
+    if (e.IsFeatureEnabled(kA64EmitLSE)) {
+      lse_fn(e, i.dest, address_reg);
+    } else {
+      fallback_fn(e, i.dest, address_reg);
+    }
+  };
   if (i.dest == i.src1) {
     e.MOV(X0, i.src1);
     if (i.dest != i.src2) {
@@ -130,7 +422,7 @@ void EmitAtomicExchangeXX(A64Emitter& e, const ARGS& i, const FN& fn) {
         e.MOV(i.dest, i.src2);
       }
     }
-    fn(e, i.dest, X0);
+    emit_exchange(X0);
   } else {
     if (i.dest != i.src2) {
       if (i.src2.is_constant) {
@@ -139,7 +431,7 @@ void EmitAtomicExchangeXX(A64Emitter& e, const ARGS& i, const FN& fn) {
         e.MOV(i.dest, i.src2);
       }
     }
-    fn(e, i.dest, i.src1);
+    emit_exchange(i.src1);
   }
 }
 struct ATOMIC_EXCHANGE_I8
@@ -148,7 +440,10 @@ struct ATOMIC_EXCHANGE_I8
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     EmitAtomicExchangeXX<ATOMIC_EXCHANGE_I8, WReg>(
         e, i,
-        [](A64Emitter& e, WReg dest, XReg src) { e.SWPALB(dest, dest, src); });
+        [](A64Emitter& e, WReg dest, XReg src) { e.SWPALB(dest, dest, src); },
+        [](A64Emitter& e, WReg dest, XReg address) {
+          EmitAtomicExchangeFallbackI8(e, dest, address);
+        });
   }
 };
 struct ATOMIC_EXCHANGE_I16
@@ -157,7 +452,10 @@ struct ATOMIC_EXCHANGE_I16
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     EmitAtomicExchangeXX<ATOMIC_EXCHANGE_I8, WReg>(
         e, i,
-        [](A64Emitter& e, WReg dest, XReg src) { e.SWPALH(dest, dest, src); });
+        [](A64Emitter& e, WReg dest, XReg src) { e.SWPALH(dest, dest, src); },
+        [](A64Emitter& e, WReg dest, XReg address) {
+          EmitAtomicExchangeFallbackI16(e, dest, address);
+        });
   }
 };
 struct ATOMIC_EXCHANGE_I32
@@ -166,7 +464,10 @@ struct ATOMIC_EXCHANGE_I32
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     EmitAtomicExchangeXX<ATOMIC_EXCHANGE_I8, WReg>(
         e, i,
-        [](A64Emitter& e, WReg dest, XReg src) { e.SWPAL(dest, dest, src); });
+        [](A64Emitter& e, WReg dest, XReg src) { e.SWPAL(dest, dest, src); },
+        [](A64Emitter& e, WReg dest, XReg address) {
+          EmitAtomicExchangeFallbackI32(e, dest, address);
+        });
   }
 };
 struct ATOMIC_EXCHANGE_I64
@@ -175,7 +476,10 @@ struct ATOMIC_EXCHANGE_I64
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     EmitAtomicExchangeXX<ATOMIC_EXCHANGE_I8, XReg>(
         e, i,
-        [](A64Emitter& e, XReg dest, XReg src) { e.SWPAL(dest, dest, src); });
+        [](A64Emitter& e, XReg dest, XReg src) { e.SWPAL(dest, dest, src); },
+        [](A64Emitter& e, XReg dest, XReg address) {
+          EmitAtomicExchangeFallbackI64(e, dest, address);
+        });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_ATOMIC_EXCHANGE, ATOMIC_EXCHANGE_I8,
@@ -444,7 +748,29 @@ struct RESERVED_STORE_INT32
       e.MOV(value, static_cast<uint32_t>(i.src2.constant()));
     }
     e.STLXR(W0, value, address);
-    e.CMP(W0, 0);
+    const bool emit_log = cvars::a64_log_reservation_failures;
+    if (emit_log) {
+      const WReg status = W5;
+      e.MOV(status, W0);
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1).toW();
+      const auto status_reg = e.GetNativeParam(2).toW();
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(value_reg, uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(value_reg, value);
+      }
+      e.MOV(status_reg, status);
+      e.CallNativeSafe(reinterpret_cast<void*>(LogReservationStore32));
+      e.CMP(status, 0);
+    } else {
+      e.CMP(W0, 0);
+    }
     e.CSET(i.dest, Cond::EQ);
   }
 };
@@ -459,7 +785,29 @@ struct RESERVED_STORE_INT64
       e.MOV(value, i.src2.constant());
     }
     e.STLXR(W0, value, address);
-    e.CMP(W0, 0);
+    const bool emit_log = cvars::a64_log_reservation_failures;
+    if (emit_log) {
+      const WReg status = W5;
+      e.MOV(status, W0);
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1);
+      const auto status_reg = e.GetNativeParam(2).toW();
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(value_reg, i.src2.constant());
+      } else {
+        e.MOV(value_reg, value);
+      }
+      e.MOV(status_reg, status);
+      e.CallNativeSafe(reinterpret_cast<void*>(LogReservationStore64));
+      e.CMP(status, 0);
+    } else {
+      e.CMP(W0, 0);
+    }
     e.CSET(i.dest, Cond::EQ);
   }
 };
@@ -907,6 +1255,31 @@ struct LOAD_OFFSET_I16
 struct LOAD_OFFSET_I32
     : Sequence<LOAD_OFFSET_I32, I<OPCODE_LOAD_OFFSET, I32Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const bool force_mmio_byteswap =
+        cvars::a64_force_mmio_aware_byteswap_loads &&
+        (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP);
+    if (force_mmio_byteswap || IsPossibleMMIOInstruction(e, i.instr)) {
+      void* addrptr = (void*)&MMIOAwareLoad<uint32_t, false>;
+      if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
+        addrptr = (void*)&MMIOAwareLoad<uint32_t, true>;
+      }
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto offset_reg = W3;
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(offset_reg, uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(offset_reg, i.src2.reg().toW());
+      }
+      e.ADD(guest_addr_reg, guest_addr_reg, offset_reg);
+      e.CallNativeSafe(addrptr);
+      e.MOV(i.dest, W0);
+      return;
+    }
     auto addr_reg = ComputeMemoryAddressOffset(e, i.src1, i.src2);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       e.LDR(i.dest, addr_reg);
@@ -953,11 +1326,31 @@ struct STORE_OFFSET_I16
     : Sequence<STORE_OFFSET_I16,
                I<OPCODE_STORE_OFFSET, VoidOp, I64Op, I64Op, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    auto addr_reg = ComputeMemoryAddressOffset(e, i.src1, i.src2);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src3.is_constant);
-      assert_always("not implemented");
+      void* addrptr = (void*)&MMIOAwareStore<uint16_t, true>;
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1).toW();
+      const auto offset_reg = W3;
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(offset_reg, uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(offset_reg, i.src2.reg().toW());
+      }
+      e.ADD(guest_addr_reg, guest_addr_reg, offset_reg);
+      if (i.src3.is_constant) {
+        e.MOV(value_reg, uint32_t(i.src3.constant()));
+      } else {
+        e.MOV(value_reg, i.src3.reg().toW());
+      }
+      e.CallNativeSafe(addrptr);
+      return;
     } else {
+      auto addr_reg = ComputeMemoryAddressOffset(e, i.src1, i.src2);
       if (i.src3.is_constant) {
         e.MOV(W0, i.src3.constant());
         e.STRH(W0, addr_reg);
@@ -972,17 +1365,88 @@ struct STORE_OFFSET_I32
     : Sequence<STORE_OFFSET_I32,
                I<OPCODE_STORE_OFFSET, VoidOp, I64Op, I64Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    auto addr_reg = ComputeMemoryAddressOffset(e, i.src1, i.src2);
-    if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src3.is_constant);
-      assert_always("not implemented");
-    } else {
-      if (i.src3.is_constant) {
-        e.MOV(W0, i.src3.constant());
-        e.STR(W0, addr_reg);
+    const uint32_t watch_addr = cvars::a64_watch_store_address;
+    if (watch_addr) {
+      oaknut::Label skip_watch;
+      if (i.src1.is_constant) {
+        e.MOV(W0, uint32_t(i.src1.constant()));
       } else {
-        e.STR(i.src3, addr_reg);
+        e.MOV(W0, i.src1.reg().toW());
       }
+      if (i.src2.is_constant) {
+        e.MOV(W2, uint32_t(i.src2.constant()));
+        e.ADD(W0, W0, W2);
+      } else {
+        e.ADD(W0, W0, i.src2.reg().toW());
+      }
+      e.MOV(W1, watch_addr);
+      e.CMP(W0, W1);
+      e.B(Cond::NE, skip_watch);
+      e.MOV(e.GetNativeParam(0).toW(), W0);
+      if (i.src3.is_constant) {
+        e.MOV(e.GetNativeParam(1).toW(), uint32_t(i.src3.constant()));
+      } else {
+        e.MOV(e.GetNativeParam(1).toW(), i.src3);
+      }
+      e.MOV(e.GetNativeParam(2).toW(), i.instr->GuestAddressFor());
+      e.CallNativeSafe(reinterpret_cast<void*>(LogStoreWatch32));
+      e.l(skip_watch);
+    }
+
+    if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
+      void* addrptr = (void*)&MMIOAwareStore<uint32_t, true>;
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1).toW();
+      const auto offset_reg = W3;
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(offset_reg, uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(offset_reg, i.src2.reg().toW());
+      }
+      e.ADD(guest_addr_reg, guest_addr_reg, offset_reg);
+      if (i.src3.is_constant) {
+        e.MOV(value_reg, uint32_t(i.src3.constant()));
+      } else {
+        e.MOV(value_reg, i.src3);
+      }
+      e.CallNativeSafe(addrptr);
+      return;
+    }
+    if (IsPossibleMMIOInstruction(e, i.instr)) {
+      void* addrptr = (void*)&MMIOAwareStore<uint32_t, false>;
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1).toW();
+      const auto offset_reg = W3;
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(offset_reg, uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(offset_reg, i.src2.reg().toW());
+      }
+      e.ADD(guest_addr_reg, guest_addr_reg, offset_reg);
+      if (i.src3.is_constant) {
+        e.MOV(value_reg, uint32_t(i.src3.constant()));
+      } else {
+        e.MOV(value_reg, i.src3);
+      }
+      e.CallNativeSafe(addrptr);
+      return;
+    }
+    auto addr_reg = ComputeMemoryAddressOffset(e, i.src1, i.src2);
+    if (i.src3.is_constant) {
+      e.MOV(W0, i.src3.constant());
+      e.STR(W0, addr_reg);
+    } else {
+      e.STR(i.src3, addr_reg);
     }
   }
 };
@@ -991,11 +1455,63 @@ struct STORE_OFFSET_I64
     : Sequence<STORE_OFFSET_I64,
                I<OPCODE_STORE_OFFSET, VoidOp, I64Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    auto addr_reg = ComputeMemoryAddressOffset(e, i.src1, i.src2);
+    const uint32_t watch_addr = cvars::a64_watch_store_address;
+    if (watch_addr) {
+      oaknut::Label skip_watch;
+      oaknut::Label do_watch;
+      if (i.src1.is_constant) {
+        e.MOV(W0, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(W0, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(W2, uint32_t(i.src2.constant()));
+        e.ADD(W0, W0, W2);
+      } else {
+        e.ADD(W0, W0, i.src2.reg().toW());
+      }
+      e.MOV(W1, watch_addr);
+      e.CMP(W0, W1);
+      e.B(Cond::EQ, do_watch);
+      e.ADD(W2, W0, 4);
+      e.CMP(W2, W1);
+      e.B(Cond::NE, skip_watch);
+      e.l(do_watch);
+      e.MOV(e.GetNativeParam(0).toW(), W0);
+      if (i.src3.is_constant) {
+        e.MOV(e.GetNativeParam(1).toX(), i.src3.constant());
+      } else {
+        e.MOV(e.GetNativeParam(1).toX(), i.src3);
+      }
+      e.MOV(e.GetNativeParam(2).toW(), i.instr->GuestAddressFor());
+      e.CallNativeSafe(reinterpret_cast<void*>(LogStoreWatch64));
+      e.l(skip_watch);
+    }
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src3.is_constant);
-      assert_always("not implemented");
+      void* addrptr = (void*)&MMIOAwareStore<uint64_t, true>;
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1).toX();
+      const auto offset_reg = W3;
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(offset_reg, uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(offset_reg, i.src2.reg().toW());
+      }
+      e.ADD(guest_addr_reg, guest_addr_reg, offset_reg);
+      if (i.src3.is_constant) {
+        e.MOV(value_reg, i.src3.constant());
+      } else {
+        e.MOV(value_reg, i.src3);
+      }
+      e.CallNativeSafe(addrptr);
+      return;
     } else {
+      auto addr_reg = ComputeMemoryAddressOffset(e, i.src1, i.src2);
       if (i.src3.is_constant) {
         e.MovMem64(addr_reg, 0, i.src3.constant());
       } else {
@@ -1039,6 +1555,24 @@ struct LOAD_I16 : Sequence<LOAD_I16, I<OPCODE_LOAD, I16Op, I64Op>> {
 };
 struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const bool force_mmio_byteswap =
+        cvars::a64_force_mmio_aware_byteswap_loads &&
+        (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP);
+    if (force_mmio_byteswap || IsPossibleMMIOInstruction(e, i.instr)) {
+      void* addrptr = (void*)&MMIOAwareLoad<uint32_t, false>;
+      if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
+        addrptr = (void*)&MMIOAwareLoad<uint32_t, true>;
+      }
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      e.CallNativeSafe(addrptr);
+      e.MOV(i.dest, W0);
+      return;
+    }
     auto addr_reg = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       e.LDR(i.dest, addr_reg);
@@ -1140,11 +1674,24 @@ struct STORE_I8 : Sequence<STORE_I8, I<OPCODE_STORE, VoidOp, I64Op, I8Op>> {
 };
 struct STORE_I16 : Sequence<STORE_I16, I<OPCODE_STORE, VoidOp, I64Op, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    auto addr_reg = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src2.is_constant);
-      assert_always("not implemented");
+      void* addrptr = (void*)&MMIOAwareStore<uint16_t, true>;
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1).toW();
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(value_reg, uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(value_reg, i.src2.reg().toW());
+      }
+      e.CallNativeSafe(addrptr);
+      return;
     } else {
+      auto addr_reg = ComputeMemoryAddress(e, i.src1);
       if (i.src2.is_constant) {
         e.MOV(W0, i.src2.constant());
         e.STRH(W0, addr_reg);
@@ -1153,26 +1700,77 @@ struct STORE_I16 : Sequence<STORE_I16, I<OPCODE_STORE, VoidOp, I64Op, I16Op>> {
       }
     }
     if (IsTracingData()) {
-      addr_reg = ComputeMemoryAddress(e, i.src1);
-      e.LDRH(e.GetNativeParam(1).toW(), addr_reg);
-      e.MOV(e.GetNativeParam(0), addr_reg);
+      auto trace_addr_reg = ComputeMemoryAddress(e, i.src1);
+      e.LDRH(e.GetNativeParam(1).toW(), trace_addr_reg);
+      e.MOV(e.GetNativeParam(0), trace_addr_reg);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI16));
     }
   }
 };
 struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    auto addr_reg = ComputeMemoryAddress(e, i.src1);
-    if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src2.is_constant);
-      assert_always("not implemented");
-    } else {
-      if (i.src2.is_constant) {
-        e.MOV(W0, i.src2.constant());
-        e.STR(W0, addr_reg);
+    const uint32_t watch_addr = cvars::a64_watch_store_address;
+    if (watch_addr) {
+      oaknut::Label skip_watch;
+      if (i.src1.is_constant) {
+        e.MOV(W0, uint32_t(i.src1.constant()));
       } else {
-        e.STR(i.src2.reg(), addr_reg);
+        e.MOV(W0, i.src1.reg().toW());
       }
+      e.MOV(W1, watch_addr);
+      e.CMP(W0, W1);
+      e.B(Cond::NE, skip_watch);
+      e.MOV(e.GetNativeParam(0).toW(), W0);
+      if (i.src2.is_constant) {
+        e.MOV(e.GetNativeParam(1).toW(), uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(e.GetNativeParam(1).toW(), i.src2);
+      }
+      e.MOV(e.GetNativeParam(2).toW(), i.instr->GuestAddressFor());
+      e.CallNativeSafe(reinterpret_cast<void*>(LogStoreWatch32));
+      e.l(skip_watch);
+    }
+
+    if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
+      void* addrptr = (void*)&MMIOAwareStore<uint32_t, true>;
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1).toW();
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(value_reg, uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(value_reg, i.src2.reg());
+      }
+      e.CallNativeSafe(addrptr);
+      return;
+    }
+    if (IsPossibleMMIOInstruction(e, i.instr)) {
+      void* addrptr = (void*)&MMIOAwareStore<uint32_t, false>;
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1).toW();
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(value_reg, uint32_t(i.src2.constant()));
+      } else {
+        e.MOV(value_reg, i.src2.reg());
+      }
+      e.CallNativeSafe(addrptr);
+      return;
+    }
+    auto addr_reg = ComputeMemoryAddress(e, i.src1);
+    if (i.src2.is_constant) {
+      e.MOV(W0, i.src2.constant());
+      e.STR(W0, addr_reg);
+    } else {
+      e.STR(i.src2.reg(), addr_reg);
     }
     if (IsTracingData()) {
       addr_reg = ComputeMemoryAddress(e, i.src1);
@@ -1184,11 +1782,50 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
 };
 struct STORE_I64 : Sequence<STORE_I64, I<OPCODE_STORE, VoidOp, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    auto addr_reg = ComputeMemoryAddress(e, i.src1);
+    const uint32_t watch_addr = cvars::a64_watch_store_address;
+    if (watch_addr) {
+      oaknut::Label skip_watch;
+      oaknut::Label do_watch;
+      if (i.src1.is_constant) {
+        e.MOV(W0, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(W0, i.src1.reg().toW());
+      }
+      e.MOV(W1, watch_addr);
+      e.CMP(W0, W1);
+      e.B(Cond::EQ, do_watch);
+      e.ADD(W2, W0, 4);
+      e.CMP(W2, W1);
+      e.B(Cond::NE, skip_watch);
+      e.l(do_watch);
+      e.MOV(e.GetNativeParam(0).toW(), W0);
+      if (i.src2.is_constant) {
+        e.MOV(e.GetNativeParam(1).toX(), i.src2.constant());
+      } else {
+        e.MOV(e.GetNativeParam(1).toX(), i.src2);
+      }
+      e.MOV(e.GetNativeParam(2).toW(), i.instr->GuestAddressFor());
+      e.CallNativeSafe(reinterpret_cast<void*>(LogStoreWatch64));
+      e.l(skip_watch);
+    }
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src2.is_constant);
-      assert_always("not implemented");
+      void* addrptr = (void*)&MMIOAwareStore<uint64_t, true>;
+      const auto guest_addr_reg = e.GetNativeParam(0).toW();
+      const auto value_reg = e.GetNativeParam(1).toX();
+      if (i.src1.is_constant) {
+        e.MOV(guest_addr_reg, uint32_t(i.src1.constant()));
+      } else {
+        e.MOV(guest_addr_reg, i.src1.reg().toW());
+      }
+      if (i.src2.is_constant) {
+        e.MOV(value_reg, i.src2.constant());
+      } else {
+        e.MOV(value_reg, i.src2.reg());
+      }
+      e.CallNativeSafe(addrptr);
+      return;
     } else {
+      auto addr_reg = ComputeMemoryAddress(e, i.src1);
       if (i.src2.is_constant) {
         e.MovMem64(addr_reg, 0, i.src2.constant());
       } else {
@@ -1196,9 +1833,9 @@ struct STORE_I64 : Sequence<STORE_I64, I<OPCODE_STORE, VoidOp, I64Op, I64Op>> {
       }
     }
     if (IsTracingData()) {
-      addr_reg = ComputeMemoryAddress(e, i.src1);
-      e.LDR(e.GetNativeParam(1), addr_reg);
-      e.MOV(e.GetNativeParam(0), addr_reg);
+      auto trace_addr_reg = ComputeMemoryAddress(e, i.src1);
+      e.LDR(e.GetNativeParam(1), trace_addr_reg);
+      e.MOV(e.GetNativeParam(0), trace_addr_reg);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI64));
     }
   }
