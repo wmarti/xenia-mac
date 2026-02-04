@@ -59,6 +59,7 @@ struct XexInfoCache {
         for every 4-byte aligned address, records a 4 byte set of flags.
   */
   std::unique_ptr<MappedMemory> executable_addr_flags_;
+  std::string path_;
 
   void Init(class XexModule*);
   InfoCacheFlagsHeader* GetHeader() {
@@ -231,6 +232,10 @@ class XexModule : public xe::cpu::Module {
   }
 
   InfoCacheFlags* GetInstructionAddressFlags(uint32_t guest_addr);
+  void FlushInfoCache();
+  const std::string& infocache_path() const { return info_cache_.path_; }
+  uint32_t low_address() const { return low_address_; }
+  uint32_t high_address() const { return high_address_; }
 
   virtual void Precompile() override;
 

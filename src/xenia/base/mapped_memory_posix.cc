@@ -134,6 +134,7 @@ class PosixMappedMemory : public MappedMemory {
   }
 
   void Flush() override { msync(data(), size(), MS_ASYNC); }
+  void FlushSync() override { msync(data(), size(), MS_SYNC); }
 
  private:
   int file_descriptor_;

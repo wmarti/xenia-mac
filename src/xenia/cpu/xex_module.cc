@@ -11,6 +11,10 @@
 
 #include "third_party/fmt/include/fmt/format.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstring>
+
 #include "xenia/base/byte_order.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -47,6 +51,10 @@ DEFINE_bool(
     "we've recognized as being functions via simple heuristics, good for error "
     "finding/stress testing with the JIT",
     "CPU");
+
+DEFINE_bool(xex_log_import_library_names, false,
+            "Logs raw import library string table entries when loading XEX",
+            "CPU");
 
 DECLARE_bool(allow_plugins);
 
@@ -89,6 +97,51 @@ XexModule::XexModule(Processor* processor, KernelState* kernel_state)
     : Module(processor), processor_(processor), kernel_state_(kernel_state) {}
 
 XexModule::~XexModule() {}
+
+namespace {
+size_t BoundedCStringLength(const char* str, size_t max_len) {
+  const void* nul = std::memchr(str, 0, max_len);
+  return nul ? static_cast<size_t>(static_cast<const char*>(nul) - str)
+             : max_len;
+}
+
+std::string HexDump(const uint8_t* data, size_t size) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  std::string out;
+  out.reserve(size * 3);
+  for (size_t i = 0; i < size; ++i) {
+    if (i) {
+      out.push_back(' ');
+    }
+    uint8_t v = data[i];
+    out.push_back(kHex[v >> 4]);
+    out.push_back(kHex[v & 0xF]);
+  }
+  return out;
+}
+
+std::string SanitizeBytes(const char* data, size_t size) {
+  std::string out;
+  out.reserve(size);
+  for (size_t i = 0; i < size; ++i) {
+    unsigned char c = static_cast<unsigned char>(data[i]);
+    out.push_back((c >= 32 && c < 127) ? static_cast<char>(c) : '.');
+  }
+  return out;
+}
+
+inline bool IsValidImportLibraryName(const std::string_view name) {
+  if (name.empty()) {
+    return false;
+  }
+  for (unsigned char c : name) {
+    if (c < 32 || c >= 127) {
+      return false;
+    }
+  }
+  return true;
+}
+}  // namespace
 
 bool XexModule::GetOptHeader(const xex2_header* header, xex2_header_keys key,
                              void** out_ptr) {
@@ -1005,19 +1058,53 @@ bool XexModule::LoadContinue() {
     const char* string_table[32];
     std::memset(string_table, 0, sizeof(string_table));
 
-    // Parse the string table
-    for (size_t i = 0, o = 0; i < opt_import_libraries->string_table.size &&
-                              o < opt_import_libraries->string_table.count;
+    const uint32_t import_libraries_size = opt_import_libraries->size;
+    const size_t string_table_size = opt_import_libraries->string_table.size;
+    if (string_table_size + 12 > import_libraries_size) {
+      XELOGE("Import library string table size {:08X} invalid (total {:08X})",
+             static_cast<uint32_t>(string_table_size), import_libraries_size);
+      return false;
+    }
+
+    uint32_t string_table_count = opt_import_libraries->string_table.count;
+    if (string_table_count > xe::countof(string_table)) {
+      XELOGW("Import library string table count {} too large; clamping",
+             string_table_count);
+      string_table_count = static_cast<uint32_t>(xe::countof(string_table));
+    }
+
+    // Parse the string table (bounded to table size).
+    for (size_t i = 0, o = 0; i < string_table_size && o < string_table_count;
          ++o) {
-      assert_true(o < xe::countof(string_table));
       const char* str = &opt_import_libraries->string_table.data[i];
+      const size_t remaining = string_table_size - i;
+      const size_t raw_len = BoundedCStringLength(str, remaining);
+      if (cvars::xex_log_import_library_names) {
+        const size_t dump_len = std::min<size_t>(raw_len, 32);
+        const auto bytes =
+            HexDump(reinterpret_cast<const uint8_t*>(str), dump_len);
+        const auto ascii = SanitizeBytes(str, dump_len);
+        XELOGI(
+            "Import library string[{}] off=0x{:X} len={} bytes=[{}] text='{}'",
+            static_cast<uint32_t>(o), static_cast<uint32_t>(i),
+            static_cast<uint32_t>(raw_len), bytes, ascii);
+      }
+
+      if (raw_len == remaining) {
+        XELOGW("Import library string table entry {} is unterminated", o);
+        break;
+      }
 
       string_table[o] = str;
-      i += std::strlen(str) + 1;
+      i += raw_len + 1;
 
       // Padding
       if ((i % 4) != 0) {
-        i += 4 - (i % 4);
+        size_t pad = 4 - (i % 4);
+        if (i + pad > string_table_size) {
+          break;
+        }
+        i += pad;
       }
     }
 
@@ -1029,11 +1116,48 @@ bool XexModule::LoadContinue() {
       if (!library->size) {
         break;
       }
-      size_t library_name_index = library->name_index & 0xFF;
-      assert_true(library_name_index <
-                  opt_import_libraries->string_table.count);
+      const uint32_t library_size = library->size;
+      constexpr size_t kImportLibraryHeaderSize =
+          offsetof(xex2_import_library, import_table);
+      if (library_size < kImportLibraryHeaderSize ||
+          library_offset + library_size > import_libraries_size) {
+        XELOGW("Import library size {:08X} invalid at offset {:08X}",
+               library_size, library_offset);
+        break;
+      }
+      const uint32_t import_count = library->count;
+      const size_t required_size =
+          kImportLibraryHeaderSize + import_count * sizeof(uint32_t);
+      if (library_size < required_size) {
+        XELOGW("Import library size {:08X} too small for {} imports",
+               library_size, import_count);
+        break;
+      }
+      uint16_t library_name_index = library->name_index;
+      if (library_name_index >= string_table_count) {
+        uint16_t masked_index = library_name_index & 0xFF;
+        if (masked_index < string_table_count) {
+          XELOGW(
+              "Import library name_index {:04X} out of range (count {}), "
+              "using {:02X}",
+              library_name_index, string_table_count, masked_index);
+          library_name_index = masked_index;
+        } else {
+          XELOGE(
+              "Import library name_index {:04X} out of range (count {}), "
+              "skipping library",
+              library_name_index, string_table_count);
+          library_offset += library->size;
+          continue;
+        }
+      }
       assert_not_null(string_table[library_name_index]);
       auto library_name = std::string(string_table[library_name_index]);
+      if (!IsValidImportLibraryName(library_name)) {
+        XELOGW("Import library name invalid; skipping library");
+        library_offset += library_size;
+        continue;
+      }
 
       if (!kernel_state_->IsModuleLoaded(library_name)) {
         if (auto module = kernel_state_->LoadUserModule(library_name)) {
@@ -1044,7 +1168,7 @@ bool XexModule::LoadContinue() {
       }
 
       SetupLibraryImports(library_name, library);
-      library_offset += library->size;
+      library_offset += library_size;
     }
   }
 
@@ -1136,6 +1260,12 @@ bool XexModule::Unload() {
 
 bool XexModule::SetupLibraryImports(const std::string_view name,
                                     const xex2_import_library* library) {
+  if (cvars::xex_log_import_library_names) {
+    const auto bytes =
+        HexDump(reinterpret_cast<const uint8_t*>(name.data()), name.size());
+    XELOGI("Import library using name='{}' len={} bytes=[{}]", name,
+           static_cast<uint32_t>(name.size()), bytes);
+  }
   ExportResolver* kernel_resolver = nullptr;
   if (kernel_state_->IsKernelModule(name)) {
     kernel_resolver = processor_->export_resolver();
@@ -1336,6 +1466,7 @@ void XexInfoCache::Init(XexModule* xexmod) {
 
   std::filesystem::create_directories(infocache_path);
   infocache_path.append("executable_addr_flags.bin");
+  path_ = infocache_path.string();
 
   unsigned num_codebytes = xexmod->high_address_ - xexmod->low_address_;
   num_codebytes += 3;  // round up to nearest multiple of 4
@@ -1394,6 +1525,11 @@ InfoCacheFlags* XexModule::GetInstructionAddressFlags(uint32_t guest_addr) {
   guest_addr -= low_address_;
 
   return info_cache_.LookupFlags(guest_addr);
+}
+void XexModule::FlushInfoCache() {
+  if (info_cache_.executable_addr_flags_) {
+    info_cache_.executable_addr_flags_->FlushSync();
+  }
 }
 void XexModule::PrecompileDiscoveredFunctions() {
   if (!cvars::enable_early_precompilation) {

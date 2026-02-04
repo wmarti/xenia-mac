@@ -66,6 +66,7 @@ class Win32MappedMemory : public MappedMemory {
   }
 
   void Flush() override { FlushViewOfFile(data(), size()); }
+  void FlushSync() override { FlushViewOfFile(data(), size()); }
   bool Remap(size_t offset, size_t length) override {
     size_t aligned_offset = offset & ~(memory::allocation_granularity() - 1);
     size_t aligned_length = length + (offset - aligned_offset);
