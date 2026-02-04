@@ -54,6 +54,10 @@ project("xenia-cpu-ppc-tests")
     links({
       "xenia-cpu-backend-x64",
     })
+  filter("architecture:ARM64")
+    links({
+      "xenia-cpu-backend-a64",
+    })
   filter("platforms:Windows-*")
     debugdir(project_root)
     debugargs({

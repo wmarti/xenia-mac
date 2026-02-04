@@ -242,9 +242,10 @@ bool xe_fast_mutex::try_lock() {
 }
 
 #endif
-global_mutex_type& global_critical_region::mutex() {
-  static global_mutex_type global_mutex;
-  return global_mutex;
-}
+// chrispy: moved this out of body of function to eliminate the initialization
+// guards. Heap-allocated and intentionally leaked to avoid static destruction
+// order issues on macOS/POSIX where threads may outlive static destructors.
+static global_mutex_type* global_mutex = new global_mutex_type();
+global_mutex_type& global_critical_region::mutex() { return *global_mutex; }
 
 }  // namespace xe
