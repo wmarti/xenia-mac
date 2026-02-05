@@ -36,3 +36,17 @@ test_suite("xenia-cpu-tests", project_root, ".", {
 
 -- xenia-kernel links to xenia-apu, which needs SDL on Linux
 apu_transitive_deps()
+
+-- macOS requires additional frameworks for Metal/UI
+filter("system:macosx")
+  links({
+    "QuartzCore.framework",
+    "Metal.framework",
+    "Foundation.framework",
+    "AppKit.framework",
+  })
+filter({"system:macosx", "architecture:x86_64"})
+  linkoptions({
+    "-Wl,-pagezero_size,0x1000",
+  })
+filter({})

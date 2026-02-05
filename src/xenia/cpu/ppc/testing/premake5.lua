@@ -64,7 +64,17 @@ project("xenia-cpu-ppc-tests")
       "2>&1",
       "1>scratch/stdout-testing.txt",
     })
-
+  filter("system:macosx")
+    links({
+      "QuartzCore.framework",
+      "Metal.framework",
+      "Foundation.framework",
+      "AppKit.framework",
+    })
+  filter({"system:macosx", "architecture:x86_64"})
+    linkoptions({
+      "-Wl,-pagezero_size,0x1000",
+    })
   filter({})
 
 if ARCH == "ppc64" or ARCH == "powerpc64" then
