@@ -469,6 +469,9 @@ filter({"platforms:Mac-x86_64", "toolset:clang"})
   buildoptions({
     "-mavx",
   })
+  linkoptions({
+    "-Wl,-pagezero_size,0x1000",
+  })
 filter({})
 
 if is_ios_target() then

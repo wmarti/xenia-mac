@@ -207,6 +207,7 @@ project("xenia-app")
   filter({"system:macosx", "architecture:x86_64"})
     libdirs({ dxilconv_libdir_x86_64 })
     linkoptions({
+      "-Wl,-pagezero_size,0x1000",
       path.getabsolute(path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")),
     })
   filter({})
