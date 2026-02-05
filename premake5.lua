@@ -412,12 +412,22 @@ if os.istarget("macosx") and not is_ios_target() then
       end
     end
     if not qt_dir then
-      local candidates = {
-        "/opt/homebrew/opt/qt",
-        "/opt/homebrew/opt/qt@6",
-        "/usr/local/opt/qt",
-        "/usr/local/opt/qt@6",
-      }
+      local candidates = nil
+      if _OPTIONS["mac-x86_64"] then
+        candidates = {
+          "/usr/local/opt/qt",
+          "/usr/local/opt/qt@6",
+          "/opt/homebrew/opt/qt",
+          "/opt/homebrew/opt/qt@6",
+        }
+      else
+        candidates = {
+          "/opt/homebrew/opt/qt",
+          "/opt/homebrew/opt/qt@6",
+          "/usr/local/opt/qt",
+          "/usr/local/opt/qt@6",
+        }
+      end
       for _, candidate in ipairs(candidates) do
         if os.isdir(candidate) then
           qt_dir = candidate
