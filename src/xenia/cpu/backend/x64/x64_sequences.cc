@@ -3200,7 +3200,7 @@ struct CNTLZ_I32 : Sequence<CNTLZ_I32, I<OPCODE_CNTLZ, I8Op, I32Op>> {
 
 #if XE_PLATFORM_MAC
       e.xor_(e.eax, 0x1F);
-      e.mov(i.dest, e.eax);
+      e.mov(i.dest, e.al);
 #else
       e.xor_(e.rax, 0x1F);
       e.mov(i.dest, e.rax);
