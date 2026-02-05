@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #if XE_PLATFORM_MAC
+#include <mach/mach.h>
 #include <sys/mman.h>
 #endif
 #include "third_party/capstone/include/capstone/capstone.h"
@@ -129,20 +130,22 @@ X64Backend::X64Backend() : Backend(), code_cache_(nullptr) {
     }
   }
   if (!buf_trampoline_code) {
-#if XE_PLATFORM_MAC && defined(MAP_32BIT)
+#if XE_PLATFORM_MAC && XE_ARCH_AMD64
     XELOGW(
-        "Failed to allocate fixed guest trampoline range, trying MAP_32BIT.");
-    size_t trampoline_size =
+        "Failed to allocate fixed guest trampoline range, trying VM_FLAGS_32BIT.");
+    mach_vm_address_t addr = 0;
+    mach_vm_size_t trampoline_size =
         sizeof(guest_trampoline_template) * MAX_GUEST_TRAMPOLINES;
-    int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
-    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-#ifdef MAP_JIT
-    flags |= MAP_JIT;
-#endif
-    void* map32 =
-        mmap(nullptr, trampoline_size, prot, flags | MAP_32BIT, -1, 0);
-    if (map32 != MAP_FAILED) {
-      buf_trampoline_code = map32;
+    kern_return_t kr =
+        mach_vm_allocate(mach_task_self(), &addr, trampoline_size,
+                         VM_FLAGS_ANYWHERE | VM_FLAGS_32BIT);
+    if (kr == KERN_SUCCESS) {
+      if (mprotect(reinterpret_cast<void*>(addr), trampoline_size,
+                   PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+        buf_trampoline_code = reinterpret_cast<void*>(addr);
+      } else {
+        mach_vm_deallocate(mach_task_self(), addr, trampoline_size);
+      }
     }
 #else
     XELOGW("Failed to allocate fixed guest trampoline range.");
