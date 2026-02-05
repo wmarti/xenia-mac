@@ -39,7 +39,7 @@ static inline void xe_store_u32(device uint* buffer, uint byte_offset,
   buffer[byte_offset >> 2] = value;
 }
 
-kernel void resolve_downscale(
+kernel void entry_xe(
     constant XeResolveDownscaleConstants& constants [[buffer(0)]],
     const device uint* xe_resolve_source [[buffer(1)]],
     device uint* xe_resolve_dest [[buffer(2)]],
@@ -134,4 +134,3 @@ kernel void resolve_downscale(
     }
   }
 }
-
