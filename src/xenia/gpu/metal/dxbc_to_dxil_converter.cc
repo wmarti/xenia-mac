@@ -36,7 +36,6 @@ const CLSID kClsidDxbcConverter = {
     0xb752,
     0x4edd,
     {0xa8, 0x85, 0x6f, 0xb7, 0x6e, 0x25, 0xad, 0xdb}};
-
 std::wstring WidenAscii(const std::string& value) {
   std::wstring out;
   out.reserve(value.size());
