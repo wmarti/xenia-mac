@@ -6,6 +6,9 @@
 * Released under the BSD license - see LICENSE in the root for more details. *
 ******************************************************************************
 */
+#include "xenia/base/platform.h"
+
+#if !XE_PLATFORM_MAC
 #include <xbyak/xbyak/xbyak_util.h>
 #include <cstdio>
 #include <cstdlib>
@@ -34,3 +37,4 @@ class StartupCpuFeatureCheck {
 // https://reviews.llvm.org/D12689#243295
 __attribute__((
     init_priority(101))) static StartupCpuFeatureCheck gStartupAvxCheck;
+#endif  // !XE_PLATFORM_MAC

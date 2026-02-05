@@ -92,11 +92,19 @@ X64Emitter::X64Emitter(X64Backend* backend, XbyakAllocator* allocator)
       backend_(backend),
       code_cache_(backend->code_cache()),
       allocator_(allocator) {
+#if XE_PLATFORM_MAC
+  if (!cpu_.has(Xbyak::util::Cpu::tAVX)) {
+    XELOGW(
+        "This CPU does not support AVX. Continuing anyway (performance and "
+        "compatibility may be reduced).");
+  }
+#else
   if (!cpu_.has(Xbyak::util::Cpu::tAVX)) {
     XELOGW(
         "Your CPU does not support AVX, which is required by Xenia. See the "
         "FAQ for system requirements at https://xenia.jp");
   }
+#endif
 
   feature_flags_ = amd64::GetFeatureFlags();
 
