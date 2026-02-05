@@ -79,7 +79,26 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
 
   thread_context.fpsr = mcontext->__ns.__fpsr;
   thread_context.fpcr = mcontext->__ns.__fpcr;
-#endif  // XE_ARCH_ARM64
+#elif XE_ARCH_AMD64
+  thread_context.rip = mcontext->__ss.__rip;
+  thread_context.eflags = static_cast<uint32_t>(mcontext->__ss.__rflags);
+  thread_context.rax = mcontext->__ss.__rax;
+  thread_context.rcx = mcontext->__ss.__rcx;
+  thread_context.rdx = mcontext->__ss.__rdx;
+  thread_context.rbx = mcontext->__ss.__rbx;
+  thread_context.rsp = mcontext->__ss.__rsp;
+  thread_context.rbp = mcontext->__ss.__rbp;
+  thread_context.rsi = mcontext->__ss.__rsi;
+  thread_context.rdi = mcontext->__ss.__rdi;
+  thread_context.r8 = mcontext->__ss.__r8;
+  thread_context.r9 = mcontext->__ss.__r9;
+  thread_context.r10 = mcontext->__ss.__r10;
+  thread_context.r11 = mcontext->__ss.__r11;
+  thread_context.r12 = mcontext->__ss.__r12;
+  thread_context.r13 = mcontext->__ss.__r13;
+  thread_context.r14 = mcontext->__ss.__r14;
+  thread_context.r15 = mcontext->__ss.__r15;
+#endif  // XE_ARCH
 
   Exception ex;
   switch (signal_number) {
@@ -102,7 +121,14 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                 ? Exception::AccessViolationOperation::kWrite
                 : Exception::AccessViolationOperation::kRead;
       }
-#endif  // XE_ARCH_ARM64
+#elif XE_ARCH_AMD64
+      // x86 page fault error code: bit 1 set indicates write.
+      constexpr uint64_t kX86PageFaultErrorCodeWrite = UINT64_C(1) << 1;
+      access_violation_operation =
+          (uint64_t(mcontext->__es.__err) & kX86PageFaultErrorCodeWrite)
+              ? Exception::AccessViolationOperation::kWrite
+              : Exception::AccessViolationOperation::kRead;
+#endif  // XE_ARCH
 
       ex.InitializeAccessViolation(
           &thread_context, reinterpret_cast<uint64_t>(signal_info->si_addr),
@@ -156,7 +182,29 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       }
       // Copy modified context back to the original signal context
       std::memcpy(signal_context, ucontext, sizeof(ucontext_t));
-#endif  // XE_ARCH_ARM64
+#elif XE_ARCH_AMD64
+      mcontext->__ss.__rip = thread_context.rip;
+      mcontext->__ss.__rflags = thread_context.eflags;
+      uint32_t modified_register_index;
+      uint16_t modified_int_registers_remaining = ex.modified_int_registers();
+      uint64_t* kIntRegisterMap[] = {
+          &mcontext->__ss.__rax, &mcontext->__ss.__rcx,
+          &mcontext->__ss.__rdx, &mcontext->__ss.__rbx,
+          &mcontext->__ss.__rsp, &mcontext->__ss.__rbp,
+          &mcontext->__ss.__rsi, &mcontext->__ss.__rdi,
+          &mcontext->__ss.__r8,  &mcontext->__ss.__r9,
+          &mcontext->__ss.__r10, &mcontext->__ss.__r11,
+          &mcontext->__ss.__r12, &mcontext->__ss.__r13,
+          &mcontext->__ss.__r14, &mcontext->__ss.__r15,
+      };
+      while (xe::bit_scan_forward(modified_int_registers_remaining,
+                                  &modified_register_index)) {
+        modified_int_registers_remaining &=
+            ~(UINT16_C(1) << modified_register_index);
+        *kIntRegisterMap[modified_register_index] =
+            thread_context.int_registers[modified_register_index];
+      }
+#endif  // XE_ARCH
       return;
     }
   }
