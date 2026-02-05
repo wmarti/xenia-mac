@@ -125,6 +125,15 @@ X64Backend::X64Backend() : Backend(), code_cache_(nullptr) {
       break;
     }
   }
+  if (!buf_trampoline_code) {
+    XELOGW(
+        "Failed to allocate fixed guest trampoline range, using dynamic "
+        "mapping.");
+    buf_trampoline_code = memory::AllocFixed(
+        nullptr, sizeof(guest_trampoline_template) * MAX_GUEST_TRAMPOLINES,
+        xe::memory::AllocationType::kReserveCommit,
+        xe::memory::PageAccess::kExecuteReadWrite);
+  }
   xenia_assert(buf_trampoline_code);
   guest_trampoline_memory_ = (uint8_t*)buf_trampoline_code;
   guest_trampoline_address_bitmap_.Resize(MAX_GUEST_TRAMPOLINES);
