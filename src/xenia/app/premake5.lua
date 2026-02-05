@@ -206,6 +206,9 @@ project("xenia-app")
     libdirs({ dxilconv_libdir_arm64 })
   filter({"system:macosx", "architecture:x86_64"})
     libdirs({ dxilconv_libdir_x86_64 })
+    linkoptions({
+      path.getabsolute(path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")),
+    })
   filter({})
 
   -- iOS app configuration (SPIRV-Cross path + SDL audio/input).

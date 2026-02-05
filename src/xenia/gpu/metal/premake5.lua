@@ -119,6 +119,7 @@ project("xenia-gpu-metal")
     runpathdirs { dxilconv_libdir_x86_64, sdl2_libdir_x86_64 }
     removelinks { "LLVMDxcSupport" }
     linkoptions {
+      path.getabsolute(path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")),
       path.getabsolute(path.join(dxilconv_libdir_x86_64,
                                  "libLLVMDxcSupport.a")),
     }
