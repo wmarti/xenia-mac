@@ -29,6 +29,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/backend/x64/x64_emitter.h"
 #include "xenia/cpu/backend/x64/x64_op.h"
@@ -3188,12 +3189,22 @@ struct CNTLZ_I32 : Sequence<CNTLZ_I32, I<OPCODE_CNTLZ, I8Op, I32Op>> {
       Xbyak::Label end;
       e.inLocalLabel();
 
+      // macOS: avoid 64-bit register size mismatch in Xbyak on some hosts.
+#if XE_PLATFORM_MAC
       e.bsr(e.eax, i.src1);  // ZF set if i.src1 is 0
+#else
+      e.bsr(e.rax, i.src1);  // ZF set if i.src1 is 0
+#endif
       e.mov(i.dest, 0x20);
       e.jz(end);
 
+#if XE_PLATFORM_MAC
       e.xor_(e.eax, 0x1F);
-      e.mov(i.dest, e.al);
+      e.mov(i.dest, e.eax);
+#else
+      e.xor_(e.rax, 0x1F);
+      e.mov(i.dest, e.rax);
+#endif
 
       e.L(end);
       e.outLocalLabel();
