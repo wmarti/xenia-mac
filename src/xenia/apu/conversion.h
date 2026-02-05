@@ -41,11 +41,21 @@ XE_NOINLINE
 static void _movbe_sequential_6_BE_to_interleaved_6_LE(
     float* XE_RESTRICT output, const float* XE_RESTRICT input,
     unsigned ch_sample_count) {
+  auto load_be_u32 = [](const void* ptr) -> uint32_t {
+#if XE_PLATFORM_MAC
+#if defined(__MOVBE__)
+    return static_cast<uint32_t>(_loadbe_i32(ptr));
+#else
+    return xe::byte_swap(*reinterpret_cast<const uint32_t*>(ptr));
+#endif
+#else
+    return _load_be_u32(reinterpret_cast<const unsigned int*>(ptr));
+#endif
+  };
   for (unsigned sample = 0; sample < ch_sample_count; sample++) {
     for (unsigned channel = 0; channel < 6; channel++) {
       *reinterpret_cast<unsigned int*>(&output[sample * 6 + channel]) =
-          _load_be_u32(reinterpret_cast<const unsigned int*>(
-              &input[channel * ch_sample_count + sample]));
+          load_be_u32(&input[channel * ch_sample_count + sample]);
     }
   }
 }
