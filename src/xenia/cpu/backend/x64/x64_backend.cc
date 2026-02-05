@@ -1643,7 +1643,7 @@ void X64HelperEmitter::EmitSaveVolatileRegs() {
   // mov(qword[rsp + offsetof(StackLayout::Thunk, r[0])], rax);
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[1])], rcx);
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[2])], rdx);
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[3])], rsi);
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[4])], rdi);
 #endif
@@ -1664,7 +1664,7 @@ void X64HelperEmitter::EmitLoadVolatileRegs() {
   // mov(rax, qword[rsp + offsetof(StackLayout::Thunk, r[0])]);
   mov(rcx, qword[rsp + offsetof(StackLayout::Thunk, r[1])]);
   mov(rdx, qword[rsp + offsetof(StackLayout::Thunk, r[2])]);
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   mov(rsi, qword[rsp + offsetof(StackLayout::Thunk, r[3])]);
   mov(rdi, qword[rsp + offsetof(StackLayout::Thunk, r[4])]);
 #endif
