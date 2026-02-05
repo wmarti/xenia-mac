@@ -10,6 +10,9 @@
 #include "xenia/cpu/backend/x64/x64_backend.h"
 
 #include <cstddef>
+#if XE_PLATFORM_MAC
+#include <sys/mman.h>
+#endif
 #include "third_party/capstone/include/capstone/capstone.h"
 #include "third_party/capstone/include/capstone/x86.h"
 
@@ -126,13 +129,24 @@ X64Backend::X64Backend() : Backend(), code_cache_(nullptr) {
     }
   }
   if (!buf_trampoline_code) {
+#if XE_PLATFORM_MAC && defined(MAP_32BIT)
     XELOGW(
-        "Failed to allocate fixed guest trampoline range, using dynamic "
-        "mapping.");
-    buf_trampoline_code = memory::AllocFixed(
-        nullptr, sizeof(guest_trampoline_template) * MAX_GUEST_TRAMPOLINES,
-        xe::memory::AllocationType::kReserveCommit,
-        xe::memory::PageAccess::kExecuteReadWrite);
+        "Failed to allocate fixed guest trampoline range, trying MAP_32BIT.");
+    size_t trampoline_size =
+        sizeof(guest_trampoline_template) * MAX_GUEST_TRAMPOLINES;
+    int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_JIT
+    flags |= MAP_JIT;
+#endif
+    void* map32 =
+        mmap(nullptr, trampoline_size, prot, flags | MAP_32BIT, -1, 0);
+    if (map32 != MAP_FAILED) {
+      buf_trampoline_code = map32;
+    }
+#else
+    XELOGW("Failed to allocate fixed guest trampoline range.");
+#endif
   }
   xenia_assert(buf_trampoline_code);
   guest_trampoline_memory_ = (uint8_t*)buf_trampoline_code;
