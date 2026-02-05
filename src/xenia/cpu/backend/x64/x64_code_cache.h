@@ -58,6 +58,9 @@ class X64CodeCache : public CodeCache {
   // TODO(benvanik): padding/guards/etc
 
   bool has_indirection_table() { return indirection_table_base_ != nullptr; }
+  uintptr_t indirection_table_base_bias() const {
+    return indirection_table_base_bias_;
+  }
   void set_indirection_default(uint32_t default_value);
   void AddIndirection(uint32_t guest_address, uint32_t host_address);
 
@@ -128,6 +131,7 @@ class X64CodeCache : public CodeCache {
   // the generated code table that correspond to the PPC functions in guest
   // space.
   uint8_t* indirection_table_base_ = nullptr;
+  uintptr_t indirection_table_base_bias_ = 0;
   // Fixed at kGeneratedCodeExecuteBase and holding all generated code, growing
   // as needed.
   uint8_t* generated_code_execute_base_ = nullptr;
