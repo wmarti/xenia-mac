@@ -71,7 +71,11 @@ using namespace xe::cpu::hir;
 using xe::cpu::hir::Instr;
 
 typedef bool (*SequenceSelectFn)(X64Emitter&, const Instr*, InstrKeyValue ikey);
-std::unordered_map<uint32_t, SequenceSelectFn> sequence_table;
+std::unordered_map<uint32_t, SequenceSelectFn>& SequenceTable() {
+  static auto* table =
+      new std::unordered_map<uint32_t, SequenceSelectFn>();
+  return *table;
+}
 
 // ============================================================================
 // OPCODE_COMMENT
@@ -3305,8 +3309,9 @@ bool SelectSequence(X64Emitter* e, const Instr* i, const Instr** new_tail) {
   } else {
     const InstrKey key(i);
 
-    auto it = sequence_table.find(key);
-    if (it != sequence_table.end()) {
+    auto& table = SequenceTable();
+    auto it = table.find(key);
+    if (it != table.end()) {
       if (it->second(*e, i, InstrKey(i))) {
         *new_tail = i->next;
         return true;
