@@ -33,15 +33,10 @@ project("xenia-gpu")
 
   local_platform_files()
 
-  if os.istarget("macosx") then
-    removefiles({
-      "spirv_shader*.cc",
-      "spirv_shader*.h",
-    })
-    filter("files:**/spirv_shader*.cc")
-      flags({ "ExcludeFromBuild" })
-    filter({})
-  end
+  -- spirv_shader files are compiled on all platforms where the SPIR-V
+  -- shader translator is used: Linux/Windows/Android (Vulkan backend) and
+  -- macOS/iOS (Metal SPIRV-Cross backend). Vulkan-specific parts are guarded
+  -- with #if !XE_PLATFORM_APPLE in the source.
 
 if enableMiscSubprojects and not os.istarget("macosx") then
   group("src")

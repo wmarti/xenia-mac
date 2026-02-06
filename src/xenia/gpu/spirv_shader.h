@@ -14,11 +14,12 @@
 #include <vector>
 
 #include "xenia/gpu/shader.h"
-#include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/xenos.h"
 
 namespace xe {
 namespace gpu {
+
+class SpirvShaderTranslator;
 
 class SpirvShader : public Shader {
  public:
