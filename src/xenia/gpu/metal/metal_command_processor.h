@@ -23,21 +23,23 @@
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/draw_util.h"
-#include "xenia/gpu/dxbc_shader_translator.h"
-#include "xenia/gpu/spirv_shader_translator.h"
-#include "xenia/gpu/metal/dxbc_to_dxil_converter.h"
-#include "xenia/gpu/metal/metal_geometry_shader.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
-#include "xenia/gpu/metal/metal_shader.h"
-#include "xenia/gpu/metal/metal_shader_converter.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/msl_shader.h"
+#include "xenia/gpu/spirv_shader_translator.h"
+#if METAL_SHADER_CONVERTER_AVAILABLE
+#include "xenia/gpu/dxbc_shader_translator.h"
+#include "xenia/gpu/metal/dxbc_to_dxil_converter.h"
+#include "xenia/gpu/metal/metal_geometry_shader.h"
+#include "xenia/gpu/metal/metal_shader.h"
+#include "xenia/gpu/metal/metal_shader_converter.h"
 // clang-format off
 // Must come after metal_texture_cache.h which includes Metal.hpp
 #include "third_party/metal-shader-converter/include/metal_irconverter_runtime.h"
 // clang-format on
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 #include "xenia/ui/metal/metal_api.h"
 #include "xenia/ui/metal/metal_provider.h"
 
@@ -135,9 +137,8 @@ class MetalCommandProcessor : public CommandProcessor {
   bool IssueDrawMsl(
       Shader* vertex_shader, Shader* pixel_shader,
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
-      bool primitive_polygonal, bool is_rasterization_done,
-      bool memexport_used, uint32_t normalized_color_mask,
-      const RegisterFile& regs);
+      bool primitive_polygonal, bool is_rasterization_done, bool memexport_used,
+      uint32_t normalized_color_mask, const RegisterFile& regs);
   bool IssueCopy() override;
   void WriteRegister(uint32_t index, uint32_t value) override;
 
@@ -145,6 +146,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // Initialize shader translation pipeline
   bool InitializeShaderTranslation();
 
+#if METAL_SHADER_CONVERTER_AVAILABLE
   // Request shared-memory ranges needed for the current draw, mirroring
   // D3D12/Vulkan behavior (vertex buffers, memexport streams).
   bool RequestSharedMemoryRangesForCurrentDraw(MetalShader* vertex_shader,
@@ -152,6 +154,7 @@ class MetalCommandProcessor : public CommandProcessor {
                                                bool memexport_used_vertex,
                                                bool memexport_used_pixel,
                                                bool* any_data_resolved_out);
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   // Command buffer management
   void BeginCommandBuffer();
@@ -161,7 +164,8 @@ class MetalCommandProcessor : public CommandProcessor {
   void UseRenderEncoderAttachmentHeaps(MTL::RenderPassDescriptor* descriptor);
   void UseRenderEncoderHeap(MTL::Heap* heap);
 
-  // Pipeline state management
+#if METAL_SHADER_CONVERTER_AVAILABLE
+  // Pipeline state management (MSC path)
   MTL::RenderPipelineState* GetOrCreatePipelineState(
       MetalShader::MetalTranslation* vertex_translation,
       MetalShader::MetalTranslation* pixel_translation,
@@ -233,12 +237,14 @@ class MetalCommandProcessor : public CommandProcessor {
       MetalShader::MetalTranslation* pixel_translation,
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
       const RegisterFile& regs);
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   // Fixed-function depth/stencil state (mirrors Vulkan/D3D12 dynamic state).
   void ApplyDepthStencilState(bool primitive_polygonal,
                               reg::RB_DEPTHCONTROL normalized_depth_control);
   void ApplyRasterizerState(bool primitive_polygonal);
 
+#if METAL_SHADER_CONVERTER_AVAILABLE
   bool EnsureDepthOnlyPixelShader();
 
   struct PipelineDiskCacheVertexAttribute {
@@ -284,32 +290,14 @@ class MetalCommandProcessor : public CommandProcessor {
       const std::vector<PipelineDiskCacheEntry>& entries);
 
   // Constants for descriptor heap sizes.
-  // MSC's IR runtime uses a D3D12-like "root signature" model. In D3D12, many
-  // root parameters are stage-visible, so VS and PS can both use registers like
-  // `t1` / `s0` without colliding because their descriptor tables are bound
-  // independently.
-  //
-  // To mirror that behavior on Metal, keep separate descriptor table slices for
-  // VS and PS (per draw), and ring-buffer them so CPU writes don't overwrite
-  // data still in flight on the GPU.
   static constexpr size_t kStageCount = 2;  // Vertex + pixel.
-
-  // Root signature descriptor counts in MetalShaderConverter are intentionally
-  // oversized (bindless-style). Allocate extra padding because MSC IR shaders
-  // may read one entry past the declared count.
   static constexpr size_t kResourceHeapSlotsPerTable = 1025 + 2;
   static constexpr size_t kSamplerHeapSlotsPerTable = 257 + 2;
-  static constexpr size_t kCbvHeapSlotsPerTable = 5 + 2;  // b0-b4 + padding.
+  static constexpr size_t kCbvHeapSlotsPerTable = 5 + 2;
   static constexpr size_t kNullBufferSize = 4096;
-
   static constexpr size_t kCbvSizeBytes = 4096;
   static constexpr size_t kUniformsBytesPerTable = 5 * kCbvSizeBytes;
-
-  // Top-level argument buffer ring buffer constants
-  // Each draw needs its own copy of the top-level pointers to avoid race
-  // conditions where later draws overwrite earlier draws' descriptor table
-  // pointers before the GPU executes them.
-  static constexpr size_t kTopLevelABSlotsPerTable = 32;  // 14 + padding.
+  static constexpr size_t kTopLevelABSlotsPerTable = 32;
   static constexpr size_t kTopLevelABBytesPerTable =
       kTopLevelABSlotsPerTable * sizeof(uint64_t);
 
@@ -340,6 +328,7 @@ class MetalCommandProcessor : public CommandProcessor {
   DxbcShaderTranslator::Modification GetCurrentPixelShaderModification(
       const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
       reg::RB_DEPTHCONTROL normalized_depth_control) const;
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   // SPIRV-Cross (MSL) path - shader modification and pipeline helpers.
   SpirvShaderTranslator::Modification GetCurrentSpirvVertexShaderModification(
@@ -352,14 +341,12 @@ class MetalCommandProcessor : public CommandProcessor {
   void UpdateSpirvSystemConstantValues(
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
       bool primitive_polygonal, uint32_t line_loop_closing_index,
-      xenos::Endian index_endian,
-      const draw_util::ViewportInfo& viewport_info, uint32_t used_texture_mask,
-      reg::RB_DEPTHCONTROL normalized_depth_control,
+      xenos::Endian index_endian, const draw_util::ViewportInfo& viewport_info,
+      uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
       uint32_t normalized_color_mask);
   MTL::RenderPipelineState* GetOrCreateMslPipelineState(
       MslShader::MslTranslation* vertex_translation,
-      MslShader::MslTranslation* pixel_translation,
-      const RegisterFile& regs);
+      MslShader::MslTranslation* pixel_translation, const RegisterFile& regs);
 
   // Metal device and command queue (from provider)
   MTL::Device* device_ = nullptr;
@@ -404,11 +391,13 @@ class MetalCommandProcessor : public CommandProcessor {
   MetalTextureCache* texture_cache() const { return texture_cache_.get(); }
 
  private:
-  // Shader translation components
+#if METAL_SHADER_CONVERTER_AVAILABLE
+  // MSC shader translation components
   std::unique_ptr<DxbcShaderTranslator> shader_translator_;
   std::unique_ptr<DxbcToDxilConverter> dxbc_to_dxil_converter_;
   std::unique_ptr<MetalShaderConverter> metal_shader_converter_;
   StringBuffer ucode_disasm_buffer_;
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   // SPIRV-Cross (MSL) path - shader translator and cache.
   std::unique_ptr<SpirvShaderTranslator> spirv_shader_translator_;
@@ -432,10 +421,11 @@ class MetalCommandProcessor : public CommandProcessor {
       const RegisterFile& regs);
   bool EnsureTessFactorBuffer(uint32_t patch_count);
 
-  // Shader cache (keyed by ucode hash)
+#if METAL_SHADER_CONVERTER_AVAILABLE
+  // MSC shader cache (keyed by ucode hash)
   std::unordered_map<uint64_t, std::unique_ptr<MetalShader>> shader_cache_;
 
-  // Pipeline cache (keyed by shader combination)
+  // MSC pipeline caches (keyed by shader combination)
   std::unordered_map<uint64_t, MTL::RenderPipelineState*> pipeline_cache_;
   std::unordered_map<uint64_t, GeometryPipelineState> geometry_pipeline_cache_;
   std::unordered_map<MetalShader::MetalTranslation*, GeometryVertexStageState>
@@ -451,6 +441,7 @@ class MetalCommandProcessor : public CommandProcessor {
       tessellation_domain_stage_cache_;
   std::unordered_map<uint64_t, TessellationPipelineState>
       tessellation_pipeline_cache_;
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   struct DepthStencilStateKey {
     uint32_t depth_control;
@@ -486,40 +477,42 @@ class MetalCommandProcessor : public CommandProcessor {
   // Render target cache for framebuffer management
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
 
-  // IR Converter runtime buffers for shader resource binding
-  MTL::Buffer* null_buffer_ = nullptr;  // Null buffer for unused descriptors
-  MTL::Texture* null_texture_ =
-      nullptr;  // Placeholder texture for unbound slots
-  MTL::SamplerState* null_sampler_ =
-      nullptr;                          // Default sampler for unbound slots
-  MTL::Buffer* res_heap_ab_ = nullptr;  // Resource descriptor heap (SRVs/UAVs)
-  MTL::Buffer* smp_heap_ab_ = nullptr;  // Sampler descriptor heap
-  MTL::Buffer* cbv_heap_ab_ = nullptr;  // CBV descriptor heap (b0-b3)
-  MTL::Buffer* uniforms_buffer_ = nullptr;  // Raw constant buffer data
-  MTL::Buffer* top_level_ab_ =
-      nullptr;  // Top-level argument buffer (bind point 2)
-  MTL::Buffer* draw_args_buffer_ =
-      nullptr;  // Draw arguments buffer (bind point 4)
+  // Null resources for unbound slots (shared between MSC and SPIRV-Cross)
+  MTL::Buffer* null_buffer_ = nullptr;
+  MTL::Texture* null_texture_ = nullptr;
+  MTL::SamplerState* null_sampler_ = nullptr;
+
+#if METAL_SHADER_CONVERTER_AVAILABLE
+  // IR Converter runtime buffers for shader resource binding (MSC path)
+  MTL::Buffer* res_heap_ab_ = nullptr;
+  MTL::Buffer* smp_heap_ab_ = nullptr;
+  MTL::Buffer* cbv_heap_ab_ = nullptr;
+  MTL::Buffer* uniforms_buffer_ = nullptr;
+  MTL::Buffer* top_level_ab_ = nullptr;
+  MTL::Buffer* draw_args_buffer_ = nullptr;
   MTL::Buffer* tessellator_tables_buffer_ = nullptr;
   std::shared_ptr<DrawRingBuffers> active_draw_ring_;
   std::vector<std::shared_ptr<DrawRingBuffers>> draw_ring_pool_;
   std::vector<std::shared_ptr<DrawRingBuffers>> command_buffer_draw_rings_;
   std::mutex draw_ring_mutex_;
   size_t draw_ring_count_ = 0;
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   MTL::Library* depth_only_pixel_library_ = nullptr;
   std::string depth_only_pixel_function_name_;
 
+#if METAL_SHADER_CONVERTER_AVAILABLE
   // System constants - matches DxbcShaderTranslator::SystemConstants layout
-  // Stored persistently to track dirty state
   DxbcShaderTranslator::SystemConstants system_constants_;
   bool system_constants_dirty_ = true;
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
   bool logged_missing_texture_warning_ = false;
 
   // Fixed-function dynamic state cached per render encoder.
   float ff_blend_factor_[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   bool ff_blend_factor_valid_ = false;
 
+#if METAL_SHADER_CONVERTER_AVAILABLE
   std::filesystem::path shader_storage_root_;
   std::filesystem::path shader_storage_local_root_;
   std::filesystem::path shader_storage_title_root_;
@@ -531,6 +524,7 @@ class MetalCommandProcessor : public CommandProcessor {
   FILE* pipeline_disk_cache_file_ = nullptr;
   MTL::BinaryArchive* pipeline_binary_archive_ = nullptr;
   bool pipeline_binary_archive_dirty_ = false;
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   std::atomic<uint64_t> completed_command_buffers_{0};
   uint64_t submission_current_ = 0;

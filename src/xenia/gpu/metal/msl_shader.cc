@@ -24,8 +24,8 @@ namespace metal {
 MslShader::MslShader(xenos::ShaderType shader_type, uint64_t ucode_data_hash,
                      const uint32_t* ucode_dwords, size_t ucode_dword_count,
                      std::endian ucode_source_endian)
-    : SpirvShader(shader_type, ucode_data_hash, ucode_dwords,
-                  ucode_dword_count, ucode_source_endian) {}
+    : SpirvShader(shader_type, ucode_data_hash, ucode_dwords, ucode_dword_count,
+                  ucode_source_endian) {}
 
 Shader::Translation* MslShader::CreateTranslationInstance(
     uint64_t modification) {
@@ -70,7 +70,8 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
   {
     MSLBinding binding;
     binding.stage = stage;
-    binding.desc_set = SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram;
+    binding.desc_set =
+        SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram;
     binding.binding = 0;
     binding.msl_buffer = MslBindings::kSharedMemory;
     binding.msl_texture = 0;
@@ -84,7 +85,8 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
   {
     MSLBinding binding;
     binding.stage = stage;
-    binding.desc_set = SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram;
+    binding.desc_set =
+        SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram;
     binding.binding = 1;
     binding.msl_buffer = 30;  // High index, unused.
     binding.msl_texture = 0;
@@ -155,8 +157,7 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
   }
 }
 
-bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device,
-                                              bool is_ios) {
+bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   if (!device) {
     XELOGE("MslShader: No Metal device provided");
     return false;
@@ -189,7 +190,8 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device,
     }
     // MSL 2.4 (macOS 12+ / iOS 15+) — supports argument buffers,
     // simdgroup functions, raster order groups.
-    opts.msl_version = spirv_cross::CompilerMSL::Options::make_msl_version(2, 4);
+    opts.msl_version =
+        spirv_cross::CompilerMSL::Options::make_msl_version(2, 4);
     // Use direct buffer/texture/sampler bindings (no argument buffers).
     // This is simpler and avoids the indirection overhead of the old
     // IRDescriptorTable model. Can be switched to argument buffers later
@@ -219,8 +221,8 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device,
     }
 
     // Get the entry point name that SPIRV-Cross chose.
-    entry_point_name_ = compiler.get_cleansed_entry_point_name("main",
-                                                                execution_model);
+    entry_point_name_ =
+        compiler.get_cleansed_entry_point_name("main", execution_model);
     if (entry_point_name_.empty()) {
       // Fallback — SPIRV-Cross often names it "main0".
       entry_point_name_ = "main0";
