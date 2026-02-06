@@ -1367,15 +1367,19 @@ class BaseBuildCommand(Command):
         self.parser.add_argument(
             "--no_premake", action="store_true",
             help="Skips running premake before building.")
+        self.parser.add_argument(
+            "--target_os", default=None,
+            help="Target OS for cross-compilation (e.g., 'ios')")
 
     def execute(self, args, pass_args, cwd):
         arch = args.get("arch")
+        target_os = args.get("target_os")
         premake_args = None
         if sys.platform == "darwin" and arch == "x86_64":
             premake_args = ["--mac-x86_64"]
 
-        # Check Vulkan SDK availability (skip on macOS).
-        if sys.platform != "darwin" and not os.environ.get("VULKAN_SDK"):
+        # Check Vulkan SDK availability (skip on macOS and iOS).
+        if sys.platform != "darwin" and target_os != "ios" and not os.environ.get("VULKAN_SDK"):
             print("ERROR: Vulkan SDK not found!"
                   "\nPlease install Vulkan SDK from:"
                   "\nhttps://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe"
@@ -1386,7 +1390,8 @@ class BaseBuildCommand(Command):
             enable_tests = any(
                 target.endswith("-tests") for target in (args["target"] or []))
             run_platform_premake(cc=args["cc"], enable_tests=enable_tests,
-                                 extra_premake_args=premake_args)
+                                 extra_premake_args=premake_args,
+                                 target_os_override=target_os)
             print("")
 
         print("- building (%s):%s..." % (
@@ -1447,11 +1452,22 @@ class BaseBuildCommand(Command):
                         f"/p:Configuration={args['config']}",
                         ] + ([targets] if targets else []) + pass_args)
         elif sys.platform == "darwin":
-            schemes = args["target"] or ["xenia-app"]
+            if target_os == "ios":
+                # iOS: build library targets (no app target)
+                schemes = args["target"] or ["xenia-gpu-metal"]
+            else:
+                schemes = args["target"] or ["xenia-app"]
             result = 0
             extra_arch_args = []
             if arch and "-arch" not in pass_args:
                 extra_arch_args = ["-arch", arch]
+            # iOS cross-compilation flags
+            ios_args = []
+            if target_os == "ios":
+                ios_args = [
+                    "-sdk", "iphoneos",
+                    "-destination", "generic/platform=iOS",
+                ]
             for scheme in schemes:
                 if scheme.endswith("-tests"):
                     build_args = [
@@ -1474,7 +1490,7 @@ class BaseBuildCommand(Command):
                         scheme,
                     ]
                 build_result = subprocess.call(build_args + extra_arch_args +
-                                               pass_args,
+                                               ios_args + pass_args,
                                                env=dict(os.environ))
                 if build_result != 0:
                     result = build_result
