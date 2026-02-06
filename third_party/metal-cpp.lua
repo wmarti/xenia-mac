@@ -1,4 +1,4 @@
-if not os.istarget("macosx") then
+if not os.istarget("macosx") and not os.istarget("ios") then
   return
 end
 

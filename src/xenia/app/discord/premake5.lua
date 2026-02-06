@@ -1,6 +1,10 @@
 project_root = "../../../.."
 include(project_root.."/tools/build")
 
+if os.istarget("ios") then
+  return
+end
+
 group("src")
 project("xenia-app-discord")
   uuid("d14c0885-22d2-40de-ab28-7b234ef2b949")

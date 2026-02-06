@@ -9,6 +9,11 @@ local dxilconv_libdir_x86_64 =
                                "third_party/DirectXShaderCompiler/build_dxilconv_macos_x86_64/lib"))
 include(project_root.."/tools/build")
 
+-- iOS builds use a native UIKit host app; this Qt-based target is not needed.
+if os.istarget("ios") then
+  return
+end
+
 group("src")
 project("xenia-app")
   uuid("d7e98620-d007-4ad8-9dbd-b47c8853a17f")
@@ -96,7 +101,7 @@ project("xenia-app")
     })
     linkoptions({"/ENTRY:mainCRTStartup"})
 
-  filter("not system:macosx")
+  filter({"not system:macosx", "not system:ios"})
     links({
       "xenia-gpu-vulkan",
       "xenia-ui-vulkan",
@@ -105,7 +110,7 @@ project("xenia-app")
   filter({"architecture:x86_64", "files:../base/main_init_"..platform_suffix..".cc"})
     vectorextensions("SSE2")  -- Disable AVX for main_init_win.cc so our AVX check doesn't use AVX instructions.
 
-  filter("platforms:not Android-*")
+  filter({"platforms:not Android-*", "not system:ios"})
     links({
       "xenia-app-discord",
       "xenia-apu-sdl",
@@ -242,6 +247,29 @@ project("xenia-app")
     libdirs({ dxilconv_libdir_arm64 })
   filter({"system:macosx", "architecture:x86_64"})
     libdirs({ dxilconv_libdir_x86_64 })
+  filter({})
+
+  -- iOS app configuration (SPIRV-Cross path only, no MSC/SDL dependencies).
+  filter("system:ios")
+    links({
+      "xenia-gpu-metal",
+      "xenia-ui-metal",
+      "spirv-cross",
+      "metal-cpp",
+      "CoreFoundation.framework",
+      "Foundation.framework",
+      "Metal.framework",
+      "MetalKit.framework",
+      "QuartzCore.framework",
+      "UIKit.framework",
+    })
+    xcodebuildsettings({
+      ["IPHONEOS_DEPLOYMENT_TARGET"] = "17.0",
+      ["SDKROOT"] = "iphoneos",
+      ["TARGETED_DEVICE_FAMILY"] = "1,2",
+      ["PRODUCT_BUNDLE_IDENTIFIER"] = "com.xenia.xenia-edge-ios",
+      ["CODE_SIGN_STYLE"] = "Automatic",
+    })
   filter({})
 
   if enableMiscSubprojects then

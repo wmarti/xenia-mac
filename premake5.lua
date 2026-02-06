@@ -124,6 +124,9 @@ local function detect_target_arch()
   if option_arch then
     return option_arch
   end
+  if os.istarget("ios") then
+    return "ARM64"
+  end
   if os.istarget("macosx") then
     if _OPTIONS["mac-x86_64"] then
       return "x86_64"
@@ -260,7 +263,7 @@ filter("configurations:Release")
   -- (such as constant propagation) emulation as predictable as possible,
   -- including handling of specials since games make assumptions about them.
 
-filter({"configurations:Release", "platforms:Linux-* or Mac-* or Android-*"})
+filter({"configurations:Release", "platforms:Linux-* or Mac-* or iOS-* or Android-*"})
   symbols("On")  -- Enable debug symbols for crash debugging
   linktimeoptimization("On")
   buildoptions({
@@ -457,6 +460,21 @@ filter({"platforms:Mac-x86_64", "toolset:clang"})
     "-mavx",
   })
 filter({})
+
+if os.istarget("ios") then
+  filter("platforms:iOS-*")
+    system("ios")
+    xcodebuildsettings({
+      ["IPHONEOS_DEPLOYMENT_TARGET"] = "17.0",
+      ["SDKROOT"] = "iphoneos",
+      ["TARGETED_DEVICE_FAMILY"] = "1,2",  -- iPhone and iPad
+    })
+    buildoptions({
+      "-w",
+    })
+    removefatalwarnings("All")
+  filter({})
+end
 
 filter({"language:C++", "toolset:clang or gcc"}) -- "platforms:Linux-*"
   disablewarnings({
@@ -687,6 +705,16 @@ workspace("xenia")
           ["CLANG_X86_VECTOR_INSTRUCTION_SET"] = "avx",
         })
       filter({})
+    elseif os.istarget("ios") then
+      platforms({"iOS-ARM64"})
+      filter("platforms:iOS-ARM64")
+        architecture("ARM64")
+        xcodebuildsettings({
+          ["ARCHS"] = "arm64",
+          ["IPHONEOS_DEPLOYMENT_TARGET"] = "17.0",
+          ["SDKROOT"] = "iphoneos",
+        })
+      filter({})
     elseif os.istarget("windows") then
       if TARGET_ARCH == "ARM64" then
         platforms({"Windows-ARM64"})
@@ -718,6 +746,7 @@ workspace("xenia")
   include("third_party/imgui.lua")
   include("third_party/metal-shader-converter.lua")
   include("third_party/metal-cpp.lua")
+  include("third_party/spirv-cross.lua")
   include("third_party/miniaudio.lua")
   include("third_party/mspack.lua")
   include("third_party/snappy.lua")
@@ -731,13 +760,13 @@ workspace("xenia")
     include("third_party/libusb.lua")
   end
 
-  if not os.istarget("android") then
+  if not os.istarget("android") and not os.istarget("ios") then
     -- SDL2 requires sdl2-config, and as of November 2020 isn't high-quality on
     -- Android yet, most importantly in game controllers - the keycode and axis
     -- enums are being ruined during conversion to SDL2 enums resulting in only
     -- one controller (Nvidia Shield) being supported, digital triggers are also
     -- not supported; lifecycle management (especially surface loss) is also
-    -- complicated.
+    -- complicated. SDL2 is also not appropriate for iOS.
     include("third_party/SDL2.lua")
   end
 
@@ -814,7 +843,7 @@ workspace("xenia")
   end
   include("src/xenia/debug/ui")
   include("src/xenia/gpu")
-  if os.istarget("macosx") then
+  if os.istarget("macosx") or os.istarget("ios") then
     include("src/xenia/gpu/metal")
   end
   include("src/xenia/gpu/null")
@@ -825,13 +854,13 @@ workspace("xenia")
   include("src/xenia/kernel")
   include("src/xenia/patcher")
   include("src/xenia/ui")
-  if os.istarget("macosx") then
+  if os.istarget("macosx") or os.istarget("ios") then
     include("src/xenia/ui/metal")
   end
   include("src/xenia/ui/vulkan")
   include("src/xenia/vfs")
 
-  if not os.istarget("android") then
+  if not os.istarget("android") and not os.istarget("ios") then
     include("src/xenia/apu/sdl")
     include("src/xenia/helper/sdl")
     include("src/xenia/hid/sdl")

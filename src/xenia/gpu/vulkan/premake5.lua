@@ -1,7 +1,7 @@
 project_root = "../../../.."
 include(project_root.."/tools/build")
 
-if os.istarget("macosx") then
+if os.istarget("macosx") or os.istarget("ios") then
   return
 end
 
