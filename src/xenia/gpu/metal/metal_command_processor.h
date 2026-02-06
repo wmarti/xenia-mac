@@ -25,6 +25,7 @@
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
+#include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/metal/dxbc_to_dxil_converter.h"
 #include "xenia/gpu/metal/metal_geometry_shader.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
@@ -33,6 +34,7 @@
 #include "xenia/gpu/metal/metal_shader_converter.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
+#include "xenia/gpu/metal/msl_shader.h"
 // clang-format off
 // Must come after metal_texture_cache.h which includes Metal.hpp
 #include "third_party/metal-shader-converter/include/metal_irconverter_runtime.h"
@@ -149,6 +151,15 @@ class MetalCommandProcessor : public CommandProcessor {
   bool IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info,
                  bool major_mode_explicit) override;
+  // SPIRV-Cross draw path — called from IssueDraw when metal_use_spirvcross is
+  // enabled. Handles shader translation, pipeline creation, resource binding,
+  // and draw dispatch using native Metal encoder calls.
+  bool IssueDrawMsl(
+      Shader* vertex_shader, Shader* pixel_shader,
+      const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+      bool primitive_polygonal, bool is_rasterization_done,
+      bool memexport_used, uint32_t normalized_color_mask,
+      const RegisterFile& regs);
   bool IssueCopy() override;
   void WriteRegister(uint32_t index, uint32_t value) override;
 
@@ -358,6 +369,25 @@ class MetalCommandProcessor : public CommandProcessor {
       const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
       reg::RB_DEPTHCONTROL normalized_depth_control) const;
 
+  // SPIRV-Cross (MSL) path - shader modification and pipeline helpers.
+  SpirvShaderTranslator::Modification GetCurrentSpirvVertexShaderModification(
+      const Shader& shader,
+      Shader::HostVertexShaderType host_vertex_shader_type,
+      uint32_t interpolator_mask) const;
+  SpirvShaderTranslator::Modification GetCurrentSpirvPixelShaderModification(
+      const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
+      reg::RB_DEPTHCONTROL normalized_depth_control) const;
+  void UpdateSpirvSystemConstantValues(
+      bool primitive_polygonal, uint32_t line_loop_closing_index,
+      xenos::Endian index_endian,
+      const draw_util::ViewportInfo& viewport_info, uint32_t used_texture_mask,
+      reg::RB_DEPTHCONTROL normalized_depth_control,
+      uint32_t normalized_color_mask);
+  MTL::RenderPipelineState* GetOrCreateMslPipelineState(
+      MslShader::MslTranslation* vertex_translation,
+      MslShader::MslTranslation* pixel_translation,
+      const RegisterFile& regs);
+
   // Metal device and command queue (from provider)
   MTL::Device* device_ = nullptr;
   MTL::CommandQueue* command_queue_ = nullptr;
@@ -405,6 +435,12 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unique_ptr<DxbcToDxilConverter> dxbc_to_dxil_converter_;
   std::unique_ptr<MetalShaderConverter> metal_shader_converter_;
   StringBuffer ucode_disasm_buffer_;
+
+  // SPIRV-Cross (MSL) path - shader translator and cache.
+  std::unique_ptr<SpirvShaderTranslator> spirv_shader_translator_;
+  std::unordered_map<uint64_t, std::unique_ptr<MslShader>> msl_shader_cache_;
+  SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};
+  std::unordered_map<uint64_t, MTL::RenderPipelineState*> msl_pipeline_cache_;
 
   // Shader cache (keyed by ucode hash)
   std::unordered_map<uint64_t, std::unique_ptr<MetalShader>> shader_cache_;

@@ -133,6 +133,12 @@ DEFINE_bool(metal_texture_upload_via_blit, true,
             "of CPU replaceRegion.",
             "GPU");
 
+DEFINE_bool(metal_use_spirvcross, false,
+            "Use the SPIR-V -> SPIRV-Cross -> MSL shader translation path "
+            "instead of the DXBC -> DXIL -> Metal Shader Converter path. "
+            "Required for iOS support. Experimental.",
+            "GPU");
+
 DEFINE_bool(occlusion_query_enable, false,
             "Use hardware occlusion queries instead of fake results. More "
             "accurate but causes GPU stalls and performance issues.",
