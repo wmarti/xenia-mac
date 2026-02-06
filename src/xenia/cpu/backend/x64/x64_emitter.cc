@@ -738,6 +738,7 @@ void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // The target dword will either contain the address of the generated code
     // or a thunk to ResolveAddress.
     mov(ebx, function->address());
+#if XE_PLATFORM_MAC
     const uintptr_t indirection_bias =
         code_cache_->indirection_table_base_bias();
     if (indirection_bias) {
@@ -747,6 +748,9 @@ void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     } else {
       mov(eax, dword[ebx]);
     }
+#else
+    mov(eax, dword[ebx]);
+#endif
   } else {
     // Old-style resolve.
     // Not too important because indirection table is almost always available.
@@ -790,6 +794,7 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
     if (reg.cvt32() != ebx) {
       mov(ebx, reg.cvt32());
     }
+#if XE_PLATFORM_MAC
     const uintptr_t indirection_bias =
         code_cache_->indirection_table_base_bias();
     if (indirection_bias) {
@@ -799,6 +804,9 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
     } else {
       mov(eax, dword[ebx]);
     }
+#else
+    mov(eax, dword[ebx]);
+#endif
   } else {
     // Old-style resolve.
     // Not too important because indirection table is almost always available.

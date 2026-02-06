@@ -132,6 +132,7 @@ bool X64CodeCache::Initialize() {
   indirection_table_base_ = reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
       reinterpret_cast<void*>(kIndirectionTableBase), kIndirectionTableSize,
       xe::memory::AllocationType::kReserve, xe::memory::PageAccess::kReadWrite));
+#if XE_PLATFORM_MAC
   if (!indirection_table_base_) {
     XELOGW(
         "Fixed address mapping for indirection table failed, trying "
@@ -154,6 +155,16 @@ bool X64CodeCache::Initialize() {
         reinterpret_cast<uintptr_t>(indirection_table_base_) -
         kIndirectionTableBase;
   }
+#else
+  if (!indirection_table_base_) {
+    XELOGE("Unable to allocate code cache indirection table");
+    XELOGE(
+        "This is likely because the {:X}-{:X} range is in use by some other "
+        "system DLL",
+        static_cast<uint64_t>(kIndirectionTableBase),
+        kIndirectionTableBase + kIndirectionTableSize);
+  }
+#endif
 
   return true;
 }
