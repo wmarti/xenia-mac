@@ -1,4 +1,4 @@
-if not os.istarget("macosx") and not os.istarget("ios") then
+if not os.istarget("macosx") and not is_ios_target() then
   return
 end
 
