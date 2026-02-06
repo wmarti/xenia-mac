@@ -494,14 +494,23 @@ jobs:
             cp third_party/premake-core/bin/release/premake5 tools/build/bin/
             chmod +x tools/build/bin/premake5
             echo "premake5 built and copied to tools/build/bin/"
+          else
+            echo "premake5 restored from cache"
           fi
-          ls -la tools/build/bin/premake5
+          # Verify premake5 is usable before proceeding.
+          if [ ! -x tools/build/bin/premake5 ]; then
+            echo "ERROR: tools/build/bin/premake5 not found or not executable"
+            ls -la tools/build/bin/ || true
+            exit 1
+          fi
+          tools/build/bin/premake5 --version
           ./xenia-build.py premake --target_os=ios
 
       - name: Build
         run: |
-          # Build Metal GPU library for iOS (verifies SPIRV-Cross path compiles)
-          ./xenia-build.py build --config=Release --target_os=ios --target=xenia-gpu-metal
+          # Build Metal GPU library for iOS (verifies SPIRV-Cross path compiles).
+          # Use --no_premake since premake was already run in the Setup step.
+          ./xenia-build.py build --config=Release --target_os=ios --target=xenia-gpu-metal --no_premake
 
   build-macos-x86_64:
     name: Build macOS x86_64
