@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/metal/metal_command_processor.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/metal/msl_bindings.h"
 
 #include <dispatch/dispatch.h>
 #include <algorithm>
@@ -770,6 +771,40 @@ bool MetalCommandProcessor::InitializeShaderTranslation() {
     return false;
   }
 
+  // Initialize SPIRV-Cross (MSL) path when enabled.
+  if (cvars::metal_use_spirvcross) {
+    // Build SpirvShaderTranslator::Features for Metal.
+    // Enable all features as a baseline, then disable what Metal doesn't need.
+    SpirvShaderTranslator::Features spirv_features(true);
+    // Not using fragment shader interlock — we use host render targets.
+    spirv_features.fragment_shader_sample_interlock = false;
+    // Barycentric interpolation not needed for current Metal path.
+    spirv_features.fragment_shader_barycentric = false;
+    // Metal fast-math doesn't guarantee IEEE NaN/Inf preservation.
+    spirv_features.signed_zero_inf_nan_preserve_float32 = false;
+    // Metal fast-math flushes denorms.
+    spirv_features.denorm_flush_to_zero_float32 = true;
+    // RTE rounding not guaranteed by Metal.
+    spirv_features.rounding_mode_rte_float32 = false;
+
+    spirv_shader_translator_ = std::make_unique<SpirvShaderTranslator>(
+        spirv_features,
+        render_target_cache_->msaa_2x_supported(),  // native_2x_msaa_with_att
+        false,                                       // native_2x_msaa_no_att
+        false,  // edram_fragment_shader_interlock (host RT path)
+        render_target_cache_->draw_resolution_scale_x(),
+        render_target_cache_->draw_resolution_scale_y(),
+        nullptr,  // spirv_tools_context (not needed for Metal)
+        false);   // spirv_optimize
+
+    XELOGI(
+        "SpirvShaderTranslator init (SPIRV-Cross MSL path): msaa_2x={}, "
+        "scale={}x{}",
+        render_target_cache_->msaa_2x_supported(),
+        render_target_cache_->draw_resolution_scale_x(),
+        render_target_cache_->draw_resolution_scale_y());
+  }
+
   // Configure MSC minimum targets to avoid materialization failures on older
   // GPUs/OS versions.
   if (device_) {
@@ -966,6 +1001,17 @@ void MetalCommandProcessor::ShutdownContext() {
   frame_open_ = false;
 
   shader_cache_.clear();
+
+  // SPIRV-Cross resources.
+  for (auto& [key, pso] : msl_pipeline_cache_) {
+    if (pso) {
+      pso->release();
+    }
+  }
+  msl_pipeline_cache_.clear();
+  msl_shader_cache_.clear();
+  spirv_shader_translator_.reset();
+
   shared_memory_.reset();
   shader_translator_.reset();
   dxbc_to_dxil_converter_.reset();
@@ -1591,7 +1637,23 @@ Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
   // Create hash for caching using XXH3 (same as D3D12)
   uint64_t hash = XXH3_64bits(host_address, dword_count * sizeof(uint32_t));
 
-  // Check cache
+  if (cvars::metal_use_spirvcross) {
+    // SPIRV-Cross path: use MslShader (inherits SpirvShader).
+    auto it = msl_shader_cache_.find(hash);
+    if (it != msl_shader_cache_.end()) {
+      return it->second.get();
+    }
+    auto shader = std::make_unique<MslShader>(shader_type, hash, host_address,
+                                              dword_count);
+    MslShader* result = shader.get();
+    msl_shader_cache_[hash] = std::move(shader);
+    XELOGD("Loaded {} shader (SPIRV-Cross) at {:08X} ({} dwords, hash {:016X})",
+           shader_type == xenos::ShaderType::kVertex ? "vertex" : "pixel",
+           guest_address, dword_count, hash);
+    return result;
+  }
+
+  // MSC (DXBC) path: use MetalShader (inherits DxbcShader).
   auto it = shader_cache_.find(hash);
   if (it != shader_cache_.end()) {
     return it->second.get();
@@ -1625,8 +1687,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     return IssueCopy();
   }
 
-  // Vertex shader analysis.
-  auto vertex_shader = static_cast<MetalShader*>(active_vertex_shader());
+  // Vertex shader analysis — use Shader* base type so both MSC and
+  // SPIRV-Cross paths share this common code.
+  Shader* vertex_shader = active_vertex_shader();
   if (!vertex_shader) {
     XELOGW("IssueDraw: No vertex shader");
     return false;
@@ -1640,10 +1703,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
   bool is_rasterization_done =
       draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
-  MetalShader* pixel_shader = nullptr;
+  Shader* pixel_shader = nullptr;
   if (is_rasterization_done) {
     if (edram_mode == xenos::EdramMode::kColorDepth) {
-      pixel_shader = static_cast<MetalShader*>(active_pixel_shader());
+      pixel_shader = active_pixel_shader();
       if (pixel_shader) {
         if (!pixel_shader->is_ucode_analyzed()) {
           pixel_shader->AnalyzeUcode(ucode_disasm_buffer_);
@@ -1733,6 +1796,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   // Begin command buffer if needed (will use cache-provided render targets).
   BeginCommandBuffer();
   EnsureDrawRingCapacity();
+
+  // =========================================================================
+  // SPIRV-Cross (MSL) draw path — bypasses the entire MSC / IRRuntime flow.
+  // =========================================================================
+  if (cvars::metal_use_spirvcross) {
+    return IssueDrawMsl(vertex_shader, pixel_shader, primitive_processing_result,
+                        primitive_polygonal, is_rasterization_done,
+                        memexport_used, normalized_color_mask, regs);
+  }
+
+  // =========================================================================
+  // MSC (DXBC → DXIL → Metal IR) draw path — existing code below.
+  // =========================================================================
+  // Cast to MSC-specific shader types for the rest of this path.
+  auto* metal_vertex_shader = static_cast<MetalShader*>(vertex_shader);
+  auto* metal_pixel_shader = static_cast<MetalShader*>(pixel_shader);
 
   MTL::RenderPipelineState* pipeline = nullptr;
   // Select per-draw shader modifications (mirrors D3D12 PipelineCache).
@@ -2406,10 +2485,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       }
     };
 
-    bind_shader_textures("VS", vertex_shader, res_entries_vertex);
-    bind_shader_textures("PS", pixel_shader, res_entries_pixel);
-    bind_shader_samplers("VS", vertex_shader, smp_entries_vertex);
-    bind_shader_samplers("PS", pixel_shader, smp_entries_pixel);
+    bind_shader_textures("VS", metal_vertex_shader, res_entries_vertex);
+    bind_shader_textures("PS", metal_pixel_shader, res_entries_pixel);
+    bind_shader_samplers("VS", metal_vertex_shader, smp_entries_vertex);
+    bind_shader_samplers("PS", metal_pixel_shader, smp_entries_pixel);
 
     for (uint32_t i = 0; i < textures_for_encoder_count; ++i) {
       UseRenderEncoderResource(textures_for_encoder[i], MTL::ResourceUsageRead);
@@ -2885,6 +2964,505 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   // Advance ring-buffer indices for descriptor and argument buffers.
   ++current_draw_index_;
 
+  return true;
+}
+
+// ==========================================================================
+// SPIRV-Cross (MSL) draw path
+// ==========================================================================
+bool MetalCommandProcessor::IssueDrawMsl(
+    Shader* vertex_shader, Shader* pixel_shader,
+    const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+    bool primitive_polygonal, bool is_rasterization_done,
+    bool memexport_used, uint32_t normalized_color_mask,
+    const RegisterFile& regs) {
+  // Cast to MslShader for the SPIRV-Cross path.
+  auto* msl_vertex_shader = static_cast<MslShader*>(vertex_shader);
+  auto* msl_pixel_shader = static_cast<MslShader*>(pixel_shader);
+
+  // Tessellation and geometry emulation not yet supported on SPIRV-Cross path.
+  if (primitive_processing_result.IsTessellated()) {
+    static bool tess_logged = false;
+    if (!tess_logged) {
+      tess_logged = true;
+      XELOGW(
+          "Metal SPIRV-Cross: Tessellation not yet implemented; skipping draw");
+    }
+    return true;
+  }
+
+  // For now, skip geometry-expanding primitives (point sprites, rect lists,
+  // quad lists) — these require geometry shader emulation (Phase 5).
+  switch (primitive_processing_result.host_primitive_type) {
+    case xenos::PrimitiveType::kPointList:
+    case xenos::PrimitiveType::kRectangleList:
+    case xenos::PrimitiveType::kQuadList:
+      // TODO(Phase 5): Implement vertex expansion for these types.
+      static bool geom_logged = false;
+      if (!geom_logged) {
+        geom_logged = true;
+        XELOGW(
+            "Metal SPIRV-Cross: Geometry-expanding primitives ({}) not yet "
+            "implemented; skipping draw",
+            uint32_t(primitive_processing_result.host_primitive_type));
+      }
+      return true;
+    default:
+      break;
+  }
+
+  // Compute interpolator mask for shader modifications.
+  uint32_t ps_param_gen_pos = UINT32_MAX;
+  uint32_t interpolator_mask = 0;
+  if (msl_pixel_shader) {
+    interpolator_mask = msl_vertex_shader->writes_interpolators() &
+                        msl_pixel_shader->GetInterpolatorInputMask(
+                            regs.Get<reg::SQ_PROGRAM_CNTL>(),
+                            regs.Get<reg::SQ_CONTEXT_MISC>(), ps_param_gen_pos);
+  }
+
+  auto normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
+
+  // Compute SPIRV shader modifications.
+  SpirvShaderTranslator::Modification vertex_shader_modification =
+      GetCurrentSpirvVertexShaderModification(
+          *msl_vertex_shader, Shader::HostVertexShaderType::kVertex,
+          interpolator_mask);
+  SpirvShaderTranslator::Modification pixel_shader_modification =
+      msl_pixel_shader
+          ? GetCurrentSpirvPixelShaderModification(
+                *msl_pixel_shader, interpolator_mask, ps_param_gen_pos,
+                normalized_depth_control)
+          : SpirvShaderTranslator::Modification(0);
+
+  // Get or create shader translations.
+  auto* vertex_translation = static_cast<MslShader::MslTranslation*>(
+      msl_vertex_shader->GetOrCreateTranslation(
+          vertex_shader_modification.value));
+  if (!vertex_translation->is_translated()) {
+    if (!spirv_shader_translator_->TranslateAnalyzedShader(
+            *vertex_translation)) {
+      XELOGE("SPIRV-Cross: Failed to translate vertex shader to SPIR-V");
+      return false;
+    }
+  }
+  if (!vertex_translation->is_valid()) {
+    if (!vertex_translation->CompileToMsl(device_)) {
+      XELOGE("SPIRV-Cross: Failed to compile vertex shader to MSL");
+      return false;
+    }
+  }
+
+  MslShader::MslTranslation* pixel_translation = nullptr;
+  if (msl_pixel_shader) {
+    pixel_translation = static_cast<MslShader::MslTranslation*>(
+        msl_pixel_shader->GetOrCreateTranslation(
+            pixel_shader_modification.value));
+    if (!pixel_translation->is_translated()) {
+      if (!spirv_shader_translator_->TranslateAnalyzedShader(
+              *pixel_translation)) {
+        XELOGE("SPIRV-Cross: Failed to translate pixel shader to SPIR-V");
+        return false;
+      }
+    }
+    if (!pixel_translation->is_valid()) {
+      if (!pixel_translation->CompileToMsl(device_)) {
+        XELOGE("SPIRV-Cross: Failed to compile pixel shader to MSL");
+        return false;
+      }
+    }
+  }
+
+  // Create or retrieve pipeline state.
+  MTL::RenderPipelineState* pipeline =
+      GetOrCreateMslPipelineState(vertex_translation, pixel_translation, regs);
+  if (!pipeline) {
+    XELOGE("SPIRV-Cross: Failed to create pipeline state");
+    return false;
+  }
+
+  // Request textures used by the shaders.
+  uint32_t used_texture_mask =
+      msl_vertex_shader->GetUsedTextureMaskAfterTranslation();
+  if (msl_pixel_shader) {
+    used_texture_mask |=
+        msl_pixel_shader->GetUsedTextureMaskAfterTranslation();
+  }
+  if (texture_cache_ && used_texture_mask) {
+    texture_cache_->RequestTextures(used_texture_mask);
+  }
+
+  // Viewport info for system constants (same as the MSC path).
+  draw_util::ViewportInfo viewport_info;
+  constexpr uint32_t kViewportBoundsMax = 32767;
+  bool convert_z_to_float24 = ::cvars::depth_float24_convert_in_pixel_shader;
+  uint32_t draw_resolution_scale_x =
+      texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1;
+  uint32_t draw_resolution_scale_y =
+      texture_cache_ ? texture_cache_->draw_resolution_scale_y() : 1;
+  draw_util::GetViewportInfoArgs gviargs{};
+  gviargs.Setup(
+      draw_resolution_scale_x, draw_resolution_scale_y,
+      texture_cache_ ? texture_cache_->draw_resolution_scale_x_divisor()
+                     : divisors::MagicDiv(1),
+      texture_cache_ ? texture_cache_->draw_resolution_scale_y_divisor()
+                     : divisors::MagicDiv(1),
+      true, kViewportBoundsMax, kViewportBoundsMax, false,
+      normalized_depth_control,
+      convert_z_to_float24, true,
+      msl_pixel_shader && msl_pixel_shader->writes_depth());
+  gviargs.SetupRegisterValues(regs);
+  draw_util::GetHostViewportInfo(&gviargs, viewport_info);
+
+  // Apply fixed-function state.
+  current_render_encoder_->setRenderPipelineState(pipeline);
+  ApplyRasterizerState(primitive_polygonal);
+  ApplyDepthStencilState(primitive_polygonal, normalized_depth_control);
+
+  // Update SPIRV system constants.
+  UpdateSpirvSystemConstantValues(
+      primitive_polygonal,
+      primitive_processing_result.line_loop_closing_index,
+      primitive_processing_result.host_shader_index_endian, viewport_info,
+      used_texture_mask, normalized_depth_control, normalized_color_mask);
+
+  // Blend constants (fixed-function, same as MSC path).
+  float blend_constants[] = {
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_RED),
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE),
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA),
+  };
+  if (!ff_blend_factor_valid_ ||
+      std::memcmp(ff_blend_factor_, blend_constants, sizeof(float) * 4) != 0) {
+    std::memcpy(ff_blend_factor_, blend_constants, sizeof(float) * 4);
+    ff_blend_factor_valid_ = true;
+    current_render_encoder_->setBlendColor(
+        blend_constants[0], blend_constants[1], blend_constants[2],
+        blend_constants[3]);
+  }
+
+  // =====================================================================
+  // Resource binding — direct Metal encoder calls, no IRDescriptorTable.
+  // =====================================================================
+  constexpr uint32_t kCBVSize = MslBufferIndex::kCbvSizeBytes;
+  uint32_t ring_index = current_draw_index_ % uint32_t(draw_ring_count_);
+  constexpr size_t kStageVertex = 0;
+  constexpr size_t kStagePixel = 1;
+  size_t table_index_vertex = size_t(ring_index) * kStageCount + kStageVertex;
+  size_t table_index_pixel = size_t(ring_index) * kStageCount + kStagePixel;
+
+  uint8_t* uniforms_base =
+      static_cast<uint8_t*>(uniforms_buffer_->contents());
+  uint8_t* uniforms_vertex =
+      uniforms_base + table_index_vertex * kUniformsBytesPerTable;
+  uint8_t* uniforms_pixel =
+      uniforms_base + table_index_pixel * kUniformsBytesPerTable;
+
+  // b0 (msl_buffer 1): System constants.
+  std::memcpy(uniforms_vertex, &spirv_system_constants_,
+              sizeof(SpirvShaderTranslator::SystemConstants));
+  std::memcpy(uniforms_pixel, &spirv_system_constants_,
+              sizeof(SpirvShaderTranslator::SystemConstants));
+
+  // b1 (msl_buffer 2/3): Float constants.
+  // SpirvShaderTranslator uses packed float constants like Vulkan.
+  const size_t kFloatConstantOffset = 1 * kCBVSize;
+  auto write_packed_float_constants = [&](uint8_t* dst, const Shader& shader,
+                                          uint32_t regs_base) {
+    std::memset(dst, 0, kCBVSize);
+    const Shader::ConstantRegisterMap& map = shader.constant_register_map();
+    if (!map.float_count) {
+      return;
+    }
+    uint8_t* out = dst;
+    for (uint32_t i = 0; i < 4; ++i) {
+      uint64_t bits = map.float_bitmap[i];
+      uint32_t constant_index;
+      while (xe::bit_scan_forward(bits, &constant_index)) {
+        bits &= ~(uint64_t(1) << constant_index);
+        if (out + 4 * sizeof(uint32_t) > dst + kCBVSize) {
+          return;
+        }
+        std::memcpy(
+            out, &regs.values[regs_base + (i << 8) + (constant_index << 2)],
+            4 * sizeof(uint32_t));
+        out += 4 * sizeof(uint32_t);
+      }
+    }
+  };
+  write_packed_float_constants(uniforms_vertex + kFloatConstantOffset,
+                               *msl_vertex_shader,
+                               XE_GPU_REG_SHADER_CONSTANT_000_X);
+  if (msl_pixel_shader) {
+    write_packed_float_constants(uniforms_pixel + kFloatConstantOffset,
+                                 *msl_pixel_shader,
+                                 XE_GPU_REG_SHADER_CONSTANT_256_X);
+  } else {
+    std::memset(uniforms_pixel + kFloatConstantOffset, 0, kCBVSize);
+  }
+
+  // b2 (msl_buffer 4): Bool/loop constants.
+  const size_t kBoolLoopConstantOffset = 2 * kCBVSize;
+  constexpr size_t kBoolLoopConstantsSize = (8 + 32) * sizeof(uint32_t);
+  std::memcpy(uniforms_vertex + kBoolLoopConstantOffset,
+              &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
+              kBoolLoopConstantsSize);
+  std::memcpy(uniforms_pixel + kBoolLoopConstantOffset,
+              &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
+              kBoolLoopConstantsSize);
+
+  // b3 (msl_buffer 5): Fetch constants.
+  const size_t kFetchConstantOffset = 3 * kCBVSize;
+  const size_t kFetchConstantCount = xenos::kTextureFetchConstantCount * 6;
+  std::memcpy(uniforms_vertex + kFetchConstantOffset,
+              &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
+              kFetchConstantCount * sizeof(uint32_t));
+  std::memcpy(uniforms_pixel + kFetchConstantOffset,
+              &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
+              kFetchConstantCount * sizeof(uint32_t));
+
+  // Bind shared memory buffer at msl_buffer 0.
+  MTL::Buffer* shared_mem_buffer =
+      shared_memory_ ? shared_memory_->GetBuffer() : nullptr;
+  MTL::ResourceUsage shared_memory_usage =
+      MTL::ResourceUsageRead | MTL::ResourceUsageWrite;
+  if (shared_mem_buffer) {
+    current_render_encoder_->setVertexBuffer(shared_mem_buffer, 0,
+                                             MslBufferIndex::kSharedMemory);
+    current_render_encoder_->setFragmentBuffer(shared_mem_buffer, 0,
+                                               MslBufferIndex::kSharedMemory);
+    UseRenderEncoderResource(shared_mem_buffer, shared_memory_usage);
+  }
+
+  // Bind uniforms buffer at the appropriate indices.
+  NS::UInteger vs_base_offset = table_index_vertex * kUniformsBytesPerTable;
+  NS::UInteger ps_base_offset = table_index_pixel * kUniformsBytesPerTable;
+
+  // System constants (msl_buffer 1).
+  current_render_encoder_->setVertexBuffer(
+      uniforms_buffer_, vs_base_offset + 0 * kCBVSize,
+      MslBufferIndex::kSystemConstants);
+  current_render_encoder_->setFragmentBuffer(
+      uniforms_buffer_, ps_base_offset + 0 * kCBVSize,
+      MslBufferIndex::kSystemConstants);
+
+  // Float constants vertex (msl_buffer 2).
+  current_render_encoder_->setVertexBuffer(
+      uniforms_buffer_, vs_base_offset + 1 * kCBVSize,
+      MslBufferIndex::kFloatConstantsVertex);
+  // Float constants pixel (msl_buffer 3).
+  current_render_encoder_->setFragmentBuffer(
+      uniforms_buffer_, ps_base_offset + 1 * kCBVSize,
+      MslBufferIndex::kFloatConstantsPixel);
+
+  // Bool/loop constants (msl_buffer 4).
+  current_render_encoder_->setVertexBuffer(
+      uniforms_buffer_, vs_base_offset + 2 * kCBVSize,
+      MslBufferIndex::kBoolLoopConstants);
+  current_render_encoder_->setFragmentBuffer(
+      uniforms_buffer_, ps_base_offset + 2 * kCBVSize,
+      MslBufferIndex::kBoolLoopConstants);
+
+  // Fetch constants (msl_buffer 5).
+  current_render_encoder_->setVertexBuffer(
+      uniforms_buffer_, vs_base_offset + 3 * kCBVSize,
+      MslBufferIndex::kFetchConstants);
+  current_render_encoder_->setFragmentBuffer(
+      uniforms_buffer_, ps_base_offset + 3 * kCBVSize,
+      MslBufferIndex::kFetchConstants);
+
+  UseRenderEncoderResource(uniforms_buffer_, MTL::ResourceUsageRead);
+
+  // Bind textures and samplers directly.
+  auto bind_msl_textures = [&](MslShader* shader, bool is_pixel_stage) {
+    if (!shader || !texture_cache_) {
+      return;
+    }
+    const auto& texture_bindings =
+        shader->GetTextureBindingsAfterTranslation();
+    MetalTextureCache* metal_texture_cache = texture_cache_.get();
+    for (size_t i = 0; i < texture_bindings.size(); ++i) {
+      uint32_t tex_index = MslTextureIndex::kBase + static_cast<uint32_t>(i);
+      if (tex_index >= MslTextureIndex::kMaxPerStage) {
+        break;
+      }
+      const auto& binding = texture_bindings[i];
+      MTL::Texture* texture = texture_cache_->GetTextureForBinding(
+          binding.fetch_constant, binding.dimension, binding.is_signed);
+      if (!texture) {
+        switch (binding.dimension) {
+          case xenos::FetchOpDimension::k3DOrStacked:
+            texture = metal_texture_cache->GetNullTexture3D();
+            break;
+          case xenos::FetchOpDimension::kCube:
+            texture = metal_texture_cache->GetNullTextureCube();
+            break;
+          default:
+            texture = metal_texture_cache->GetNullTexture2D();
+            break;
+        }
+      }
+      if (texture) {
+        if (is_pixel_stage) {
+          current_render_encoder_->setFragmentTexture(texture, tex_index);
+        } else {
+          current_render_encoder_->setVertexTexture(texture, tex_index);
+        }
+        UseRenderEncoderResource(texture, MTL::ResourceUsageRead);
+      }
+    }
+  };
+
+  auto bind_msl_samplers = [&](MslShader* shader, bool is_pixel_stage) {
+    if (!shader || !texture_cache_) {
+      return;
+    }
+    const auto& sampler_bindings =
+        shader->GetSamplerBindingsAfterTranslation();
+    for (size_t i = 0; i < sampler_bindings.size(); ++i) {
+      uint32_t smp_index = MslSamplerIndex::kBase + static_cast<uint32_t>(i);
+      if (smp_index >= MslSamplerIndex::kMaxPerStage) {
+        break;
+      }
+      auto parameters =
+          texture_cache_->GetSamplerParameters(sampler_bindings[i]);
+      MTL::SamplerState* sampler_state =
+          texture_cache_->GetOrCreateSampler(parameters);
+      if (!sampler_state) {
+        sampler_state = null_sampler_;
+      }
+      if (sampler_state) {
+        if (is_pixel_stage) {
+          current_render_encoder_->setFragmentSamplerState(sampler_state,
+                                                           smp_index);
+        } else {
+          current_render_encoder_->setVertexSamplerState(sampler_state,
+                                                         smp_index);
+        }
+      }
+    }
+  };
+
+  bind_msl_textures(msl_vertex_shader, false);
+  bind_msl_textures(msl_pixel_shader, true);
+  bind_msl_samplers(msl_vertex_shader, false);
+  bind_msl_samplers(msl_pixel_shader, true);
+
+  // =====================================================================
+  // Draw dispatch — native Metal encoder calls (no IRRuntime).
+  // =====================================================================
+  MTL::PrimitiveType mtl_primitive = MTL::PrimitiveTypeTriangle;
+  switch (primitive_processing_result.host_primitive_type) {
+    case xenos::PrimitiveType::kPointList:
+      mtl_primitive = MTL::PrimitiveTypePoint;
+      break;
+    case xenos::PrimitiveType::kLineList:
+      mtl_primitive = MTL::PrimitiveTypeLine;
+      break;
+    case xenos::PrimitiveType::kLineStrip:
+      mtl_primitive = MTL::PrimitiveTypeLineStrip;
+      break;
+    case xenos::PrimitiveType::kTriangleList:
+    case xenos::PrimitiveType::kRectangleList:
+      mtl_primitive = MTL::PrimitiveTypeTriangle;
+      break;
+    case xenos::PrimitiveType::kTriangleStrip:
+      mtl_primitive = MTL::PrimitiveTypeTriangleStrip;
+      break;
+    default:
+      XELOGE(
+          "SPIRV-Cross: Unsupported host primitive type {}",
+          uint32_t(primitive_processing_result.host_primitive_type));
+      return false;
+  }
+
+  auto request_guest_index_range = [&](uint64_t index_base,
+                                       uint32_t index_count,
+                                       MTL::IndexType index_type) -> bool {
+    if (!shared_memory_) {
+      return false;
+    }
+    uint32_t index_stride = (index_type == MTL::IndexTypeUInt16)
+                                ? sizeof(uint16_t)
+                                : sizeof(uint32_t);
+    uint64_t index_length = uint64_t(index_count) * index_stride;
+    if (index_base > SharedMemory::kBufferSize ||
+        SharedMemory::kBufferSize - index_base < index_length) {
+      return false;
+    }
+    return shared_memory_->RequestRange(static_cast<uint32_t>(index_base),
+                                        static_cast<uint32_t>(index_length));
+  };
+
+  if (primitive_processing_result.index_buffer_type ==
+      PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
+    // Non-indexed draw.
+    current_render_encoder_->drawPrimitives(
+        mtl_primitive, NS::UInteger(0),
+        NS::UInteger(primitive_processing_result.host_draw_vertex_count));
+  } else {
+    // Indexed draw.
+    MTL::IndexType index_type =
+        (primitive_processing_result.host_index_format ==
+         xenos::IndexFormat::kInt16)
+            ? MTL::IndexTypeUInt16
+            : MTL::IndexTypeUInt32;
+    MTL::Buffer* index_buffer = nullptr;
+    uint64_t index_offset = 0;
+    switch (primitive_processing_result.index_buffer_type) {
+      case PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA:
+        index_buffer = shared_memory_ ? shared_memory_->GetBuffer() : nullptr;
+        index_offset = primitive_processing_result.guest_index_base;
+        if (!request_guest_index_range(
+                index_offset,
+                primitive_processing_result.host_draw_vertex_count,
+                index_type)) {
+          XELOGE("SPIRV-Cross: Failed to validate guest index buffer range");
+          return false;
+        }
+        break;
+      case PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted:
+        if (primitive_processor_) {
+          index_buffer = primitive_processor_->GetConvertedIndexBuffer(
+              primitive_processing_result.host_index_buffer_handle,
+              index_offset);
+        }
+        break;
+      case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto:
+      case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA:
+        if (primitive_processor_) {
+          index_buffer = primitive_processor_->GetBuiltinIndexBuffer();
+          index_offset = primitive_processing_result.host_index_buffer_handle;
+        }
+        break;
+      default:
+        XELOGE("SPIRV-Cross: Unsupported index buffer type {}",
+               uint32_t(primitive_processing_result.index_buffer_type));
+        return false;
+    }
+    if (!index_buffer) {
+      XELOGE("SPIRV-Cross: Index buffer is null");
+      return false;
+    }
+    UseRenderEncoderResource(index_buffer, MTL::ResourceUsageRead);
+    current_render_encoder_->drawIndexedPrimitives(
+        mtl_primitive,
+        NS::UInteger(primitive_processing_result.host_draw_vertex_count),
+        index_type, index_buffer, NS::UInteger(index_offset));
+  }
+
+  // Handle memexport.
+  if (memexport_used && shared_memory_) {
+    for (const draw_util::MemExportRange& memexport_range :
+         memexport_ranges_) {
+      shared_memory_->RangeWrittenByGpu(
+          memexport_range.base_address_dwords << 2,
+          memexport_range.size_bytes);
+    }
+  }
+
+  ++current_draw_index_;
   return true;
 }
 
@@ -5557,6 +6135,425 @@ MetalCommandProcessor::GetCurrentPixelShaderModification(
   modification.pixel.rt0_blend_a_factor_for_premult = xenos::BlendFactor::kOne;
 
   return modification;
+}
+
+// ==========================================================================
+// SPIRV-Cross (MSL) path — shader modification + system constants helpers.
+// ==========================================================================
+
+SpirvShaderTranslator::Modification
+MetalCommandProcessor::GetCurrentSpirvVertexShaderModification(
+    const Shader& shader, Shader::HostVertexShaderType host_vertex_shader_type,
+    uint32_t interpolator_mask) const {
+  const auto& regs = *register_file_;
+
+  SpirvShaderTranslator::Modification modification(
+      spirv_shader_translator_->GetDefaultVertexShaderModification(
+          shader.GetDynamicAddressableRegisterCount(
+              regs.Get<reg::SQ_PROGRAM_CNTL>().vs_num_reg),
+          host_vertex_shader_type));
+
+  modification.vertex.interpolator_mask = interpolator_mask;
+
+  auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  uint32_t user_clip_planes =
+      pa_cl_clip_cntl.clip_disable ? 0 : pa_cl_clip_cntl.ucp_ena;
+  modification.vertex.user_clip_plane_count = xe::bit_count(user_clip_planes);
+  modification.vertex.user_clip_plane_cull =
+      uint32_t(user_clip_planes && pa_cl_clip_cntl.ucp_cull_only_ena);
+
+  modification.vertex.output_point_parameters =
+      uint32_t((shader.writes_point_size_edge_flag_kill_vertex() & 0b001) &&
+               regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type ==
+                   xenos::PrimitiveType::kPointList);
+
+  return modification;
+}
+
+SpirvShaderTranslator::Modification
+MetalCommandProcessor::GetCurrentSpirvPixelShaderModification(
+    const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
+    reg::RB_DEPTHCONTROL normalized_depth_control) const {
+  const auto& regs = *register_file_;
+
+  SpirvShaderTranslator::Modification modification(
+      spirv_shader_translator_->GetDefaultPixelShaderModification(
+          shader.GetDynamicAddressableRegisterCount(
+              regs.Get<reg::SQ_PROGRAM_CNTL>().ps_num_reg)));
+
+  modification.pixel.interpolator_mask = interpolator_mask;
+  modification.pixel.interpolators_centroid =
+      interpolator_mask &
+      ~xenos::GetInterpolatorSamplingPattern(
+          regs.Get<reg::RB_SURFACE_INFO>().msaa_samples,
+          regs.Get<reg::SQ_CONTEXT_MISC>().sc_sample_cntl,
+          regs.Get<reg::SQ_INTERPOLATOR_CNTL>().sampling_pattern);
+
+  if (param_gen_pos < xenos::kMaxInterpolators) {
+    modification.pixel.param_gen_enable = 1;
+    modification.pixel.param_gen_interpolator = param_gen_pos;
+    modification.pixel.param_gen_point =
+        uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type ==
+                 xenos::PrimitiveType::kPointList);
+  } else {
+    modification.pixel.param_gen_enable = 0;
+    modification.pixel.param_gen_interpolator = 0;
+    modification.pixel.param_gen_point = 0;
+  }
+
+  using DepthStencilMode =
+      SpirvShaderTranslator::Modification::DepthStencilMode;
+  if (shader.implicit_early_z_write_allowed() &&
+      (!shader.writes_color_target(0) ||
+       !draw_util::DoesCoverageDependOnAlpha(
+           regs.Get<reg::RB_COLORCONTROL>()))) {
+    modification.pixel.depth_stencil_mode = DepthStencilMode::kEarlyHint;
+  } else {
+    modification.pixel.depth_stencil_mode = DepthStencilMode::kNoModifiers;
+  }
+
+  // Initialize MIN/MAX blend pre-multiply factors to kOne (no pre-multiply).
+  modification.pixel.rt0_blend_rgb_factor_for_premult =
+      xenos::BlendFactor::kOne;
+  modification.pixel.rt0_blend_a_factor_for_premult = xenos::BlendFactor::kOne;
+
+  return modification;
+}
+
+MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateMslPipelineState(
+    MslShader::MslTranslation* vertex_translation,
+    MslShader::MslTranslation* pixel_translation,
+    const RegisterFile& regs) {
+  if (!vertex_translation || !vertex_translation->metal_function()) {
+    XELOGE("SPIRV-Cross: No valid vertex shader function");
+    return nullptr;
+  }
+
+  // Determine attachment formats from render target cache.
+  uint32_t sample_count = 1;
+  MTL::PixelFormat color_formats[4] = {
+      MTL::PixelFormatInvalid, MTL::PixelFormatInvalid, MTL::PixelFormatInvalid,
+      MTL::PixelFormatInvalid};
+  MTL::PixelFormat depth_format = MTL::PixelFormatInvalid;
+  MTL::PixelFormat stencil_format = MTL::PixelFormatInvalid;
+  if (render_target_cache_) {
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (MTL::Texture* rt = render_target_cache_->GetColorTargetForDraw(i)) {
+        color_formats[i] = rt->pixelFormat();
+        if (rt->sampleCount() > 0) {
+          sample_count = std::max<uint32_t>(
+              sample_count, static_cast<uint32_t>(rt->sampleCount()));
+        }
+      }
+    }
+    if (color_formats[0] == MTL::PixelFormatInvalid) {
+      if (MTL::Texture* dummy =
+              render_target_cache_->GetDummyColorTargetForDraw()) {
+        color_formats[0] = dummy->pixelFormat();
+        if (dummy->sampleCount() > 0) {
+          sample_count = std::max<uint32_t>(
+              sample_count, static_cast<uint32_t>(dummy->sampleCount()));
+        }
+      }
+    }
+    if (MTL::Texture* depth_tex =
+            render_target_cache_->GetDepthTargetForDraw()) {
+      depth_format = depth_tex->pixelFormat();
+      switch (depth_format) {
+        case MTL::PixelFormatDepth32Float_Stencil8:
+        case MTL::PixelFormatDepth24Unorm_Stencil8:
+        case MTL::PixelFormatX32_Stencil8:
+          stencil_format = depth_format;
+          break;
+        default:
+          stencil_format = MTL::PixelFormatInvalid;
+          break;
+      }
+      if (depth_tex->sampleCount() > 0) {
+        sample_count = std::max<uint32_t>(
+            sample_count, static_cast<uint32_t>(depth_tex->sampleCount()));
+      }
+    }
+  }
+
+  // Build pipeline cache key.
+  struct MslPipelineKey {
+    const void* vs;
+    const void* ps;
+    uint32_t sample_count;
+    uint32_t depth_format;
+    uint32_t stencil_format;
+    uint32_t color_formats[4];
+    uint32_t normalized_color_mask;
+    uint32_t alpha_to_mask_enable;
+    uint32_t blendcontrol[4];
+  } key_data = {};
+  key_data.vs = vertex_translation;
+  key_data.ps = pixel_translation;
+  key_data.sample_count = sample_count;
+  key_data.depth_format = uint32_t(depth_format);
+  key_data.stencil_format = uint32_t(stencil_format);
+  for (uint32_t i = 0; i < 4; ++i) {
+    key_data.color_formats[i] = uint32_t(color_formats[i]);
+  }
+  uint32_t pixel_shader_writes_color_targets =
+      pixel_translation ? pixel_translation->shader().writes_color_targets()
+                        : 0;
+  key_data.normalized_color_mask = 0;
+  if (pixel_shader_writes_color_targets) {
+    key_data.normalized_color_mask = draw_util::GetNormalizedColorMask(
+        regs, pixel_shader_writes_color_targets);
+  }
+  auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+  key_data.alpha_to_mask_enable = rb_colorcontrol.alpha_to_mask_enable ? 1 : 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    key_data.blendcontrol[i] =
+        regs.Get<reg::RB_BLENDCONTROL>(
+                reg::RB_BLENDCONTROL::rt_register_indices[i])
+            .value;
+  }
+  uint64_t key = XXH3_64bits(&key_data, sizeof(key_data));
+
+  // Check cache.
+  auto it = msl_pipeline_cache_.find(key);
+  if (it != msl_pipeline_cache_.end()) {
+    return it->second;
+  }
+
+  // Create pipeline descriptor.
+  MTL::RenderPipelineDescriptor* desc =
+      MTL::RenderPipelineDescriptor::alloc()->init();
+  desc->setVertexFunction(vertex_translation->metal_function());
+  if (pixel_translation && pixel_translation->metal_function()) {
+    desc->setFragmentFunction(pixel_translation->metal_function());
+  }
+
+  for (uint32_t i = 0; i < 4; ++i) {
+    desc->colorAttachments()->object(i)->setPixelFormat(color_formats[i]);
+  }
+  desc->setDepthAttachmentPixelFormat(depth_format);
+  desc->setStencilAttachmentPixelFormat(stencil_format);
+  desc->setSampleCount(sample_count);
+  desc->setAlphaToCoverageEnabled(key_data.alpha_to_mask_enable != 0);
+
+  // Blending and color write masks.
+  for (uint32_t i = 0; i < 4; ++i) {
+    auto* color_attachment = desc->colorAttachments()->object(i);
+    if (color_formats[i] == MTL::PixelFormatInvalid) {
+      color_attachment->setWriteMask(MTL::ColorWriteMaskNone);
+      color_attachment->setBlendingEnabled(false);
+      continue;
+    }
+    uint32_t rt_write_mask = (key_data.normalized_color_mask >> (i * 4)) & 0xF;
+    color_attachment->setWriteMask(ToMetalColorWriteMask(rt_write_mask));
+    if (!rt_write_mask) {
+      color_attachment->setBlendingEnabled(false);
+      continue;
+    }
+    auto blendcontrol = regs.Get<reg::RB_BLENDCONTROL>(
+        reg::RB_BLENDCONTROL::rt_register_indices[i]);
+    MTL::BlendFactor src_rgb =
+        ToMetalBlendFactorRgb(blendcontrol.color_srcblend);
+    MTL::BlendFactor dst_rgb =
+        ToMetalBlendFactorRgb(blendcontrol.color_destblend);
+    MTL::BlendOperation op_rgb =
+        ToMetalBlendOperation(blendcontrol.color_comb_fcn);
+    MTL::BlendFactor src_alpha =
+        ToMetalBlendFactorAlpha(blendcontrol.alpha_srcblend);
+    MTL::BlendFactor dst_alpha =
+        ToMetalBlendFactorAlpha(blendcontrol.alpha_destblend);
+    MTL::BlendOperation op_alpha =
+        ToMetalBlendOperation(blendcontrol.alpha_comb_fcn);
+    bool blending_enabled =
+        src_rgb != MTL::BlendFactorOne || dst_rgb != MTL::BlendFactorZero ||
+        op_rgb != MTL::BlendOperationAdd || src_alpha != MTL::BlendFactorOne ||
+        dst_alpha != MTL::BlendFactorZero || op_alpha != MTL::BlendOperationAdd;
+    color_attachment->setBlendingEnabled(blending_enabled);
+    if (blending_enabled) {
+      color_attachment->setSourceRGBBlendFactor(src_rgb);
+      color_attachment->setDestinationRGBBlendFactor(dst_rgb);
+      color_attachment->setRgbBlendOperation(op_rgb);
+      color_attachment->setSourceAlphaBlendFactor(src_alpha);
+      color_attachment->setDestinationAlphaBlendFactor(dst_alpha);
+      color_attachment->setAlphaBlendOperation(op_alpha);
+    }
+  }
+
+  // No vertex descriptor — SPIRV-Cross shaders use vfetch to read from
+  // shared memory directly (same as the MSC path's vertex fetch mode).
+
+  NS::Error* error = nullptr;
+  MTL::RenderPipelineState* pipeline =
+      device_->newRenderPipelineState(desc, &error);
+  desc->release();
+
+  if (!pipeline) {
+    if (error) {
+      XELOGE("SPIRV-Cross: Failed to create pipeline: {}",
+             error->localizedDescription()->utf8String());
+    } else {
+      XELOGE("SPIRV-Cross: Failed to create pipeline (unknown error)");
+    }
+    return nullptr;
+  }
+
+  msl_pipeline_cache_[key] = pipeline;
+  return pipeline;
+}
+
+void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
+    bool primitive_polygonal, uint32_t line_loop_closing_index,
+    xenos::Endian index_endian,
+    const draw_util::ViewportInfo& viewport_info, uint32_t used_texture_mask,
+    reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask) {
+  const RegisterFile& regs = *register_file_;
+  auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
+  auto rb_alpha_ref = regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
+  auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+  auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+  auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+
+  auto& consts = spirv_system_constants_;
+  std::memset(&consts, 0, sizeof(consts));
+
+  // Build flags (matching Vulkan backend's SpirvShaderTranslator kSysFlag_*).
+  uint32_t flags = 0;
+
+  // Coordinate format.
+  if (pa_cl_vte_cntl.vtx_xy_fmt) {
+    flags |= SpirvShaderTranslator::kSysFlag_XYDividedByW;
+  }
+  if (pa_cl_vte_cntl.vtx_z_fmt) {
+    flags |= SpirvShaderTranslator::kSysFlag_ZDividedByW;
+  }
+  if (pa_cl_vte_cntl.vtx_w0_fmt) {
+    flags |= SpirvShaderTranslator::kSysFlag_WNotReciprocal;
+  }
+
+  // Primitive type.
+  if (primitive_polygonal) {
+    flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
+  }
+  if (vgt_draw_initiator.prim_type == xenos::PrimitiveType::kLineList ||
+      vgt_draw_initiator.prim_type == xenos::PrimitiveType::kLineStrip ||
+      vgt_draw_initiator.prim_type == xenos::PrimitiveType::kLineLoop ||
+      vgt_draw_initiator.prim_type == xenos::PrimitiveType::k2DLineStrip) {
+    flags |= SpirvShaderTranslator::kSysFlag_PrimitiveLine;
+  }
+
+  // MSAA sample count.
+  flags |= uint32_t(rb_surface_info.msaa_samples)
+           << SpirvShaderTranslator::kSysFlag_MsaaSamples_Shift;
+
+  // Depth format.
+  if (rb_depth_info.depth_format ==
+      xenos::DepthRenderTargetFormat::kD24FS8) {
+    flags |= SpirvShaderTranslator::kSysFlag_DepthFloat24;
+  }
+
+  // Alpha test — pack the CompareFunction value directly into the flag bits
+  // (matching Vulkan backend behavior).
+  xenos::CompareFunction alpha_test_function =
+      rb_colorcontrol.alpha_test_enable
+          ? rb_colorcontrol.alpha_func
+          : xenos::CompareFunction::kAlways;
+  flags |= uint32_t(alpha_test_function)
+           << SpirvShaderTranslator::kSysFlag_AlphaPassIfLess_Shift;
+
+  // Gamma correction for render targets.
+  reg::RB_COLOR_INFO color_infos[4];
+  for (uint32_t i = 0; i < 4; ++i) {
+    color_infos[i] = regs.Get<reg::RB_COLOR_INFO>(
+        reg::RB_COLOR_INFO::rt_register_indices[i]);
+  }
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (color_infos[i].color_format ==
+        xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+      flags |= SpirvShaderTranslator::kSysFlag_ConvertColor0ToGamma << i;
+    }
+  }
+
+  consts.flags = flags;
+
+  // Vertex index.
+  consts.vertex_index_endian = index_endian;
+  consts.vertex_base_index =
+      regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
+
+  // NDC scale/offset.
+  for (uint32_t i = 0; i < 3; ++i) {
+    consts.ndc_scale[i] = viewport_info.ndc_scale[i];
+    consts.ndc_offset[i] = viewport_info.ndc_offset[i];
+  }
+
+  // Point rendering.
+  auto pa_su_point_size = regs.Get<reg::PA_SU_POINT_SIZE>();
+  auto pa_su_point_minmax = regs.Get<reg::PA_SU_POINT_MINMAX>();
+  consts.point_vertex_diameter_min =
+      float(pa_su_point_minmax.min_size) * (2.0f / 16.0f);
+  consts.point_vertex_diameter_max =
+      float(pa_su_point_minmax.max_size) * (2.0f / 16.0f);
+  consts.point_constant_diameter[0] =
+      float(pa_su_point_size.width) * (2.0f / 16.0f);
+  consts.point_constant_diameter[1] =
+      float(pa_su_point_size.height) * (2.0f / 16.0f);
+  float point_screen_to_ndc_x =
+      (viewport_info.ndc_scale[0] != 0.0f)
+          ? (0.5f / viewport_info.ndc_scale[0])
+          : 0.0f;
+  float point_screen_to_ndc_y =
+      (viewport_info.ndc_scale[1] != 0.0f)
+          ? (-0.5f / viewport_info.ndc_scale[1])
+          : 0.0f;
+  consts.point_screen_diameter_to_ndc_radius[0] = point_screen_to_ndc_x;
+  consts.point_screen_diameter_to_ndc_radius[1] = point_screen_to_ndc_y;
+
+  // Texture swizzled signs and swizzles — retrieved from the texture cache
+  // (matching Vulkan backend behavior).
+  if (texture_cache_) {
+    for (uint32_t i = 0; i < 32; ++i) {
+      if (!(used_texture_mask & (uint32_t(1) << i))) {
+        continue;
+      }
+      // Swizzled signs: 8 bits per texture, 4 textures per uint32.
+      uint8_t texture_signs =
+          texture_cache_->GetActiveTextureSwizzledSigns(i);
+      uint32_t signs_shift = 8 * (i & 3);
+      consts.texture_swizzled_signs[i >> 2] |=
+          uint32_t(texture_signs) << signs_shift;
+
+      // Host swizzles: 12 bits per texture, 2 textures per uint32.
+      uint32_t texture_swizzle =
+          texture_cache_->GetActiveTextureHostSwizzle(i);
+      uint32_t swizzle_shift = 12 * (i & 1);
+      consts.texture_swizzles[i >> 1] |=
+          (texture_swizzle & 0xFFF) << swizzle_shift;
+    }
+  }
+
+  // Alpha test reference.
+  consts.alpha_test_reference = rb_alpha_ref;
+
+  // Color exponent bias (matching Vulkan backend).
+  for (uint32_t i = 0; i < 4; ++i) {
+    int32_t color_exp_bias = color_infos[i].color_exp_bias;
+    if (render_target_cache_->GetPath() ==
+            RenderTargetCache::Path::kHostRenderTargets &&
+        ((color_infos[i].color_format ==
+              xenos::ColorRenderTargetFormat::k_16_16 &&
+          !render_target_cache_->IsFixedRG16TruncatedToMinus1To1()) ||
+         (color_infos[i].color_format ==
+              xenos::ColorRenderTargetFormat::k_16_16_16_16 &&
+          !render_target_cache_->IsFixedRGBA16TruncatedToMinus1To1()))) {
+      color_exp_bias -= 5;
+    }
+    float color_exp_bias_scale;
+    *reinterpret_cast<int32_t*>(&color_exp_bias_scale) =
+        UINT32_C(0x3F800000) + (color_exp_bias << 23);
+    consts.color_exp_bias[i] = color_exp_bias_scale;
+  }
 }
 
 void MetalCommandProcessor::UpdateSystemConstantValues(

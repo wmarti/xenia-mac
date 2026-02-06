@@ -2449,6 +2449,20 @@ MetalTextureCache::SamplerParameters MetalTextureCache::GetSamplerParameters(
   return parameters;
 }
 
+MetalTextureCache::SamplerParameters MetalTextureCache::GetSamplerParameters(
+    const SpirvShader::SamplerBinding& binding) const {
+  // Convert SpirvShader::SamplerBinding to the DxbcShader::SamplerBinding
+  // format (same fields minus bindless_descriptor_index), then delegate.
+  DxbcShader::SamplerBinding dxbc_binding;
+  dxbc_binding.bindless_descriptor_index = 0;
+  dxbc_binding.fetch_constant = binding.fetch_constant;
+  dxbc_binding.mag_filter = binding.mag_filter;
+  dxbc_binding.min_filter = binding.min_filter;
+  dxbc_binding.mip_filter = binding.mip_filter;
+  dxbc_binding.aniso_filter = binding.aniso_filter;
+  return GetSamplerParameters(dxbc_binding);
+}
+
 MTL::SamplerState* MetalTextureCache::GetOrCreateSampler(
     SamplerParameters parameters) {
   auto it = sampler_cache_.find(parameters.value);

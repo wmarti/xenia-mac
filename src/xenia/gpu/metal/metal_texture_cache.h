@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "xenia/gpu/dxbc_shader.h"
+#include "xenia/gpu/spirv_shader.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/texture_cache.h"
 #include "xenia/gpu/texture_info.h"
@@ -103,6 +104,8 @@ class MetalTextureCache : public TextureCache {
 
   SamplerParameters GetSamplerParameters(
       const DxbcShader::SamplerBinding& binding) const;
+  SamplerParameters GetSamplerParameters(
+      const SpirvShader::SamplerBinding& binding) const;
   MTL::SamplerState* GetOrCreateSampler(SamplerParameters parameters);
 
   // TextureCache virtual method overrides

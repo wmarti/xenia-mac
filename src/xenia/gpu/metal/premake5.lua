@@ -11,6 +11,7 @@ local dxilconv_includes = {
   path.join(dxilconv_root, "include"),
   path.join(dxilconv_root, "projects/dxilconv/include"),
 }
+local spirvcross_root = path.join(project_root, "third_party/SPIRV-Cross")
 
 include(path.join(project_root, "tools/build"))
 
@@ -30,6 +31,7 @@ project("xenia-gpu-metal")
     "xenia-ui",
     "fmt",
     "metal-cpp",
+    "spirv-cross",
   }
 
   filter "system:macosx"
@@ -59,16 +61,24 @@ project("xenia-gpu-metal")
       "metal_shared_memory.h",
       "metal_texture_cache.cc",
       "metal_texture_cache.h",
+      "msl_bindings.h",
+      "msl_shader.cc",
+      "msl_shader.h",
     }
 
     includedirs {
       dxilconv_includes[1],
       dxilconv_includes[2],
       path.join(project_root, "third_party/metal-shader-converter/include"),
-      "/usr/local/include/metal_irconverter_runtime"
+      "/usr/local/include/metal_irconverter_runtime",
+      spirvcross_root,
     }
 
-    defines { "METAL_SHADER_CONVERTER_AVAILABLE", "IR_RUNTIME_METALCPP" }
+    defines {
+      "METAL_SHADER_CONVERTER_AVAILABLE",
+      "IR_RUNTIME_METALCPP",
+      "SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS",
+    }
 
     libdirs     { metal_converter_libdir }
     runpathdirs {
