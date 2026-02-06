@@ -12,14 +12,14 @@
 #include "xenia/base/platform.h"
 
 #include <sys/time.h>
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 #include <mach/mach_time.h>
 #endif
 
 namespace xe {
 
 uint64_t Clock::host_tick_frequency_platform() {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   mach_timebase_info_data_t info;
   mach_timebase_info(&info);
   // Convert timebase to frequency in Hz.
@@ -37,7 +37,7 @@ uint64_t Clock::host_tick_frequency_platform() {
 }
 
 uint64_t Clock::host_tick_count_platform() {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   return mach_absolute_time();
 #else
   timespec tp;

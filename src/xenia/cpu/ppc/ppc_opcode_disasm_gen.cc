@@ -4947,7 +4947,7 @@ void PrintDisasm_xorx(const PPCDecodeData& d, StringBuffer* str) {
   str->AppendFormat("r{}", d.X.RB());
 }
 #define INIT_LIST(...) {__VA_ARGS__}
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_APPLE && XE_ARCH_ARM64
 #define INSTRUCTION(opcode, mnem, form, group, type, desc, reads, writes, fn) \
     {PPCOpcodeGroup::group, PPCOpcodeFormat::form, opcode, mnem, desc,         \
      INIT_LIST reads, INIT_LIST writes, fn}
@@ -5421,7 +5421,7 @@ const PPCOpcodeDisasmInfo& GetOpcodeDisasmInfo(PPCOpcode opcode) {
 }
 void RegisterOpcodeDisasm(PPCOpcode opcode, InstrDisasmFn fn) {
   assert_null(ppc_opcode_disasm_table[static_cast<int>(opcode)].disasm);
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_APPLE && XE_ARCH_ARM64
   ppc_opcode_disasm_table[static_cast<int>(opcode)].disasm = fn;
 #else
   const_cast<PPCOpcodeDisasmInfo*>( &ppc_opcode_disasm_table[static_cast<int>(opcode)])->disasm = fn;

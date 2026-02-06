@@ -34,7 +34,7 @@
 
 #if XE_COMPILER_MSVC
 #include "xenia/base/platform_win.h"
-#elif !XE_PLATFORM_MAC
+#elif !XE_PLATFORM_APPLE
 #include <sys/wait.h>
 #include <unistd.h>
 #endif  // XE_COMPILER_MSVC
@@ -464,7 +464,7 @@ int filter(unsigned int code) {
 }
 #endif  // XE_COMPILER_MSVC
 
-#if !XE_COMPILER_MSVC && !XE_PLATFORM_MAC
+#if !XE_COMPILER_MSVC && !XE_PLATFORM_APPLE
 // Run test in isolated child process to catch crashes
 enum class TestResult {
   kPassed,
@@ -560,7 +560,7 @@ TestResult RunTestInChildProcess(TestSuite& test_suite, TestCase& test_case) {
   fflush(stderr);
   return TestResult::kFailed;
 }
-#endif  // !XE_COMPILER_MSVC && !XE_PLATFORM_MAC
+#endif  // !XE_COMPILER_MSVC && !XE_PLATFORM_APPLE
 
 void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
                       TestCase& test_case, int& failed_count,
@@ -589,7 +589,7 @@ void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
     fflush(stderr);
     ++failed_count;
   }
-#elif XE_PLATFORM_MAC
+#elif XE_PLATFORM_APPLE
   fprintf(stdout, "  - %s\n", test_case.name.c_str());
   fflush(stdout);
   if (!runner.Setup(test_suite)) {
@@ -688,7 +688,7 @@ bool RunTests(const std::string_view test_name) {
     XELOGI("{} test cases skipped based on skip list.", skipped_count);
   }
 
-#if XE_COMPILER_MSVC || XE_PLATFORM_MAC
+#if XE_COMPILER_MSVC || XE_PLATFORM_APPLE
   // On Windows, use a single shared test runner
   TestRunner runner;
   // Run tests serially on Windows/macOS

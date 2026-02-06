@@ -13,7 +13,7 @@
 #include <cstring>
 #include <random>
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 #include <sys/mman.h>
 #endif
 
@@ -107,7 +107,7 @@ xe::memory::PageAccess ToPageAccess(uint32_t protect) {
 }
 
 static inline bool ShouldSkipHostCommit(const BaseHeap& heap) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   // On macOS ARM64 the host page size is 16 KB, and mprotect-based "commit"
   // creates fragmentation in the 0..512 MB parent physical heap.
   if (heap.heap_type() == HeapType::kGuestPhysical && heap.heap_base() == 0x0 &&
@@ -192,7 +192,7 @@ bool Memory::Initialize() {
     return false;
   }
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   // On macOS, reserve a contiguous region chosen by the OS, then map views
   // into it at fixed offsets.
   if (MapViewsMac()) {
@@ -363,7 +363,7 @@ static const struct {
         0x0000000100000000ull,
     },
 };
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 int Memory::MapViewsMac() {
   assert_true(xe::countof(map_info) == xe::countof(views_.all_views));
 
@@ -409,7 +409,7 @@ int Memory::MapViewsMac() {
 
   return 0;
 }
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE
 int Memory::MapViews(uint8_t* mapping_base) {
   assert_true(xe::countof(map_info) == xe::countof(views_.all_views));
   // 0xE0000000 4 KB offset is emulated via host_address_offset and on the CPU

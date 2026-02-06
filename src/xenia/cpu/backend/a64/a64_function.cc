@@ -9,7 +9,7 @@
 
 #include "xenia/cpu/backend/a64/a64_function.h"
 
-#ifdef XE_PLATFORM_MAC
+#ifdef XE_PLATFORM_APPLE
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_map.h>
@@ -21,7 +21,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
 
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && defined(__aarch64__)
 thread_local bool jit_thread_initialized = false;
 
 // Initialize JIT execution for the current thread
@@ -52,7 +52,7 @@ void A64Function::Setup(uint8_t* machine_code, size_t machine_code_length) {
 }
 
 bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && defined(__aarch64__)
   // Initialize JIT execution for this thread
   // This ensures pthread_jit_write_protect_np is set correctly for execution
   InitializeJITThread();

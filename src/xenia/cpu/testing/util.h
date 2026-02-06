@@ -80,7 +80,7 @@ class TestFunction {
       uint32_t stack_size = 64 * 1024;
       uint32_t stack_address = memory_size - stack_size;
       uint32_t thread_state_address = stack_address - 0x1000;
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
       auto* heap = memory->LookupHeap(0);
       if (heap) {
         heap->AllocFixed(thread_state_address, stack_size + 0x1000, 0,
@@ -91,7 +91,7 @@ class TestFunction {
           processor.get(), 0x100, stack_address, thread_state_address);
 #else
       auto thread_state = std::make_unique<ThreadState>(processor.get(), 0x100);
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE
       // assert_always();  // TODO: Allocate a thread stack!!!
       auto ctx = thread_state->context();
       ctx->lr = 0xBCBCBCBC;

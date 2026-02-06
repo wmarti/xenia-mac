@@ -1313,7 +1313,7 @@ static const uintptr_t kConstDataSize = sizeof(v_consts);
 // given the current setup.
 uintptr_t A64Emitter::PlaceConstData() {
   void* mem = nullptr;
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_APPLE && XE_ARCH_ARM64
   // macOS ARM64 PAGEZERO blocks low fixed mappings; use OS-chosen addresses.
   mem = memory::AllocFixed(
       nullptr, xe::round_up(kConstDataSize, memory::page_size()),
@@ -1329,7 +1329,7 @@ uintptr_t A64Emitter::PlaceConstData() {
   }
 #endif
 
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_APPLE && XE_ARCH_ARM64
   // On macOS ARM64, memory is often allocated in high address space
   if (reinterpret_cast<uintptr_t>(mem) & ~0x7FFFFFFF) {
     XELOGD(

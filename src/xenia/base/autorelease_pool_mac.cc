@@ -9,7 +9,7 @@
 
 #include "xenia/base/autorelease_pool_mac.h"
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 
 #include <objc/objc-runtime.h>
 #include <pthread.h>
@@ -175,4 +175,4 @@ ScopedAutoreleasePool::~ScopedAutoreleasePool() {
 
 }  // namespace xe
 
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE

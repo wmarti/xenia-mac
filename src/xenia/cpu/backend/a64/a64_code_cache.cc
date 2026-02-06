@@ -13,7 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 #include <pthread.h>
 #endif
 
@@ -76,7 +76,7 @@ A64CodeCache::~A64CodeCache() {
 
   // Unmap all views and close mapping.
   if (mapping_ != xe::memory::kFileMappingHandleInvalid) {
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_APPLE && XE_ARCH_ARM64
     // On macOS ARM64, we used AllocFixed instead of MapFileView, so use
     // DeallocFixed
     if (generated_code_execute_base_) {
@@ -175,7 +175,7 @@ bool A64CodeCache::Initialize() {
 
   // Map generated code region into the file. Pages are committed as required.
   if (xe::memory::IsWritableExecutableMemoryPreferred()) {
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_APPLE && XE_ARCH_ARM64
     // On macOS ARM64, always use OS-chosen MAP_JIT memory.
     generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
         xe::memory::AllocFixed(nullptr, kGeneratedCodeSize,
@@ -213,7 +213,7 @@ bool A64CodeCache::Initialize() {
     }
 #endif
   } else {
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_APPLE && XE_ARCH_ARM64
     // On macOS ARM64, always use OS-chosen addresses for the views.
     generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
         xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
@@ -494,7 +494,7 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
         old_commit_mark, new_commit_mark));
 
     // Copy code and fill padding while in write mode on MAP_JIT.
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && defined(__aarch64__)
     const bool jit_write =
         (generated_code_execute_base_ == generated_code_write_base_);
     if (jit_write) {
@@ -507,7 +507,7 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
       std::memset(tail_write_address, 0x00,
                   static_cast<size_t>(end_write_address - tail_write_address));
     }
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && defined(__aarch64__)
     if (jit_write) {
       pthread_jit_write_protect_np(1);
     }
@@ -595,7 +595,7 @@ uint32_t A64CodeCache::PlaceData(const void* data, size_t length) {
                                                              new_commit_mark));
 
   // Copy data.
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && defined(__aarch64__)
   if (generated_code_execute_base_ == generated_code_write_base_) {
     pthread_jit_write_protect_np(0);
     std::memcpy(data_address, data, length);

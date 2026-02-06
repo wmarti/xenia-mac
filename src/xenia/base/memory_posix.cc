@@ -18,7 +18,7 @@
 #include <cstring>
 #include <functional>
 #include <string>
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_region.h>
@@ -113,7 +113,7 @@ PageAccess ToXeniaProtectFlags(const char* protection) {
 }
 
 bool IsWritableExecutableMemorySupported() {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   static const bool supported = []() {
     const size_t test_size = page_size();
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
@@ -174,7 +174,7 @@ void* AllocFixed(void* base_address, size_t length,
   uint32_t prot = ToPosixProtectFlags(access);
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   if (access == PageAccess::kExecuteReadWrite ||
       access == PageAccess::kExecuteReadOnly) {
 #ifdef MAP_JIT
@@ -185,7 +185,7 @@ void* AllocFixed(void* base_address, size_t length,
 
   if (base_address != nullptr) {
     if (allocation_type == AllocationType::kCommit) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
       const size_t system_page_size = page_size();
       uintptr_t start = reinterpret_cast<uintptr_t>(base_address);
       uintptr_t aligned_start = start & ~(system_page_size - 1);
@@ -273,7 +273,7 @@ bool Protect(void* base_address, size_t length, PageAccess access,
 }
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   access_out = PageAccess::kNoAccess;
 
   mach_vm_address_t address =
@@ -408,7 +408,7 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   }
   oflag |= O_CREAT;
   std::string shm_name = path.filename().string();
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   constexpr size_t kMacShmNameLimit = 30;
   if (shm_name.size() > kMacShmNameLimit) {
     size_t hash = std::hash<std::string>{}(shm_name);
@@ -416,7 +416,7 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
     std::snprintf(hash_name, sizeof(hash_name), "xe_%016zx", hash);
     shm_name = hash_name;
   }
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE
   auto full_path = "/" + shm_name;
   int ret = shm_open(full_path.c_str(), oflag, 0777);
   if (ret < 0) {
@@ -458,7 +458,7 @@ void CloseFileMappingHandle(FileMappingHandle handle,
   close(handle);
 #if !XE_PLATFORM_ANDROID
   std::string shm_name = path.filename().string();
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   constexpr size_t kMacShmNameLimit = 30;
   if (shm_name.size() > kMacShmNameLimit) {
     size_t hash = std::hash<std::string>{}(shm_name);
@@ -466,7 +466,7 @@ void CloseFileMappingHandle(FileMappingHandle handle,
     std::snprintf(hash_name, sizeof(hash_name), "xe_%016zx", hash);
     shm_name = hash_name;
   }
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE
   auto full_path = "/" + shm_name;
   shm_unlink(full_path.c_str());
   // Remove from tracking.
@@ -507,7 +507,7 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
 
 bool UnmapFileView(FileMappingHandle handle, void* base_address,
                    size_t length) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   if (munmap(base_address, length) != 0) {
     return false;
   }

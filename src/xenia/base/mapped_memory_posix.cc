@@ -122,7 +122,7 @@ class PosixMappedMemory : public MappedMemory {
     }
     if (file_descriptor_ >= 0) {
       if (truncate_size) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
         ftruncate(file_descriptor_, off_t(truncate_size));
 #else
         ftruncate64(file_descriptor_, off64_t(truncate_size));
