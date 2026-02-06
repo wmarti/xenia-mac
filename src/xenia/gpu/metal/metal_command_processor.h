@@ -378,6 +378,7 @@ class MetalCommandProcessor : public CommandProcessor {
       const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
       reg::RB_DEPTHCONTROL normalized_depth_control) const;
   void UpdateSpirvSystemConstantValues(
+      const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
       bool primitive_polygonal, uint32_t line_loop_closing_index,
       xenos::Endian index_endian,
       const draw_util::ViewportInfo& viewport_info, uint32_t used_texture_mask,
