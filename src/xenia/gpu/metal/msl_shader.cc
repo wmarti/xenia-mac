@@ -15,11 +15,31 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
-#include "xenia/gpu/spirv_shader_translator.h"
 
 namespace xe {
 namespace gpu {
 namespace metal {
+
+// SPIR-V descriptor set indices matching SpirvShaderTranslator's layout.
+// These values must stay in sync with the enum in spirv_shader_translator.h.
+namespace SpirvSets {
+constexpr uint32_t kSharedMemoryAndEdram = 0;
+constexpr uint32_t kConstants = 1;
+constexpr uint32_t kTexturesVertex = 2;
+constexpr uint32_t kTexturesPixel = 3;
+}  // namespace SpirvSets
+
+// SPIR-V constant buffer binding indices within descriptor set 1.
+// Must match SpirvShaderTranslator::ConstantBuffer enum.
+namespace SpirvCbv {
+constexpr uint32_t kSystem = 0;
+constexpr uint32_t kFloatVertex = 1;
+constexpr uint32_t kFloatPixel = 2;
+constexpr uint32_t kBoolLoop = 3;
+constexpr uint32_t kFetch = 4;
+constexpr uint32_t kClipPlanes = 5;
+constexpr uint32_t kTessellation = 6;
+}  // namespace SpirvCbv
 
 MslShader::MslShader(xenos::ShaderType shader_type, uint64_t ucode_data_hash,
                      const uint32_t* ucode_dwords, size_t ucode_dword_count,
@@ -70,8 +90,7 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
   {
     MSLBinding binding;
     binding.stage = stage;
-    binding.desc_set =
-        SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram;
+    binding.desc_set = SpirvSets::kSharedMemoryAndEdram;
     binding.binding = 0;
     binding.msl_buffer = MslBindings::kSharedMemory;
     binding.msl_texture = 0;
@@ -85,8 +104,7 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
   {
     MSLBinding binding;
     binding.stage = stage;
-    binding.desc_set =
-        SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram;
+    binding.desc_set = SpirvSets::kSharedMemoryAndEdram;
     binding.binding = 1;
     binding.msl_buffer = 30;  // High index, unused.
     binding.msl_texture = 0;
@@ -100,25 +118,18 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
     uint32_t msl_buffer;
   };
   static const CbvMapping cbv_mappings[] = {
-      {SpirvShaderTranslator::kConstantBufferSystem,
-       MslBindings::kSystemConstants},
-      {SpirvShaderTranslator::kConstantBufferFloatVertex,
-       MslBindings::kFloatConstantsVertex},
-      {SpirvShaderTranslator::kConstantBufferFloatPixel,
-       MslBindings::kFloatConstantsPixel},
-      {SpirvShaderTranslator::kConstantBufferBoolLoop,
-       MslBindings::kBoolLoopConstants},
-      {SpirvShaderTranslator::kConstantBufferFetch,
-       MslBindings::kFetchConstants},
-      {SpirvShaderTranslator::kConstantBufferClipPlanes,
-       MslBindings::kClipPlaneConstants},
-      {SpirvShaderTranslator::kConstantBufferTessellation,
-       MslBindings::kTessellationConstants},
+      {SpirvCbv::kSystem, MslBindings::kSystemConstants},
+      {SpirvCbv::kFloatVertex, MslBindings::kFloatConstantsVertex},
+      {SpirvCbv::kFloatPixel, MslBindings::kFloatConstantsPixel},
+      {SpirvCbv::kBoolLoop, MslBindings::kBoolLoopConstants},
+      {SpirvCbv::kFetch, MslBindings::kFetchConstants},
+      {SpirvCbv::kClipPlanes, MslBindings::kClipPlaneConstants},
+      {SpirvCbv::kTessellation, MslBindings::kTessellationConstants},
   };
   for (const auto& cbv : cbv_mappings) {
     MSLBinding binding;
     binding.stage = stage;
-    binding.desc_set = SpirvShaderTranslator::kDescriptorSetConstants;
+    binding.desc_set = SpirvSets::kConstants;
     binding.binding = cbv.spirv_binding;
     binding.msl_buffer = cbv.msl_buffer;
     binding.msl_texture = 0;
@@ -128,8 +139,8 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
 
   // Set 2 (vertex textures) and Set 3 (pixel textures): up to 32 textures.
   // Map all possible texture bindings.
-  for (uint32_t set = SpirvShaderTranslator::kDescriptorSetTexturesVertex;
-       set <= SpirvShaderTranslator::kDescriptorSetTexturesPixel; ++set) {
+  for (uint32_t set = SpirvSets::kTexturesVertex;
+       set <= SpirvSets::kTexturesPixel; ++set) {
     for (uint32_t i = 0; i < 32; ++i) {
       // Texture binding.
       {

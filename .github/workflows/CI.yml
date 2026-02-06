@@ -483,12 +483,13 @@ jobs:
           # Update submodules (no DirectXShaderCompiler needed for iOS)
           retry git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands\|DirectXShaderCompiler')
 
+          # Build premake5 as a macOS host tool if not cached, then generate
+          # iOS project files.
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
-            ./xenia-build.py premake --target_os=ios
+            ./xenia-build.py premake
             cp third_party/premake-core/bin/release/premake5 tools/build/bin
-          else
-            ./xenia-build.py premake --target_os=ios
           fi
+          ./xenia-build.py premake --target_os=ios
 
       - name: Build
         run: |
