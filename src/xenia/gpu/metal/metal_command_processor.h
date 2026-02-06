@@ -416,6 +416,22 @@ class MetalCommandProcessor : public CommandProcessor {
   SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};
   std::unordered_map<uint64_t, MTL::RenderPipelineState*> msl_pipeline_cache_;
 
+  // SPIRV-Cross tessellation support.
+  MTL::ComputePipelineState* tess_factor_pipeline_tri_ = nullptr;
+  MTL::ComputePipelineState* tess_factor_pipeline_quad_ = nullptr;
+  MTL::Buffer* tess_factor_buffer_ = nullptr;
+  uint32_t tess_factor_buffer_patch_capacity_ = 0;
+  std::unordered_map<uint64_t, MTL::RenderPipelineState*>
+      msl_tess_pipeline_cache_;
+  bool InitializeMslTessellation();
+  void ShutdownMslTessellation();
+  MTL::RenderPipelineState* GetOrCreateMslTessPipelineState(
+      MslShader::MslTranslation* domain_translation,
+      MslShader::MslTranslation* pixel_translation,
+      Shader::HostVertexShaderType host_vertex_shader_type,
+      const RegisterFile& regs);
+  bool EnsureTessFactorBuffer(uint32_t patch_count);
+
   // Shader cache (keyed by ucode hash)
   std::unordered_map<uint64_t, std::unique_ptr<MetalShader>> shader_cache_;
 
