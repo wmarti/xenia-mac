@@ -24,14 +24,21 @@
 #include "xenia/ui/shaders/bytecode/metal/guest_output_bilinear_dither_ps.h"
 #include "xenia/ui/shaders/bytecode/metal/guest_output_bilinear_ps.h"
 #include "xenia/ui/shaders/bytecode/metal/guest_output_triangle_strip_rect_vs.h"
+#include "xenia/base/platform.h"
+
+#if XE_PLATFORM_IOS
+#include "xenia/ui/surface_ios.h"
+#import <UIKit/UIKit.h>
+#else
 #include "xenia/ui/surface_mac.h"
+#import <Cocoa/Cocoa.h>
+#endif
 
 // Objective-C imports for Metal layer configuration
-#import <Cocoa/Cocoa.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <dispatch/dispatch.h>
-#if __has_include(<MetalFX/MetalFX.h>)
+#if !XE_PLATFORM_IOS && __has_include(<MetalFX/MetalFX.h>)
 #import <MetalFX/MetalFX.h>
 #define XE_METALFX_AVAILABLE 1
 #else
@@ -164,8 +171,11 @@ void MetalPresenter::Shutdown() {
 }
 
 Surface::TypeFlags MetalPresenter::GetSupportedSurfaceTypes() const {
-  // TODO(wmarti): Return actual supported surface types for Metal
+#if XE_PLATFORM_IOS
+  return Surface::kTypeFlag_iOSUIView;
+#else
   return Surface::kTypeFlag_MacNSView;
+#endif
 }
 
 bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
@@ -787,25 +797,31 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
     return SurfacePaintConnectResult::kFailure;
   }
 
-  // For macOS, we expect a MacNSView surface
-  if (surface_type != Surface::kTypeIndex_MacNSView) {
-    XELOGE("Metal presenter requires MacNSView surface, got: {}", static_cast<int>(surface_type));
-    return SurfacePaintConnectResult::kFailure;
-  }
-
-  // Cast to MacNSViewSurface to get the CAMetalLayer
-  MacNSViewSurface& mac_ns_view_surface = static_cast<MacNSViewSurface&>(new_surface);
-  CAMetalLayer* metal_layer = mac_ns_view_surface.GetOrCreateMetalLayer();
-
-  if (!metal_layer) {
-    XELOGE("Metal presenter failed to get CAMetalLayer from surface");
-    return SurfacePaintConnectResult::kFailure;
-  }
-
-  // Configure the metal layer for our device using Objective-C syntax
-  metal_layer.device = (__bridge id<MTLDevice>)device_;
-  metal_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+  // Obtain a CAMetalLayer from the platform surface.
+  CAMetalLayer* metal_layer = nullptr;
   CGFloat backing_scale = 1.0;
+
+#if XE_PLATFORM_IOS
+  if (surface_type != Surface::kTypeIndex_iOSUIView) {
+    XELOGE("Metal presenter requires iOSUIView surface, got: {}",
+           static_cast<int>(surface_type));
+    return SurfacePaintConnectResult::kFailure;
+  }
+  iOSUIViewSurface& ios_surface = static_cast<iOSUIViewSurface&>(new_surface);
+  metal_layer = ios_surface.GetOrCreateMetalLayer();
+  UIView* view = ios_surface.view();
+  if (view) {
+    backing_scale = [view contentScaleFactor];
+  }
+#else
+  if (surface_type != Surface::kTypeIndex_MacNSView) {
+    XELOGE("Metal presenter requires MacNSView surface, got: {}",
+           static_cast<int>(surface_type));
+    return SurfacePaintConnectResult::kFailure;
+  }
+  MacNSViewSurface& mac_ns_view_surface =
+      static_cast<MacNSViewSurface&>(new_surface);
+  metal_layer = mac_ns_view_surface.GetOrCreateMetalLayer();
   NSView* view = mac_ns_view_surface.view();
   if (view) {
     NSRect bounds = [view bounds];
@@ -818,6 +834,16 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
       backing_scale = view.window.backingScaleFactor;
     }
   }
+#endif
+
+  if (!metal_layer) {
+    XELOGE("Metal presenter failed to get CAMetalLayer from surface");
+    return SurfacePaintConnectResult::kFailure;
+  }
+
+  // Configure the metal layer for our device using Objective-C syntax.
+  metal_layer.device = (__bridge id<MTLDevice>)device_;
+  metal_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
   if (backing_scale <= 0.0) {
     backing_scale = 1.0;
   }
