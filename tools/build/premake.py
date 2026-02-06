@@ -134,7 +134,12 @@ def build_premake():
 def is_premake_usable(premake5_bin):
     # For absolute paths, check the file directly instead of searching PATH.
     if os.path.isabs(premake5_bin):
-        if not (os.path.isfile(premake5_bin) and os.access(premake5_bin, os.X_OK)):
+        # On Windows, try with .exe extension as well.
+        candidates = [premake5_bin]
+        if sys.platform == "win32":
+            candidates.append(premake5_bin + ".exe")
+        if not any(os.path.isfile(p) and os.access(p, os.X_OK)
+                   for p in candidates):
             return False
     elif not has_bin(premake5_bin):
         return False
