@@ -447,7 +447,7 @@ jobs:
         uses: actions/cache@main
         with:
           path: tools/build/bin/premake5
-          key: ${{ runner.os }}-premake5-${{ hashFiles('third_party/premake-core/**') }}
+          key: ${{ runner.os }}-premake5-ios-${{ hashFiles('.gitmodules') }}
 
       - name: Cache submodules
         id: cache-submodules-ios

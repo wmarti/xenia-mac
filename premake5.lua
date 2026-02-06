@@ -124,7 +124,7 @@ local function detect_target_arch()
   if option_arch then
     return option_arch
   end
-  if os.istarget("ios") then
+  if is_ios_target() then
     return "ARM64"
   end
   if os.istarget("macosx") then
@@ -387,7 +387,7 @@ end
 filter({"platforms:Linux-*", "kind:*App"})
   linkgroups("On")
 
-if os.istarget("macosx") then
+if os.istarget("macosx") and not is_ios_target() then
   filter("platforms:Mac-*")
     buildoptions({
       "-mmacosx-version-min=15.0",
@@ -461,7 +461,7 @@ filter({"platforms:Mac-x86_64", "toolset:clang"})
   })
 filter({})
 
-if os.istarget("ios") then
+if is_ios_target() then
   filter("platforms:iOS-*")
     system("ios")
     xcodebuildsettings({
@@ -681,6 +681,16 @@ workspace("xenia")
         platforms({"Linux-x86_64"})
         architecture("x86_64")
       end
+    elseif is_ios_target() then
+      platforms({"iOS-ARM64"})
+      filter("platforms:iOS-ARM64")
+        architecture("ARM64")
+        xcodebuildsettings({
+          ["ARCHS"] = "arm64",
+          ["IPHONEOS_DEPLOYMENT_TARGET"] = "17.0",
+          ["SDKROOT"] = "iphoneos",
+        })
+      filter({})
     elseif os.istarget("macosx") then
       local mac_platforms = nil
       if is_macos_arm64_host() then
@@ -703,16 +713,6 @@ workspace("xenia")
         xcodebuildsettings({
           ["ARCHS"] = "x86_64",
           ["CLANG_X86_VECTOR_INSTRUCTION_SET"] = "avx",
-        })
-      filter({})
-    elseif os.istarget("ios") then
-      platforms({"iOS-ARM64"})
-      filter("platforms:iOS-ARM64")
-        architecture("ARM64")
-        xcodebuildsettings({
-          ["ARCHS"] = "arm64",
-          ["IPHONEOS_DEPLOYMENT_TARGET"] = "17.0",
-          ["SDKROOT"] = "iphoneos",
         })
       filter({})
     elseif os.istarget("windows") then
@@ -760,7 +760,7 @@ workspace("xenia")
     include("third_party/libusb.lua")
   end
 
-  if not os.istarget("android") and not os.istarget("ios") then
+  if not os.istarget("android") and not is_ios_target() then
     -- SDL2 requires sdl2-config, and as of November 2020 isn't high-quality on
     -- Android yet, most importantly in game controllers - the keycode and axis
     -- enums are being ruined during conversion to SDL2 enums resulting in only
@@ -843,7 +843,7 @@ workspace("xenia")
   end
   include("src/xenia/debug/ui")
   include("src/xenia/gpu")
-  if os.istarget("macosx") or os.istarget("ios") then
+  if os.istarget("macosx") or is_ios_target() then
     include("src/xenia/gpu/metal")
   end
   include("src/xenia/gpu/null")
@@ -854,13 +854,13 @@ workspace("xenia")
   include("src/xenia/kernel")
   include("src/xenia/patcher")
   include("src/xenia/ui")
-  if os.istarget("macosx") or os.istarget("ios") then
+  if os.istarget("macosx") or is_ios_target() then
     include("src/xenia/ui/metal")
   end
   include("src/xenia/ui/vulkan")
   include("src/xenia/vfs")
 
-  if not os.istarget("android") and not os.istarget("ios") then
+  if not os.istarget("android") and not is_ios_target() then
     include("src/xenia/apu/sdl")
     include("src/xenia/helper/sdl")
     include("src/xenia/hid/sdl")

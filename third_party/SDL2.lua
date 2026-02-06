@@ -3,6 +3,12 @@
 -- since SDL2 is our robust API there like DirectX is on Windows.
 --
 
+-- SDL2 is not used on iOS or Android.
+if is_ios_target and is_ios_target() then
+  function sdl2_include() end
+  return
+end
+
 local sdl2_sys_includedirs = {}
 local sdl2_sys_libdirs = {}
 local third_party_path = os.getcwd()
