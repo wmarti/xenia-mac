@@ -49,15 +49,15 @@
 
 // Available graphics systems:
 #include "xenia/gpu/null/null_graphics_system.h"
-#if !XE_PLATFORM_MAC
+#if !XE_PLATFORM_APPLE
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
-#endif  // !XE_PLATFORM_MAC
+#endif  // !XE_PLATFORM_APPLE
 #if XE_PLATFORM_WIN32
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #endif  // XE_PLATFORM_WIN32
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 #include "xenia/gpu/metal/metal_graphics_system.h"
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE
 
 // Available input drivers:
 #include "xenia/hid/nop/nop_hid.h"
@@ -87,7 +87,7 @@ DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #define APU_OPTIONS "[sdl, nop]"
 #define HID_OPTIONS "[sdl, nop]"
 DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 DEFINE_string(gpu, "metal", "Graphics system. Use: [metal, null]", "GPU");
 #else
 DEFINE_string(gpu, "vulkan", "Graphics system. Use: [vulkan, null]", "GPU");
@@ -475,11 +475,11 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
 #if XE_PLATFORM_WIN32
   factory.Add<gpu::d3d12::D3D12GraphicsSystem>("d3d12");
 #endif  // XE_PLATFORM_WIN32
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   factory.Add<gpu::metal::MetalGraphicsSystem>("metal");
 #else
   factory.Add<gpu::vulkan::VulkanGraphicsSystem>("vulkan");
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE
   std::unique_ptr<gpu::GraphicsSystem> gpu_implementation =
       factory.Create(gpu_implementation_name);
   if (!gpu_implementation) {
@@ -900,7 +900,7 @@ void EmulatorApp::EmulatorThread(bool is_game_process) {
       xam->loader_data().host_path = xe::path_to_utf8(abs_path);
     }
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
     // macOS: Run through UI thread for Metal backend requirements.
     result = app_context().CallInUIThread(
         [this, abs_path]() { return emulator_window_->RunTitle(abs_path); });

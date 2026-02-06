@@ -666,7 +666,7 @@ HostToGuestThunk X64HelperEmitter::EmitHostToGuestThunk() {
   mov(rdx, qword[rsp + 8 * 2]);
   mov(r8, qword[rsp + 8 * 3]);
   ret();
-#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+#elif XE_PLATFORM_LINUX || XE_PLATFORM_APPLE
   // System-V ABI args:
   // rdi = target
   // rsi = arg0 (context)
@@ -762,7 +762,7 @@ GuestToHostThunk X64HelperEmitter::EmitGuestToHostThunk() {
 
   add(rsp, stack_size);
   ret();
-#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+#elif XE_PLATFORM_LINUX || XE_PLATFORM_APPLE
   // This function is being called using the Microsoft ABI from CallNative
   // rcx = target function
   // rdx = arg0
@@ -865,7 +865,7 @@ ResolveFunctionThunk X64HelperEmitter::EmitResolveFunctionThunk() {
 
   add(rsp, stack_size);
   jmp(rax);
-#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+#elif XE_PLATFORM_LINUX || XE_PLATFORM_APPLE
   // Function is called with the following params:
   // ebx = target PPC address
   // rsi = context

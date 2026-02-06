@@ -14,7 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#ifdef XE_PLATFORM_MAC
+#ifdef XE_PLATFORM_APPLE
 #include <libkern/OSCacheControl.h>
 #include <pthread.h>
 #endif
@@ -154,7 +154,7 @@ void PosixA64CodeCache::PlaceCode(uint32_t guest_address, void* machine_code,
   }
 
   // Flush instruction cache
-#ifdef XE_PLATFORM_MAC
+#ifdef XE_PLATFORM_APPLE
   // On macOS, use sys_icache_invalidate
   sys_icache_invalidate(code_execute_address, func_info.code_size.total);
 #else

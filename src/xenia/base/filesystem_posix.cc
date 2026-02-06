@@ -24,7 +24,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 #include <limits.h>
 #include <mach-o/dyld.h>
 #endif
@@ -48,7 +48,7 @@ std::filesystem::path to_path(const std::u16string_view source) {
 namespace filesystem {
 
 std::filesystem::path GetExecutablePath() {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   char path[PATH_MAX];
   uint32_t size = sizeof(path);
   if (_NSGetExecutablePath(path, &size) == 0) {
@@ -123,7 +123,7 @@ FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
 }
 
 bool Seek(FILE* file, int64_t offset, int origin) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   return fseeko(file, offset, origin) == 0;
 #else
   return fseeko64(file, off64_t(offset), origin) == 0;
@@ -131,7 +131,7 @@ bool Seek(FILE* file, int64_t offset, int origin) {
 }
 
 int64_t Tell(FILE* file) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   return int64_t(ftello(file));
 #else
   return int64_t(ftello64(file));
@@ -146,7 +146,7 @@ bool TruncateStdioFile(FILE* file, uint64_t length) {
   if (position < 0) {
     return false;
   }
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   if (ftruncate(fileno(file), length)) {
 #else
   if (ftruncate64(fileno(file), off64_t(length))) {

@@ -54,7 +54,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 #include <crt_externs.h>
 #include <spawn.h>
 #define environ (*_NSGetEnviron())
@@ -488,7 +488,7 @@ void EmulatorWindow::OnEmulatorInitialized() {
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 #else
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
     // Build arg_storage first, then create argv pointers.
     // This avoids dangling pointers from vector reallocation.
     std::vector<std::string> arg_storage;
@@ -606,7 +606,7 @@ void EmulatorWindow::OnEmulatorInitialized() {
       XELOGE("Failed to fork process");
       return;
     }
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE
 #endif
     // Exit directly - don't go through window close path which would
     // spawn a UI process if return_to_ui is set
@@ -655,7 +655,7 @@ void EmulatorWindow::EmulatorWindowListener::OnClosing(ui::UIEvent& e) {
         XELOGE("Failed to spawn UI process: {}", GetLastError());
       }
 #else
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
       // Build arg_storage first, then create argv pointers to avoid
       // dangling pointers from vector reallocation.
       std::vector<std::string> arg_storage;
@@ -716,7 +716,7 @@ void EmulatorWindow::EmulatorWindowListener::OnClosing(ui::UIEvent& e) {
       } else {
         XELOGE("Failed to fork UI process");
       }
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE
 #endif
     }
 
@@ -2485,7 +2485,7 @@ void EmulatorWindow::LaunchTitleInNewProcess(
   CloseHandle(pi.hProcess);
   CloseHandle(pi.hThread);
 #else
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   // Build arg_storage first, then create argv pointers to avoid
   // dangling pointers from vector reallocation.
   std::vector<std::string> arg_storage;
@@ -2588,7 +2588,7 @@ void EmulatorWindow::LaunchTitleInNewProcess(
     XELOGE("Failed to fork process");
     return;
   }
-#endif  // XE_PLATFORM_MAC
+#endif  // XE_PLATFORM_APPLE
 #endif
 
   XELOGI("Launched title in new process: {}", path_to_file.string());

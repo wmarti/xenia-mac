@@ -726,7 +726,7 @@ X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
   } else {
     return X_STATUS_UNSUCCESSFUL;
   }
-#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+#elif XE_PLATFORM_LINUX || XE_PLATFORM_APPLE
   // Use mutex to protect suspend_count access and coordinate with SelfSuspend.
   bool should_resume_host = false;
   {
@@ -780,7 +780,7 @@ X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
   }
 }
 
-#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+#if XE_PLATFORM_LINUX || XE_PLATFORM_APPLE
 uint32_t XThread::SelfSuspend() {
   auto guest_thread = guest_object<X_KTHREAD>();
   std::unique_lock<std::mutex> lock(suspend_mutex_);

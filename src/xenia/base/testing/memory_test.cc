@@ -521,7 +521,7 @@ TEST_CASE("map_view", "[virtual_memory_mapping]") {
       path, length, xe::memory::PageAccess::kReadWrite, true);
   REQUIRE(memory != xe::memory::kFileMappingHandleInvalid);
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   xe::memory::CloseFileMappingHandle(memory, path);
   SUCCEED("Fixed-address mapping is not supported on macOS.");
   return;
@@ -544,7 +544,7 @@ TEST_CASE("read_write_view", "[virtual_memory_mapping]") {
       path, length, xe::memory::PageAccess::kReadWrite, true);
   REQUIRE(memory != xe::memory::kFileMappingHandleInvalid);
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   xe::memory::CloseFileMappingHandle(memory, path);
   SUCCEED("Fixed-address mapping is not supported on macOS.");
   return;

@@ -30,7 +30,7 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
-#elif XE_PLATFORM_MAC
+#elif XE_PLATFORM_APPLE
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>

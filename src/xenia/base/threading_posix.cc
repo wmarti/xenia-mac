@@ -27,7 +27,7 @@
 
 #include "logging.h"
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 #include <mach/mach.h>
 #endif
 
@@ -107,7 +107,7 @@ enum class SignalType {
   k_Count
 };
 
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
 // macOS lacks real-time signals (SIGRTMIN/SIGRTMAX). Use SIGUSR1/SIGUSR2.
 int GetSystemSignal(SignalType num) {
   switch (num) {
@@ -170,7 +170,7 @@ void EnableAffinityConfiguration() {}
 // uint64_t ticks() { return mach_absolute_time(); }
 
 uint32_t current_thread_system_id() {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   return static_cast<uint32_t>(pthread_mach_thread_np(pthread_self()));
 #else
   return static_cast<uint32_t>(syscall(SYS_gettid));
@@ -230,7 +230,7 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
 class PosixConditionBase {
  public:
   PosixConditionBase() {
-#if !XE_PLATFORM_MAC
+#if !XE_PLATFORM_APPLE
     // Initialize as robust mutex to handle thread termination gracefully.
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -250,7 +250,7 @@ class PosixConditionBase {
   WaitResult Wait(std::chrono::milliseconds timeout) {
     bool executed;
     auto predicate = [this] { return this->signaled(); };
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
     // Standard locking on macOS (no robust mutex support).
     std::unique_lock<std::mutex> lock(mutex_);
 #else
@@ -312,7 +312,7 @@ class PosixConditionBase {
       bool all_locked = true;
 
       for (size_t i = 0; i < handles.size(); ++i) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
         // macOS: no robust mutex support.
         std::unique_lock<std::mutex> lk(handles[i]->mutex_, std::try_to_lock);
         if (!lk.owns_lock()) {
@@ -721,7 +721,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     WaitStarted();
     std::unique_lock<std::mutex> lock(state_mutex_);
     if (state_ != State::kUninitialized && state_ != State::kFinished) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
       // macOS can only set the current thread's name.
       if (pthread_self() == thread_) {
         pthread_setname_np(std::string(name).c_str());
@@ -747,7 +747,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 #endif
 
   uint32_t system_id() const {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
     return static_cast<uint32_t>(pthread_mach_thread_np(thread_));
 #else
     return static_cast<uint32_t>(thread_);
@@ -756,7 +756,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   uint64_t affinity_mask() const {
     WaitStarted();
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
     // Thread affinity is not supported on macOS.
     return 0;
 #else
@@ -783,7 +783,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   void set_affinity_mask(uint64_t mask) const {
     WaitStarted();
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
     // Thread affinity is not supported on macOS.
     (void)mask;
     return;
@@ -842,7 +842,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     WaitStarted();
     std::unique_lock lock(callback_mutex_);
     user_callback_ = std::move(callback);
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
     // No pthread_sigqueue on macOS, use pthread_kill (no si_value payload).
     pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
 #elif XE_PLATFORM_ANDROID
@@ -923,7 +923,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       cond_.notify_all();
     }
     if (is_current_thread) {
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && defined(__aarch64__)
       pthread_jit_write_protect_np(1);
 #endif
       pthread_exit(reinterpret_cast<void*>(exit_code));
@@ -1347,7 +1347,7 @@ void Thread::Exit(int exit_code) {
     current_thread_->Terminate(exit_code);
   } else {
     // Should only happen with the main thread
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && defined(__aarch64__)
     pthread_jit_write_protect_np(1);
 #endif
     pthread_exit(reinterpret_cast<void*>(exit_code));
@@ -1357,7 +1357,7 @@ void Thread::Exit(int exit_code) {
 }
 
 void set_name(const std::string_view name) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   pthread_setname_np(std::string(name).c_str());
 #else
   pthread_setname_np(pthread_self(), std::string(name).c_str());
@@ -1380,7 +1380,7 @@ static void signal_handler(int signal, siginfo_t* info, void* /*context*/) {
       current_thread_->WaitSuspended();
     } break;
     case SignalType::kThreadUserCallback: {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
       // macOS: no si_value payload when using pthread_kill.
       if (alertable_state_ && current_thread_) {
         auto& condition =

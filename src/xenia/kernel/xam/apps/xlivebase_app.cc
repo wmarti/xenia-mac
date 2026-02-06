@@ -17,7 +17,7 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS  // inet_addr
 #endif
 #include <winsock2.h>  // NOLINT(build/include_order)
-#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+#elif XE_PLATFORM_LINUX || XE_PLATFORM_APPLE
 #include <netinet/in.h>
 #endif
 
