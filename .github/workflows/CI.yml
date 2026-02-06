@@ -485,10 +485,17 @@ jobs:
 
           # Build premake5 as a macOS host tool if not cached, then generate
           # iOS project files.
+          mkdir -p tools/build/bin
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
-            ./xenia-build.py premake
-            cp third_party/premake-core/bin/release/premake5 tools/build/bin
+            # Build premake5 from source (host macOS binary).
+            cd third_party/premake-core
+            make -f Bootstrap.mak PLATFORM=ARM64 osx
+            cd ../..
+            cp third_party/premake-core/bin/release/premake5 tools/build/bin/
+            chmod +x tools/build/bin/premake5
+            echo "premake5 built and copied to tools/build/bin/"
           fi
+          ls -la tools/build/bin/premake5
           ./xenia-build.py premake --target_os=ios
 
       - name: Build

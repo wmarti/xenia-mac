@@ -104,7 +104,9 @@ def build_premake():
             if premake_arch:
                 make_args.append(f"PLATFORM={premake_arch}")
             make_args.append("osx")
-            subprocess.call(make_args)
+            ret = subprocess.call(make_args)
+            if ret != 0:
+                print(f"ERROR: premake5 bootstrap build failed with exit code {ret}")
         elif sys.platform == "win32":
             # Grab Visual Studio version and execute shell to set up environment.
             vs_version = import_vs_environment()
@@ -130,7 +132,11 @@ def build_premake():
 
 
 def is_premake_usable(premake5_bin):
-    if not has_bin(premake5_bin):
+    # For absolute paths, check the file directly instead of searching PATH.
+    if os.path.isabs(premake5_bin):
+        if not (os.path.isfile(premake5_bin) and os.access(premake5_bin, os.X_OK)):
+            return False
+    elif not has_bin(premake5_bin):
         return False
     if sys.platform == "darwin":
         try:
