@@ -133,7 +133,11 @@ DEFINE_bool(metal_texture_upload_via_blit, true,
             "of CPU replaceRegion.",
             "GPU");
 
+#if METAL_SHADER_CONVERTER_AVAILABLE
 DEFINE_bool(metal_use_spirvcross, false,
+#else
+DEFINE_bool(metal_use_spirvcross, true,
+#endif
             "Use the SPIR-V -> SPIRV-Cross -> MSL shader translation path "
             "instead of the DXBC -> DXIL -> Metal Shader Converter path. "
             "Required for iOS support. Experimental.",
