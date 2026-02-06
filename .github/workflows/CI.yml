@@ -433,6 +433,68 @@ jobs:
           path: artifacts/release
           if-no-files-found: error
 
+  build-ios-arm64:
+    name: Build iOS ARM64 (libraries)
+    needs: lint
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@main
+        with:
+          fetch-depth: 0
+
+      - name: Cache premake5
+        id: cache-premake5
+        uses: actions/cache@main
+        with:
+          path: tools/build/bin/premake5
+          key: ${{ runner.os }}-premake5-${{ hashFiles('third_party/premake-core/**') }}
+
+      - name: Cache submodules
+        id: cache-submodules-ios
+        uses: actions/cache@v3
+        with:
+          path: |
+            third_party
+            .git/modules/third_party
+          key: ${{ runner.os }}-${{ runner.arch }}-submodules-ios-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-submodules-
+
+      - name: Setup
+        run: |
+          retry() {
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ $n -ge 5 ]; then
+                return 1
+              fi
+              sleep 5
+            done
+          }
+
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global http.postBuffer 524288000
+
+          # No SDL2/Qt/Vulkan needed for iOS library builds
+          brew install ninja
+
+          # Update submodules (no DirectXShaderCompiler needed for iOS)
+          retry git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands\|DirectXShaderCompiler')
+
+          if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
+            ./xenia-build.py premake --target_os=ios
+            cp third_party/premake-core/bin/release/premake5 tools/build/bin
+          else
+            ./xenia-build.py premake --target_os=ios
+          fi
+
+      - name: Build
+        run: |
+          # Build Metal GPU library for iOS (verifies SPIRV-Cross path compiles)
+          ./xenia-build.py build --config=Release --target_os=ios --target=xenia-gpu-metal
+
   build-macos-x86_64:
     name: Build macOS x86_64
     # Disabled temporarily. Re-enable by removing the if:false line below.
