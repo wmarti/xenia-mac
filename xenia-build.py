@@ -935,9 +935,11 @@ def get_premake_target_os(target_os_override=None):
     if target_os_override and target_os_override != target_os:
         if target_os_override == "android":
             target_os = target_os_override
+        elif target_os_override == "ios" and sys.platform == "darwin":
+            target_os = target_os_override
         else:
             print(
-                "ERROR: cross-compilation is only supported for Android target")
+                "ERROR: cross-compilation is only supported for Android and iOS (from macOS) targets")
             sys.exit(1)
     return target_os
 
@@ -986,7 +988,7 @@ def run_platform_premake(target_os_override=None, cc=None, devenv=None,
     """
     target_os = get_premake_target_os(target_os_override)
     if not devenv:
-        if target_os == "macosx":
+        if target_os == "macosx" or target_os == "ios":
             devenv = "xcode4"
         elif target_os == "windows":
             vs_version = os.getenv("VSVERSION", VSVERSION_MINIMUM)

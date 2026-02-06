@@ -6,9 +6,9 @@ project("xenia-ui-metal")
   uuid("f5a4b3c2-d1e8-4567-9abc-def123456789")
   language("C++")
   
-  filter("system:macosx")
+  filter("system:macosx or system:ios")
     kind("StaticLib")
-  filter("not system:macosx")
+  filter({"not system:macosx", "not system:ios"})
     kind("None")
   filter({})
   
@@ -25,16 +25,19 @@ project("xenia-ui-metal")
     "../shaders/bytecode/metal/*.h",
   })
 
-  filter("system:macosx")
+  filter("system:macosx or system:ios")
     links({
       "Metal.framework",
-      "MetalFX.framework",
       "MetalKit.framework",
       "QuartzCore.framework",
     })
     files({
       "metal_immediate_drawer.mm",
       "metal_presenter.mm",
+    })
+  filter("system:macosx")
+    links({
+      "MetalFX.framework",
     })
   filter({})
 

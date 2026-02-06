@@ -18,6 +18,7 @@ local function match_platform_files(base_path, base_match)
   removefiles({base_path.."/".."**_x11.h", base_path.."/".."**_x11.cc"})
   removefiles({base_path.."/".."**_gtk.h", base_path.."/".."**_gtk.cc"})
   removefiles({base_path.."/".."**_android.h", base_path.."/".."**_android.cc"})
+  removefiles({base_path.."/".."**_ios.h", base_path.."/".."**_ios.cc"})
   removefiles({base_path.."/".."**_mac.h", base_path.."/".."**_mac.cc"})
   removefiles({base_path.."/".."**_win.h", base_path.."/".."**_win.cc"})
   filter("platforms:Windows-*")
@@ -63,6 +64,38 @@ local function match_platform_files(base_path, base_match)
       base_path.."/"..base_match.."_android.h",
       base_path.."/"..base_match.."_android.cc",
     })
+  filter("platforms:iOS-*")
+    -- First add iOS-specific files.
+    files({
+      base_path.."/"..base_match.."_ios.h",
+      base_path.."/"..base_match.."_ios.cc",
+    })
+    -- Then add Mac files as fallbacks (shared Apple platform code).
+    files({
+      base_path.."/"..base_match.."_mac.h",
+      base_path.."/"..base_match.."_mac.cc",
+    })
+    -- Then add POSIX files as fallbacks.
+    files({
+      base_path.."/"..base_match.."_posix.h",
+      base_path.."/"..base_match.."_posix.cc",
+    })
+    -- Remove Mac fallback when an iOS-specific file exists.
+    local ios_files = os.matchfiles(base_path.."/"..base_match.."_ios.cc")
+    for _, ios_file in ipairs(ios_files) do
+      local mac_file = ios_file:gsub("_ios%.cc$", "_mac.cc")
+      removefiles({mac_file})
+    end
+    -- Remove POSIX fallback when a Mac or iOS-specific file exists.
+    local apple_files = os.matchfiles(base_path.."/"..base_match.."_mac.cc")
+    for _, apple_file in ipairs(apple_files) do
+      local posix_file = apple_file:gsub("_mac%.cc$", "_posix.cc")
+      removefiles({posix_file})
+    end
+    for _, ios_file in ipairs(ios_files) do
+      local posix_file = ios_file:gsub("_ios%.cc$", "_posix.cc")
+      removefiles({posix_file})
+    end
   filter({})
 end
 
