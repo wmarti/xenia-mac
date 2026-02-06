@@ -2991,25 +2991,13 @@ bool MetalCommandProcessor::IssueDrawMsl(
     return true;
   }
 
-  // For now, skip geometry-expanding primitives (point sprites, rect lists,
-  // quad lists) — these require geometry shader emulation (Phase 5).
-  switch (primitive_processing_result.host_primitive_type) {
-    case xenos::PrimitiveType::kPointList:
-    case xenos::PrimitiveType::kRectangleList:
-    case xenos::PrimitiveType::kQuadList:
-      // TODO(Phase 5): Implement vertex expansion for these types.
-      static bool geom_logged = false;
-      if (!geom_logged) {
-        geom_logged = true;
-        XELOGW(
-            "Metal SPIRV-Cross: Geometry-expanding primitives ({}) not yet "
-            "implemented; skipping draw",
-            uint32_t(primitive_processing_result.host_primitive_type));
-      }
-      return true;
-    default:
-      break;
-  }
+  // Determine the host vertex shader type for geometry expansion.
+  // The primitive processor has already set kPointListAsTriangleStrip or
+  // kRectangleListAsTriangleStrip when VS expansion is needed (enabled by
+  // setting point_sprites_supported_without_vs_expansion = false in the
+  // primitive processor init when spirvcross is active).
+  Shader::HostVertexShaderType host_vertex_shader_type =
+      primitive_processing_result.host_vertex_shader_type;
 
   // Compute interpolator mask for shader modifications.
   uint32_t ps_param_gen_pos = UINT32_MAX;
@@ -3026,8 +3014,7 @@ bool MetalCommandProcessor::IssueDrawMsl(
   // Compute SPIRV shader modifications.
   SpirvShaderTranslator::Modification vertex_shader_modification =
       GetCurrentSpirvVertexShaderModification(
-          *msl_vertex_shader, Shader::HostVertexShaderType::kVertex,
-          interpolator_mask);
+          *msl_vertex_shader, host_vertex_shader_type, interpolator_mask);
   SpirvShaderTranslator::Modification pixel_shader_modification =
       msl_pixel_shader
           ? GetCurrentSpirvPixelShaderModification(
@@ -3121,7 +3108,7 @@ bool MetalCommandProcessor::IssueDrawMsl(
 
   // Update SPIRV system constants.
   UpdateSpirvSystemConstantValues(
-      primitive_polygonal,
+      primitive_processing_result, primitive_polygonal,
       primitive_processing_result.line_loop_closing_index,
       primitive_processing_result.host_shader_index_endian, viewport_info,
       used_texture_mask, normalized_depth_control, normalized_color_mask);
@@ -6402,6 +6389,7 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateMslPipelineState(
 }
 
 void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
+    const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
     bool primitive_polygonal, uint32_t line_loop_closing_index,
     xenos::Endian index_endian,
     const draw_util::ViewportInfo& viewport_info, uint32_t used_texture_mask,
@@ -6475,6 +6463,20 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
     }
   }
 
+  // Vertex index loading for VS-based primitive expansion (point sprites,
+  // rectangle lists).  When the primitive processor builds a host-side
+  // index buffer for DMA-based VS expansion the shader must load the
+  // original guest vertex index from shared memory.
+  if (primitive_processing_result.index_buffer_type ==
+      PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA) {
+    flags |=
+        SpirvShaderTranslator::kSysFlag_ComputeOrPrimitiveVertexIndexLoad;
+    if (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt32) {
+      flags |= SpirvShaderTranslator::
+          kSysFlag_ComputeOrPrimitiveVertexIndexLoad32Bit;
+    }
+  }
+
   consts.flags = flags;
 
   // Vertex index.
@@ -6482,13 +6484,21 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
   consts.vertex_base_index =
       regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
 
+  // Vertex index load address (for VS-based primitive expansion).
+  if (flags &
+      (SpirvShaderTranslator::kSysFlag_VertexIndexLoad |
+       SpirvShaderTranslator::kSysFlag_ComputeOrPrimitiveVertexIndexLoad)) {
+    consts.vertex_index_load_address =
+        primitive_processing_result.guest_index_base;
+  }
+
   // NDC scale/offset.
   for (uint32_t i = 0; i < 3; ++i) {
     consts.ndc_scale[i] = viewport_info.ndc_scale[i];
     consts.ndc_offset[i] = viewport_info.ndc_offset[i];
   }
 
-  // Point rendering.
+  // Point rendering (matching Vulkan backend).
   auto pa_su_point_size = regs.Get<reg::PA_SU_POINT_SIZE>();
   auto pa_su_point_minmax = regs.Get<reg::PA_SU_POINT_MINMAX>();
   consts.point_vertex_diameter_min =
@@ -6499,16 +6509,18 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
       float(pa_su_point_size.width) * (2.0f / 16.0f);
   consts.point_constant_diameter[1] =
       float(pa_su_point_size.height) * (2.0f / 16.0f);
-  float point_screen_to_ndc_x =
-      (viewport_info.ndc_scale[0] != 0.0f)
-          ? (0.5f / viewport_info.ndc_scale[0])
-          : 0.0f;
-  float point_screen_to_ndc_y =
-      (viewport_info.ndc_scale[1] != 0.0f)
-          ? (-0.5f / viewport_info.ndc_scale[1])
-          : 0.0f;
-  consts.point_screen_diameter_to_ndc_radius[0] = point_screen_to_ndc_x;
-  consts.point_screen_diameter_to_ndc_radius[1] = point_screen_to_ndc_y;
+  // 2 because 1 in the NDC is half of the viewport's axis, 0.5 for diameter
+  // to radius conversion — matching the Vulkan backend formula.
+  uint32_t draw_resolution_scale_x =
+      texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1;
+  uint32_t draw_resolution_scale_y =
+      texture_cache_ ? texture_cache_->draw_resolution_scale_y() : 1;
+  consts.point_screen_diameter_to_ndc_radius[0] =
+      float(draw_resolution_scale_x) /
+      float(std::max(viewport_info.xy_extent[0], uint32_t(1)));
+  consts.point_screen_diameter_to_ndc_radius[1] =
+      float(draw_resolution_scale_y) /
+      float(std::max(viewport_info.xy_extent[1], uint32_t(1)));
 
   // Texture swizzled signs and swizzles — retrieved from the texture cache
   // (matching Vulkan backend behavior).

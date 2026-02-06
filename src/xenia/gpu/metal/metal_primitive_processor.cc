@@ -16,6 +16,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
 
 namespace xe {
@@ -31,21 +32,31 @@ MetalPrimitiveProcessor::MetalPrimitiveProcessor(
 MetalPrimitiveProcessor::~MetalPrimitiveProcessor() { Shutdown(true); }
 
 bool MetalPrimitiveProcessor::Initialize() {
-  // Initialize the base primitive processor
-  // Metal supports all primitive types through conversion
+  // When using SPIRV-Cross (no mesh shaders / MSC), point sprites and
+  // rectangle lists must be expanded in the vertex shader because there
+  // are no geometry shaders available.  The SpirvShaderTranslator has
+  // built-in support for kPointListAsTriangleStrip and
+  // kRectangleListAsTriangleStrip host vertex shader types.
+  bool spirvcross = cvars::metal_use_spirvcross;
+  bool point_sprites_without_expansion = !spirvcross;
+  bool rect_lists_without_expansion = !spirvcross;
+
   if (!InitializeCommon(
           true,   // full_32bit_vertex_indices_supported
           false,  // triangle_fans_supported (will convert)
           false,  // line_loops_supported (will convert)
           false,  // quad_lists_supported (will convert)
-          true,   // point_sprites_supported_without_vs_expansion
-          true))  // rectangle_lists_supported_without_vs_expansion
+          point_sprites_without_expansion,
+          rect_lists_without_expansion))
   {
     Shutdown();
     return false;
   }
 
-  XELOGI("MetalPrimitiveProcessor initialized successfully");
+  XELOGI("MetalPrimitiveProcessor initialized (spirvcross={}, "
+         "vs_point_expansion={}, vs_rect_expansion={})",
+         spirvcross, !point_sprites_without_expansion,
+         !rect_lists_without_expansion);
   return true;
 }
 
