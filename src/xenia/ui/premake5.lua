@@ -23,6 +23,15 @@ project("xenia-ui")
       "renderdoc_api.cc",
       "renderdoc_api.h",
     })
+  filter("system:ios")
+    files({
+      "surface_ios.mm",
+      "windowed_app_context_ios.mm",
+    })
+    removefiles({
+      "renderdoc_api.cc",
+      "renderdoc_api.h",
+    })
   filter({})
   if os.istarget("android") then
     filter("platforms:Android-*")
