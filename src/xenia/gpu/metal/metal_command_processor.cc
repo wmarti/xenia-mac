@@ -1102,6 +1102,11 @@ bool MetalCommandProcessor::InitializeShaderTranslation() {
         render_target_cache_->msaa_2x_supported(),
         render_target_cache_->draw_resolution_scale_x(),
         render_target_cache_->draw_resolution_scale_y());
+
+    if (!InitializeMslTessellation()) {
+      XELOGW("SPIRV-Cross: Tessellation factor pipelines failed to init; "
+             "tessellated draws will be skipped");
+    }
   }
 
   // Configure MSC minimum targets to avoid materialization failures on older
@@ -1298,6 +1303,7 @@ void MetalCommandProcessor::ShutdownContext() {
   shader_cache_.clear();
 
   // SPIRV-Cross resources.
+  ShutdownMslTessellation();
   for (auto& [key, pso] : msl_pipeline_cache_) {
     if (pso) {
       pso->release();
@@ -3274,13 +3280,16 @@ bool MetalCommandProcessor::IssueDrawMsl(
   auto* msl_vertex_shader = static_cast<MslShader*>(vertex_shader);
   auto* msl_pixel_shader = static_cast<MslShader*>(pixel_shader);
 
-  // Tessellation and geometry emulation not yet supported on SPIRV-Cross path.
-  if (primitive_processing_result.IsTessellated()) {
+  // Tessellation draws use a separate pipeline path with Metal's native
+  // tessellation: a compute kernel generates tessellation factors and the
+  // domain shader (TES) runs as the post-tessellation vertex function.
+  const bool is_tessellated = primitive_processing_result.IsTessellated();
+  if (is_tessellated && !tess_factor_pipeline_tri_) {
     static bool tess_logged = false;
     if (!tess_logged) {
       tess_logged = true;
-      XELOGW(
-          "Metal SPIRV-Cross: Tessellation not yet implemented; skipping draw");
+      XELOGW("SPIRV-Cross: Tessellation factor pipelines not available; "
+             "skipping tessellated draw");
     }
     return true;
   }
@@ -3355,8 +3364,14 @@ bool MetalCommandProcessor::IssueDrawMsl(
   }
 
   // Create or retrieve pipeline state.
-  MTL::RenderPipelineState* pipeline =
-      GetOrCreateMslPipelineState(vertex_translation, pixel_translation, regs);
+  MTL::RenderPipelineState* pipeline = nullptr;
+  if (is_tessellated) {
+    pipeline = GetOrCreateMslTessPipelineState(
+        vertex_translation, pixel_translation, host_vertex_shader_type, regs);
+  } else {
+    pipeline =
+        GetOrCreateMslPipelineState(vertex_translation, pixel_translation, regs);
+  }
   if (!pipeline) {
     XELOGE("SPIRV-Cross: Failed to create pipeline state");
     return false;
@@ -3633,104 +3648,218 @@ bool MetalCommandProcessor::IssueDrawMsl(
   // =====================================================================
   // Draw dispatch — native Metal encoder calls (no IRRuntime).
   // =====================================================================
-  MTL::PrimitiveType mtl_primitive = MTL::PrimitiveTypeTriangle;
-  switch (primitive_processing_result.host_primitive_type) {
-    case xenos::PrimitiveType::kPointList:
-      mtl_primitive = MTL::PrimitiveTypePoint;
-      break;
-    case xenos::PrimitiveType::kLineList:
-      mtl_primitive = MTL::PrimitiveTypeLine;
-      break;
-    case xenos::PrimitiveType::kLineStrip:
-      mtl_primitive = MTL::PrimitiveTypeLineStrip;
-      break;
-    case xenos::PrimitiveType::kTriangleList:
-    case xenos::PrimitiveType::kRectangleList:
-      mtl_primitive = MTL::PrimitiveTypeTriangle;
-      break;
-    case xenos::PrimitiveType::kTriangleStrip:
-      mtl_primitive = MTL::PrimitiveTypeTriangleStrip;
-      break;
-    default:
-      XELOGE(
-          "SPIRV-Cross: Unsupported host primitive type {}",
-          uint32_t(primitive_processing_result.host_primitive_type));
-      return false;
-  }
+  if (is_tessellated) {
+    // ---------------------------------------------------------------
+    // Tessellated draw: fill tessellation factor buffer, then drawPatches.
+    // ---------------------------------------------------------------
+    // Xenos tess levels are 0-based; add 1 to match other backends.
+    float max_tess = std::max(
+        1.0f, regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f);
 
-  auto request_guest_index_range = [&](uint64_t index_base,
-                                       uint32_t index_count,
-                                       MTL::IndexType index_type) -> bool {
-    if (!shared_memory_) {
-      return false;
-    }
-    uint32_t index_stride = (index_type == MTL::IndexTypeUInt16)
-                                ? sizeof(uint16_t)
-                                : sizeof(uint32_t);
-    uint64_t index_length = uint64_t(index_count) * index_stride;
-    if (index_base > SharedMemory::kBufferSize ||
-        SharedMemory::kBufferSize - index_base < index_length) {
-      return false;
-    }
-    return shared_memory_->RequestRange(static_cast<uint32_t>(index_base),
-                                        static_cast<uint32_t>(index_length));
-  };
-
-  if (primitive_processing_result.index_buffer_type ==
-      PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
-    // Non-indexed draw.
-    current_render_encoder_->drawPrimitives(
-        mtl_primitive, NS::UInteger(0),
-        NS::UInteger(primitive_processing_result.host_draw_vertex_count));
-  } else {
-    // Indexed draw.
-    MTL::IndexType index_type =
-        (primitive_processing_result.host_index_format ==
-         xenos::IndexFormat::kInt16)
-            ? MTL::IndexTypeUInt16
-            : MTL::IndexTypeUInt32;
-    MTL::Buffer* index_buffer = nullptr;
-    uint64_t index_offset = 0;
-    switch (primitive_processing_result.index_buffer_type) {
-      case PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA:
-        index_buffer = shared_memory_ ? shared_memory_->GetBuffer() : nullptr;
-        index_offset = primitive_processing_result.guest_index_base;
-        if (!request_guest_index_range(
-                index_offset,
-                primitive_processing_result.host_draw_vertex_count,
-                index_type)) {
-          XELOGE("SPIRV-Cross: Failed to validate guest index buffer range");
-          return false;
-        }
+    // Determine control points per patch and patch count from the draw.
+    // The primitive processor passes patch count in host_draw_vertex_count
+    // for tessellated draws (vertex count = cp_per_patch * patch_count).
+    uint32_t cp_per_patch = 1;
+    bool is_quad_domain = false;
+    switch (host_vertex_shader_type) {
+      case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
+      case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
+        cp_per_patch = 3;
         break;
-      case PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted:
-        if (primitive_processor_) {
-          index_buffer = primitive_processor_->GetConvertedIndexBuffer(
-              primitive_processing_result.host_index_buffer_handle,
-              index_offset);
-        }
+      case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
+      case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
+        cp_per_patch = 4;
+        is_quad_domain = true;
         break;
-      case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto:
-      case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA:
-        if (primitive_processor_) {
-          index_buffer = primitive_processor_->GetBuiltinIndexBuffer();
-          index_offset = primitive_processing_result.host_index_buffer_handle;
-        }
+      case Shader::HostVertexShaderType::kLineDomainCPIndexed:
+      case Shader::HostVertexShaderType::kLineDomainPatchIndexed:
+        cp_per_patch = 2;
         break;
       default:
-        XELOGE("SPIRV-Cross: Unsupported index buffer type {}",
-               uint32_t(primitive_processing_result.index_buffer_type));
-        return false;
+        break;
     }
-    if (!index_buffer) {
-      XELOGE("SPIRV-Cross: Index buffer is null");
+    uint32_t vertex_count =
+        primitive_processing_result.host_draw_vertex_count;
+    uint32_t patch_count =
+        cp_per_patch > 0 ? vertex_count / cp_per_patch : 0;
+    if (patch_count == 0) {
+      return true;  // Nothing to draw.
+    }
+
+    // Ensure tessellation factor buffer is large enough.
+    if (!EnsureTessFactorBuffer(patch_count)) {
+      XELOGE("SPIRV-Cross: Failed to allocate tess factor buffer for {} "
+             "patches",
+             patch_count);
       return false;
     }
-    UseRenderEncoderResource(index_buffer, MTL::ResourceUsageRead);
-    current_render_encoder_->drawIndexedPrimitives(
-        mtl_primitive,
-        NS::UInteger(primitive_processing_result.host_draw_vertex_count),
-        index_type, index_buffer, NS::UInteger(index_offset));
+
+    // Fill tessellation factors on the CPU (all patches get uniform factors
+    // for discrete/continuous modes).
+    // IEEE 754 float32 → float16 conversion for tessellation factors.
+    auto f32_to_f16 = [](float v) -> uint16_t {
+      uint32_t b;
+      std::memcpy(&b, &v, 4);
+      uint16_t s = (b >> 16) & 0x8000u;
+      int e = int((b >> 23) & 0xFFu) - 127 + 15;
+      uint32_t m = b & 0x7FFFFFu;
+      if (e <= 0) return s;
+      if (e >= 31) return uint16_t(s | 0x7C00u);
+      return uint16_t(s | (e << 10) | (m >> 13));
+    };
+    uint16_t ef = f32_to_f16(max_tess);
+    uint8_t* factor_data =
+        static_cast<uint8_t*>(tess_factor_buffer_->contents());
+    if (is_quad_domain) {
+      // MTLQuadTessellationFactorsHalf: 4 edge + 2 inside = 12 bytes
+      struct QuadFactors {
+        uint16_t edge[4];
+        uint16_t inside[2];
+      };
+      static_assert(sizeof(QuadFactors) == 12);
+      auto* factors = reinterpret_cast<QuadFactors*>(factor_data);
+      for (uint32_t i = 0; i < patch_count; ++i) {
+        factors[i].edge[0] = ef;
+        factors[i].edge[1] = ef;
+        factors[i].edge[2] = ef;
+        factors[i].edge[3] = ef;
+        factors[i].inside[0] = ef;
+        factors[i].inside[1] = ef;
+      }
+    } else {
+      // MTLTriangleTessellationFactorsHalf: 3 edge + 1 inside = 8 bytes
+      struct TriFactors {
+        uint16_t edge[3];
+        uint16_t inside;
+      };
+      static_assert(sizeof(TriFactors) == 8);
+      auto* factors = reinterpret_cast<TriFactors*>(factor_data);
+      for (uint32_t i = 0; i < patch_count; ++i) {
+        factors[i].edge[0] = ef;
+        factors[i].edge[1] = ef;
+        factors[i].edge[2] = ef;
+        factors[i].inside = ef;
+      }
+    }
+
+    // Draw with tessellation.
+    UseRenderEncoderResource(tess_factor_buffer_, MTL::ResourceUsageRead);
+    current_render_encoder_->setTessellationFactorBuffer(
+        tess_factor_buffer_, 0, 0);
+    current_render_encoder_->drawPatches(
+        NS::UInteger(cp_per_patch),
+        NS::UInteger(0),
+        NS::UInteger(patch_count),
+        tess_factor_buffer_,
+        0,                        // factorBufferOffset
+        NS::UInteger(1),          // instanceCount
+        NS::UInteger(0));         // baseInstance
+  } else {
+    // ---------------------------------------------------------------
+    // Non-tessellated draw: standard primitives.
+    // ---------------------------------------------------------------
+    MTL::PrimitiveType mtl_primitive = MTL::PrimitiveTypeTriangle;
+    switch (primitive_processing_result.host_primitive_type) {
+      case xenos::PrimitiveType::kPointList:
+        mtl_primitive = MTL::PrimitiveTypePoint;
+        break;
+      case xenos::PrimitiveType::kLineList:
+        mtl_primitive = MTL::PrimitiveTypeLine;
+        break;
+      case xenos::PrimitiveType::kLineStrip:
+        mtl_primitive = MTL::PrimitiveTypeLineStrip;
+        break;
+      case xenos::PrimitiveType::kTriangleList:
+      case xenos::PrimitiveType::kRectangleList:
+        mtl_primitive = MTL::PrimitiveTypeTriangle;
+        break;
+      case xenos::PrimitiveType::kTriangleStrip:
+        mtl_primitive = MTL::PrimitiveTypeTriangleStrip;
+        break;
+      default:
+        XELOGE(
+            "SPIRV-Cross: Unsupported host primitive type {}",
+            uint32_t(primitive_processing_result.host_primitive_type));
+        return false;
+    }
+
+    auto request_guest_index_range = [&](uint64_t index_base,
+                                         uint32_t index_count,
+                                         MTL::IndexType index_type) -> bool {
+      if (!shared_memory_) {
+        return false;
+      }
+      uint32_t index_stride = (index_type == MTL::IndexTypeUInt16)
+                                  ? sizeof(uint16_t)
+                                  : sizeof(uint32_t);
+      uint64_t index_length = uint64_t(index_count) * index_stride;
+      if (index_base > SharedMemory::kBufferSize ||
+          SharedMemory::kBufferSize - index_base < index_length) {
+        return false;
+      }
+      return shared_memory_->RequestRange(static_cast<uint32_t>(index_base),
+                                          static_cast<uint32_t>(index_length));
+    };
+
+    if (primitive_processing_result.index_buffer_type ==
+        PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
+      // Non-indexed draw.
+      current_render_encoder_->drawPrimitives(
+          mtl_primitive, NS::UInteger(0),
+          NS::UInteger(primitive_processing_result.host_draw_vertex_count));
+    } else {
+      // Indexed draw.
+      MTL::IndexType index_type =
+          (primitive_processing_result.host_index_format ==
+           xenos::IndexFormat::kInt16)
+              ? MTL::IndexTypeUInt16
+              : MTL::IndexTypeUInt32;
+      MTL::Buffer* index_buffer = nullptr;
+      uint64_t index_offset = 0;
+      switch (primitive_processing_result.index_buffer_type) {
+        case PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA:
+          index_buffer =
+              shared_memory_ ? shared_memory_->GetBuffer() : nullptr;
+          index_offset = primitive_processing_result.guest_index_base;
+          if (!request_guest_index_range(
+                  index_offset,
+                  primitive_processing_result.host_draw_vertex_count,
+                  index_type)) {
+            XELOGE(
+                "SPIRV-Cross: Failed to validate guest index buffer range");
+            return false;
+          }
+          break;
+        case PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted:
+          if (primitive_processor_) {
+            index_buffer = primitive_processor_->GetConvertedIndexBuffer(
+                primitive_processing_result.host_index_buffer_handle,
+                index_offset);
+          }
+          break;
+        case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto:
+        case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA:
+          if (primitive_processor_) {
+            index_buffer = primitive_processor_->GetBuiltinIndexBuffer();
+            index_offset =
+                primitive_processing_result.host_index_buffer_handle;
+          }
+          break;
+        default:
+          XELOGE("SPIRV-Cross: Unsupported index buffer type {}",
+                 uint32_t(primitive_processing_result.index_buffer_type));
+          return false;
+      }
+      if (!index_buffer) {
+        XELOGE("SPIRV-Cross: Index buffer is null");
+        return false;
+      }
+      UseRenderEncoderResource(index_buffer, MTL::ResourceUsageRead);
+      current_render_encoder_->drawIndexedPrimitives(
+          mtl_primitive,
+          NS::UInteger(primitive_processing_result.host_draw_vertex_count),
+          index_type, index_buffer, NS::UInteger(index_offset));
+    }
   }
 
   // Handle memexport.
@@ -6855,6 +6984,318 @@ MetalCommandProcessor::GetCurrentPixelShaderModification(
   modification.pixel.rt0_blend_a_factor_for_premult = xenos::BlendFactor::kOne;
 
   return modification;
+}
+
+// ==========================================================================
+// SPIRV-Cross tessellation support.
+// ==========================================================================
+
+// Embedded MSL source for tessellation factor compute kernels.
+// These compute shaders broadcast uniform tessellation factors to all patches,
+// supporting discrete and continuous tessellation modes.
+static const char* kTessFactorKernelTriangle = R"msl(
+#include <metal_stdlib>
+using namespace metal;
+
+struct TessFactorParams {
+  float edge_factor;
+  float inside_factor;
+  uint  patch_count;
+};
+
+kernel void tess_factor_triangle(
+    device MTLTriangleTessellationFactorsHalf* factors [[buffer(0)]],
+    constant TessFactorParams& params [[buffer(1)]],
+    uint tid [[thread_position_in_grid]])
+{
+  if (tid >= params.patch_count) return;
+  half ef = half(params.edge_factor);
+  half inf = half(params.inside_factor);
+  factors[tid].edgeTessellationFactor[0] = ef;
+  factors[tid].edgeTessellationFactor[1] = ef;
+  factors[tid].edgeTessellationFactor[2] = ef;
+  factors[tid].insideTessellationFactor = inf;
+}
+)msl";
+
+static const char* kTessFactorKernelQuad = R"msl(
+#include <metal_stdlib>
+using namespace metal;
+
+struct TessFactorParams {
+  float edge_factor;
+  float inside_factor;
+  uint  patch_count;
+};
+
+kernel void tess_factor_quad(
+    device MTLQuadTessellationFactorsHalf* factors [[buffer(0)]],
+    constant TessFactorParams& params [[buffer(1)]],
+    uint tid [[thread_position_in_grid]])
+{
+  if (tid >= params.patch_count) return;
+  half ef = half(params.edge_factor);
+  half inf = half(params.inside_factor);
+  factors[tid].edgeTessellationFactor[0] = ef;
+  factors[tid].edgeTessellationFactor[1] = ef;
+  factors[tid].edgeTessellationFactor[2] = ef;
+  factors[tid].edgeTessellationFactor[3] = ef;
+  factors[tid].insideTessellationFactor[0] = inf;
+  factors[tid].insideTessellationFactor[1] = inf;
+}
+)msl";
+
+bool MetalCommandProcessor::InitializeMslTessellation() {
+  if (!device_) return false;
+
+  auto compile_kernel = [&](const char* source,
+                            const char* function_name) -> MTL::ComputePipelineState* {
+    NS::Error* error = nullptr;
+    auto* src = NS::String::string(source, NS::UTF8StringEncoding);
+    auto* opts = MTL::CompileOptions::alloc()->init();
+    opts->setFastMathEnabled(true);
+    MTL::Library* lib = device_->newLibrary(src, opts, &error);
+    opts->release();
+    if (!lib) {
+      if (error) {
+        XELOGE("Tessellation kernel compile error: {}",
+               error->localizedDescription()->utf8String());
+      }
+      return nullptr;
+    }
+    auto* fn_name = NS::String::string(function_name, NS::UTF8StringEncoding);
+    MTL::Function* fn = lib->newFunction(fn_name);
+    lib->release();
+    if (!fn) {
+      XELOGE("Tessellation kernel: function '{}' not found", function_name);
+      return nullptr;
+    }
+    MTL::ComputePipelineState* pso =
+        device_->newComputePipelineState(fn, &error);
+    fn->release();
+    if (!pso && error) {
+      XELOGE("Tessellation kernel PSO error: {}",
+             error->localizedDescription()->utf8String());
+    }
+    return pso;
+  };
+
+  tess_factor_pipeline_tri_ =
+      compile_kernel(kTessFactorKernelTriangle, "tess_factor_triangle");
+  tess_factor_pipeline_quad_ =
+      compile_kernel(kTessFactorKernelQuad, "tess_factor_quad");
+
+  if (!tess_factor_pipeline_tri_ || !tess_factor_pipeline_quad_) {
+    XELOGW("SPIRV-Cross: Failed to create tessellation factor pipelines");
+    return false;
+  }
+
+  XELOGI("SPIRV-Cross: Tessellation factor pipelines initialized");
+  return true;
+}
+
+void MetalCommandProcessor::ShutdownMslTessellation() {
+  for (auto& [key, pso] : msl_tess_pipeline_cache_) {
+    if (pso) pso->release();
+  }
+  msl_tess_pipeline_cache_.clear();
+  if (tess_factor_buffer_) {
+    tess_factor_buffer_->release();
+    tess_factor_buffer_ = nullptr;
+    tess_factor_buffer_patch_capacity_ = 0;
+  }
+  if (tess_factor_pipeline_tri_) {
+    tess_factor_pipeline_tri_->release();
+    tess_factor_pipeline_tri_ = nullptr;
+  }
+  if (tess_factor_pipeline_quad_) {
+    tess_factor_pipeline_quad_->release();
+    tess_factor_pipeline_quad_ = nullptr;
+  }
+}
+
+bool MetalCommandProcessor::EnsureTessFactorBuffer(uint32_t patch_count) {
+  // MTLQuadTessellationFactorsHalf is the larger of the two (12 bytes vs 8).
+  constexpr size_t kMaxFactorSize = 12;
+  size_t needed = size_t(patch_count) * kMaxFactorSize;
+  if (tess_factor_buffer_ && tess_factor_buffer_->length() >= needed) {
+    tess_factor_buffer_patch_capacity_ = patch_count;
+    return true;
+  }
+  if (tess_factor_buffer_) {
+    tess_factor_buffer_->release();
+  }
+  // Round up and over-allocate for future growth.
+  size_t alloc_size = std::max(needed, size_t(4096));
+  alloc_size = (alloc_size + 4095) & ~size_t(4095);
+  // Use Shared storage so the CPU can fill tessellation factors directly
+  // (avoids needing a separate compute encoder for uniform factors).
+  tess_factor_buffer_ =
+      device_->newBuffer(alloc_size, MTL::ResourceStorageModeShared);
+  if (!tess_factor_buffer_) {
+    XELOGE("Failed to allocate tessellation factor buffer ({} bytes)",
+           alloc_size);
+    return false;
+  }
+  tess_factor_buffer_->setLabel(NS::String::string(
+      "Xenia Tess Factor Buffer", NS::UTF8StringEncoding));
+  tess_factor_buffer_patch_capacity_ =
+      uint32_t(alloc_size / kMaxFactorSize);
+  return true;
+}
+
+MTL::RenderPipelineState*
+MetalCommandProcessor::GetOrCreateMslTessPipelineState(
+    MslShader::MslTranslation* domain_translation,
+    MslShader::MslTranslation* pixel_translation,
+    Shader::HostVertexShaderType host_vertex_shader_type,
+    const RegisterFile& regs) {
+  if (!domain_translation || !domain_translation->metal_function()) {
+    XELOGE("SPIRV-Cross tess: No domain shader function");
+    return nullptr;
+  }
+
+  // Determine attachment formats from render target cache (same pattern as
+  // GetOrCreateMslPipelineState).
+  uint32_t sample_count = 1;
+  MTL::PixelFormat color_formats[4] = {
+      MTL::PixelFormatInvalid, MTL::PixelFormatInvalid,
+      MTL::PixelFormatInvalid, MTL::PixelFormatInvalid};
+  MTL::PixelFormat depth_format = MTL::PixelFormatInvalid;
+  MTL::PixelFormat stencil_format = MTL::PixelFormatInvalid;
+  if (render_target_cache_) {
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (MTL::Texture* rt = render_target_cache_->GetColorTargetForDraw(i)) {
+        color_formats[i] = rt->pixelFormat();
+        if (rt->sampleCount() > 0) {
+          sample_count = std::max<uint32_t>(
+              sample_count, static_cast<uint32_t>(rt->sampleCount()));
+        }
+      }
+    }
+    if (color_formats[0] == MTL::PixelFormatInvalid) {
+      if (MTL::Texture* dummy =
+              render_target_cache_->GetDummyColorTargetForDraw()) {
+        color_formats[0] = dummy->pixelFormat();
+        if (dummy->sampleCount() > 0) {
+          sample_count = std::max<uint32_t>(
+              sample_count, static_cast<uint32_t>(dummy->sampleCount()));
+        }
+      }
+    }
+    if (MTL::Texture* depth_tex =
+            render_target_cache_->GetDepthTargetForDraw()) {
+      depth_format = depth_tex->pixelFormat();
+      switch (depth_format) {
+        case MTL::PixelFormatDepth32Float_Stencil8:
+        case MTL::PixelFormatDepth24Unorm_Stencil8:
+        case MTL::PixelFormatX32_Stencil8:
+          stencil_format = depth_format;
+          break;
+        default:
+          stencil_format = MTL::PixelFormatInvalid;
+          break;
+      }
+      if (depth_tex->sampleCount() > 0) {
+        sample_count = std::max<uint32_t>(
+            sample_count, static_cast<uint32_t>(depth_tex->sampleCount()));
+      }
+    }
+  }
+
+  // Build cache key incorporating RT formats and tessellation mode.
+  auto tess_mode = regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
+  struct TessPipelineKey {
+    const void* ds;
+    const void* ps;
+    uint32_t host_vertex_shader_type;
+    uint32_t tess_mode;
+    uint32_t sample_count;
+    uint32_t depth_format;
+    uint32_t stencil_format;
+    uint32_t color_formats[4];
+  } key_data = {};
+  key_data.ds = domain_translation;
+  key_data.ps = pixel_translation;
+  key_data.host_vertex_shader_type = uint32_t(host_vertex_shader_type);
+  key_data.tess_mode = uint32_t(tess_mode);
+  key_data.sample_count = sample_count;
+  key_data.depth_format = uint32_t(depth_format);
+  key_data.stencil_format = uint32_t(stencil_format);
+  for (uint32_t i = 0; i < 4; ++i) {
+    key_data.color_formats[i] = uint32_t(color_formats[i]);
+  }
+  uint64_t key = XXH3_64bits(&key_data, sizeof(key_data));
+  auto it = msl_tess_pipeline_cache_.find(key);
+  if (it != msl_tess_pipeline_cache_.end()) {
+    return it->second;
+  }
+
+  auto* desc = MTL::RenderPipelineDescriptor::alloc()->init();
+  // The post-tessellation vertex function IS the domain shader.
+  desc->setVertexFunction(domain_translation->metal_function());
+
+  if (pixel_translation && pixel_translation->metal_function()) {
+    desc->setFragmentFunction(pixel_translation->metal_function());
+  } else if (depth_only_pixel_function_name_.size() &&
+             depth_only_pixel_library_) {
+    auto* fn_name = NS::String::string(depth_only_pixel_function_name_.c_str(),
+                                       NS::UTF8StringEncoding);
+    MTL::Function* depth_fn = depth_only_pixel_library_->newFunction(fn_name);
+    if (depth_fn) {
+      desc->setFragmentFunction(depth_fn);
+      depth_fn->release();
+    }
+  }
+
+  // Tessellation configuration.
+  desc->setMaxTessellationFactor(64);
+  desc->setTessellationFactorStepFunction(
+      MTL::TessellationFactorStepFunctionPerPatch);
+
+  switch (tess_mode) {
+    case xenos::TessellationMode::kDiscrete:
+      desc->setTessellationPartitionMode(
+          MTL::TessellationPartitionModeInteger);
+      break;
+    case xenos::TessellationMode::kContinuous:
+      desc->setTessellationPartitionMode(
+          MTL::TessellationPartitionModeFractionalEven);
+      break;
+    case xenos::TessellationMode::kAdaptive:
+      desc->setTessellationPartitionMode(
+          MTL::TessellationPartitionModeFractionalEven);
+      break;
+  }
+
+  // Control point index type (not needed for our use case since the
+  // domain shader reads control points from shared memory).
+  desc->setTessellationControlPointIndexType(
+      MTL::TessellationControlPointIndexTypeNone);
+
+  // Render target attachments.
+  for (uint32_t i = 0; i < 4; ++i) {
+    desc->colorAttachments()->object(i)->setPixelFormat(color_formats[i]);
+  }
+  desc->setDepthAttachmentPixelFormat(depth_format);
+  desc->setStencilAttachmentPixelFormat(stencil_format);
+  desc->setSampleCount(sample_count);
+
+  NS::Error* error = nullptr;
+  MTL::RenderPipelineState* pso =
+      device_->newRenderPipelineState(desc, &error);
+  desc->release();
+
+  if (!pso) {
+    if (error) {
+      XELOGE("SPIRV-Cross tess pipeline error: {}",
+             error->localizedDescription()->utf8String());
+    }
+    return nullptr;
+  }
+
+  msl_tess_pipeline_cache_[key] = pso;
+  return pso;
 }
 
 // ==========================================================================
