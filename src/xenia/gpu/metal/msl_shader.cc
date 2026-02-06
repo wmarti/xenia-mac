@@ -11,7 +11,7 @@
 
 #include <cstring>
 
-#include "spirv_cross/spirv_msl.hpp"
+#include "spirv_msl.hpp"
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
