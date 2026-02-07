@@ -21,6 +21,9 @@ project("xenia-ui-metal")
     project_root.."/third_party/metal-cpp",
   })
   local_platform_files()
+  removefiles({
+    "*_demo.cc",
+  })
   files({
     "../shaders/bytecode/metal/*.h",
   })
