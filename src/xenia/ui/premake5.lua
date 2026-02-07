@@ -31,6 +31,12 @@ project("xenia-ui")
     removefiles({
       "renderdoc_api.cc",
       "renderdoc_api.h",
+      -- miniaudio pulls in AudioToolbox which textually includes Foundation
+      -- (ObjC) headers that cannot be compiled as C++.
+      -- TODO(wmarti): Add audio_helper_ios.mm using AVAudioPlayer to restore
+      -- achievement sounds on iOS.
+      "audio_helper.cc",
+      "audio_helper.h",
       -- Qt is not used on iOS; native UIKit is used instead.
       "*_qt.cc",
       "*_qt.h",

@@ -8,13 +8,16 @@
  */
 
 #include "xenia/kernel/xam/achievement_manager.h"
+#include "xenia/base/platform.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/achievement_backends/gpd_achievement_backend.h"
 #include "xenia/kernel/xam/xdbf/gpd_info.h"
+#if !XE_PLATFORM_IOS
 #include "xenia/ui/audio_helper.h"
+#endif
 #include "xenia/ui/imgui_guest_notification.h"
 
 DEFINE_bool(show_achievement_notification, true,
@@ -162,8 +165,11 @@ void AchievementManager::ShowAchievementEarnedNotification(
                                : 2;
 
   app_context.CallInUIThread([imgui_drawer, description, position]() {
+  // TODO(wmarti): Implement iOS audio helper (AVAudioPlayer) to restore this.
+#if !XE_PLATFORM_IOS
     // Play achievement sound
     ui::AudioHelper::Instance().PlayAchievementSound();
+#endif
 
     // Show notification
     new ui::AchievementNotificationWindow(imgui_drawer, "Achievement unlocked",
