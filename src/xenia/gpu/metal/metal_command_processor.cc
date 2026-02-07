@@ -3482,6 +3482,44 @@ bool MetalCommandProcessor::IssueDrawMsl(
   gviargs.SetupRegisterValues(regs);
   draw_util::GetHostViewportInfo(&gviargs, viewport_info);
 
+  // Apply viewport and scissor (matching the MSC path).
+  {
+    draw_util::Scissor scissor;
+    draw_util::GetScissor(regs, scissor);
+    scissor.offset[0] *= draw_resolution_scale_x;
+    scissor.offset[1] *= draw_resolution_scale_y;
+    scissor.extent[0] *= draw_resolution_scale_x;
+    scissor.extent[1] *= draw_resolution_scale_y;
+
+    // Clamp scissor to render target bounds (Metal requires this).
+    uint32_t vp_width = std::max(viewport_info.xy_extent[0], uint32_t(1));
+    uint32_t vp_height = std::max(viewport_info.xy_extent[1], uint32_t(1));
+    if (scissor.offset[0] + scissor.extent[0] > vp_width) {
+      scissor.extent[0] =
+          (scissor.offset[0] < vp_width) ? (vp_width - scissor.offset[0]) : 0;
+    }
+    if (scissor.offset[1] + scissor.extent[1] > vp_height) {
+      scissor.extent[1] =
+          (scissor.offset[1] < vp_height) ? (vp_height - scissor.offset[1]) : 0;
+    }
+
+    MTL::Viewport mtl_viewport;
+    mtl_viewport.originX = static_cast<double>(viewport_info.xy_offset[0]);
+    mtl_viewport.originY = static_cast<double>(viewport_info.xy_offset[1]);
+    mtl_viewport.width = static_cast<double>(viewport_info.xy_extent[0]);
+    mtl_viewport.height = static_cast<double>(viewport_info.xy_extent[1]);
+    mtl_viewport.znear = viewport_info.z_min;
+    mtl_viewport.zfar = viewport_info.z_max;
+    current_render_encoder_->setViewport(mtl_viewport);
+
+    MTL::ScissorRect mtl_scissor;
+    mtl_scissor.x = scissor.offset[0];
+    mtl_scissor.y = scissor.offset[1];
+    mtl_scissor.width = scissor.extent[0];
+    mtl_scissor.height = scissor.extent[1];
+    current_render_encoder_->setScissorRect(mtl_scissor);
+  }
+
   // Apply fixed-function state.
   current_render_encoder_->setRenderPipelineState(pipeline);
   ApplyRasterizerState(primitive_polygonal);
@@ -3684,9 +3722,16 @@ bool MetalCommandProcessor::IssueDrawMsl(
     if (!shader || !texture_cache_) {
       return;
     }
+    // In the SPIR-V translator, sampler bindings are placed after texture
+    // bindings in the same descriptor set: sampler i gets binding index
+    // (texture_count + i).  SPIRV-Cross maps binding N → msl_sampler N
+    // (identity mapping in AddResourceBindings), so the Metal sampler index
+    // must also be texture_count + i to match the compiled MSL.
+    uint32_t texture_count = static_cast<uint32_t>(
+        shader->GetTextureBindingsAfterTranslation().size());
     const auto& sampler_bindings = shader->GetSamplerBindingsAfterTranslation();
     for (size_t i = 0; i < sampler_bindings.size(); ++i) {
-      uint32_t smp_index = MslSamplerIndex::kBase + static_cast<uint32_t>(i);
+      uint32_t smp_index = texture_count + static_cast<uint32_t>(i);
       if (smp_index >= MslSamplerIndex::kMaxPerStage) {
         break;
       }
@@ -3900,10 +3945,16 @@ bool MetalCommandProcessor::IssueDrawMsl(
     UseRenderEncoderResource(tess_factor_buffer_, MTL::ResourceUsageRead);
     current_render_encoder_->setTessellationFactorBuffer(tess_factor_buffer_, 0,
                                                          0);
+    // drawPatches signature:
+    //   numberOfPatchControlPoints, patchStart, patchCount,
+    //   patchIndexBuffer, patchIndexBufferOffset,
+    //   instanceCount, baseInstance
+    // patchIndexBuffer = nullptr since patches are not indexed (the domain
+    // shader reads control points from shared memory via vertex ID).
     current_render_encoder_->drawPatches(
         NS::UInteger(cp_per_patch), NS::UInteger(0), NS::UInteger(patch_count),
-        tess_factor_buffer_,
-        0,                 // factorBufferOffset
+        nullptr,           // patchIndexBuffer (non-indexed patches)
+        0,                 // patchIndexBufferOffset
         NS::UInteger(1),   // instanceCount
         NS::UInteger(0));  // baseInstance
   } else {
@@ -7245,7 +7296,7 @@ bool MetalCommandProcessor::EnsureTessFactorBuffer(uint32_t patch_count) {
   constexpr size_t kMaxFactorSize = 12;
   size_t needed = size_t(patch_count) * kMaxFactorSize;
   if (tess_factor_buffer_ && tess_factor_buffer_->length() >= needed) {
-    tess_factor_buffer_patch_capacity_ = patch_count;
+    // Buffer already large enough; don't reduce the tracked capacity.
     return true;
   }
   if (tess_factor_buffer_) {
@@ -7328,8 +7379,18 @@ MetalCommandProcessor::GetOrCreateMslTessPipelineState(
     }
   }
 
-  // Build cache key incorporating RT formats and tessellation mode.
+  // Build cache key incorporating RT formats, tessellation mode, and blend
+  // state (same blend fields as GetOrCreateMslPipelineState).
   auto tess_mode = regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
+  uint32_t pixel_shader_writes_color_targets =
+      pixel_translation ? pixel_translation->shader().writes_color_targets()
+                        : 0;
+  uint32_t normalized_color_mask = 0;
+  if (pixel_shader_writes_color_targets) {
+    normalized_color_mask = draw_util::GetNormalizedColorMask(
+        regs, pixel_shader_writes_color_targets);
+  }
+  auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
   struct TessPipelineKey {
     const void* ds;
     const void* ps;
@@ -7339,6 +7400,9 @@ MetalCommandProcessor::GetOrCreateMslTessPipelineState(
     uint32_t depth_format;
     uint32_t stencil_format;
     uint32_t color_formats[4];
+    uint32_t normalized_color_mask;
+    uint32_t alpha_to_mask_enable;
+    uint32_t blendcontrol[4];
   } key_data = {};
   key_data.ds = domain_translation;
   key_data.ps = pixel_translation;
@@ -7349,6 +7413,14 @@ MetalCommandProcessor::GetOrCreateMslTessPipelineState(
   key_data.stencil_format = uint32_t(stencil_format);
   for (uint32_t i = 0; i < 4; ++i) {
     key_data.color_formats[i] = uint32_t(color_formats[i]);
+  }
+  key_data.normalized_color_mask = normalized_color_mask;
+  key_data.alpha_to_mask_enable = rb_colorcontrol.alpha_to_mask_enable ? 1 : 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    key_data.blendcontrol[i] =
+        regs.Get<reg::RB_BLENDCONTROL>(
+                reg::RB_BLENDCONTROL::rt_register_indices[i])
+            .value;
   }
   uint64_t key = XXH3_64bits(&key_data, sizeof(key_data));
   auto it = msl_tess_pipeline_cache_.find(key);
@@ -7397,9 +7469,49 @@ MetalCommandProcessor::GetOrCreateMslTessPipelineState(
   desc->setTessellationControlPointIndexType(
       MTL::TessellationControlPointIndexTypeNone);
 
-  // Render target attachments.
+  // Render target attachments with blend state (same as non-tess pipeline).
+  desc->setAlphaToCoverageEnabled(key_data.alpha_to_mask_enable != 0);
   for (uint32_t i = 0; i < 4; ++i) {
-    desc->colorAttachments()->object(i)->setPixelFormat(color_formats[i]);
+    auto* color_attachment = desc->colorAttachments()->object(i);
+    color_attachment->setPixelFormat(color_formats[i]);
+    if (color_formats[i] == MTL::PixelFormatInvalid) {
+      color_attachment->setWriteMask(MTL::ColorWriteMaskNone);
+      color_attachment->setBlendingEnabled(false);
+      continue;
+    }
+    uint32_t rt_write_mask = (normalized_color_mask >> (i * 4)) & 0xF;
+    color_attachment->setWriteMask(ToMetalColorWriteMask(rt_write_mask));
+    if (!rt_write_mask) {
+      color_attachment->setBlendingEnabled(false);
+      continue;
+    }
+    auto blendcontrol = regs.Get<reg::RB_BLENDCONTROL>(
+        reg::RB_BLENDCONTROL::rt_register_indices[i]);
+    MTL::BlendFactor src_rgb =
+        ToMetalBlendFactorRgb(blendcontrol.color_srcblend);
+    MTL::BlendFactor dst_rgb =
+        ToMetalBlendFactorRgb(blendcontrol.color_destblend);
+    MTL::BlendOperation op_rgb =
+        ToMetalBlendOperation(blendcontrol.color_comb_fcn);
+    MTL::BlendFactor src_alpha =
+        ToMetalBlendFactorAlpha(blendcontrol.alpha_srcblend);
+    MTL::BlendFactor dst_alpha =
+        ToMetalBlendFactorAlpha(blendcontrol.alpha_destblend);
+    MTL::BlendOperation op_alpha =
+        ToMetalBlendOperation(blendcontrol.alpha_comb_fcn);
+    bool blending_enabled =
+        src_rgb != MTL::BlendFactorOne || dst_rgb != MTL::BlendFactorZero ||
+        op_rgb != MTL::BlendOperationAdd || src_alpha != MTL::BlendFactorOne ||
+        dst_alpha != MTL::BlendFactorZero || op_alpha != MTL::BlendOperationAdd;
+    color_attachment->setBlendingEnabled(blending_enabled);
+    if (blending_enabled) {
+      color_attachment->setSourceRGBBlendFactor(src_rgb);
+      color_attachment->setDestinationRGBBlendFactor(dst_rgb);
+      color_attachment->setRgbBlendOperation(op_rgb);
+      color_attachment->setSourceAlphaBlendFactor(src_alpha);
+      color_attachment->setDestinationAlphaBlendFactor(dst_alpha);
+      color_attachment->setAlphaBlendOperation(op_alpha);
+    }
   }
   desc->setDepthAttachmentPixelFormat(depth_format);
   desc->setStencilAttachmentPixelFormat(stencil_format);
@@ -7834,8 +7946,30 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
     }
   }
 
+  // Textures resolved — which textures are from scaled resolve operations
+  // (matching Vulkan backend).
+  if (texture_cache_) {
+    uint32_t textures_resolved = 0;
+    uint32_t textures_remaining = used_texture_mask;
+    uint32_t texture_index;
+    while (xe::bit_scan_forward(textures_remaining, &texture_index)) {
+      textures_remaining &= ~(UINT32_C(1) << texture_index);
+      textures_resolved |=
+          uint32_t(
+              texture_cache_->IsActiveTextureResolutionScaled(texture_index))
+          << texture_index;
+    }
+    consts.textures_resolved = textures_resolved;
+  }
+
   // Alpha test reference.
   consts.alpha_test_reference = rb_alpha_ref;
+
+  // Alpha to mask — if enabled, bits 0:7 are sample offsets, bit 8 = 1.
+  // (matching Vulkan backend / MSC path).
+  if (rb_colorcontrol.alpha_to_mask_enable) {
+    consts.alpha_to_mask = (rb_colorcontrol.value >> 24) | (1 << 8);
+  }
 
   // Color exponent bias (matching Vulkan backend).
   for (uint32_t i = 0; i < 4; ++i) {
