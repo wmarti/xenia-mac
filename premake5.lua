@@ -768,6 +768,9 @@ workspace("xenia")
     -- not supported; lifecycle management (especially surface loss) is also
     -- complicated. SDL2 is also not appropriate for iOS.
     include("third_party/SDL2.lua")
+  else
+    -- Provide a no-op stub so callers don't need to guard every call.
+    function sdl2_include() end
   end
 
   -- Disable treating warnings as fatal errors for all third party projects, as
