@@ -101,7 +101,8 @@ project("xenia-app")
     })
 
   -- TODO(Triang3l): The emulator itself on Android.
-  filter("platforms:not Android-*")
+  -- iOS uses a native UIKit entry point, not xenia_main.cc.
+  filter({"platforms:not Android-*", "not system:ios"})
     files({
       "xenia_main.cc",
     })
