@@ -60,6 +60,7 @@ project("xenia-app")
   filter("system:ios")
     files({
       "../ui/windowed_app_main_ios.mm",
+      "xenia_main_ios.cc",
     })
     -- iOS uses native UIKit, not the Qt-based desktop emulator window.
     removefiles({
