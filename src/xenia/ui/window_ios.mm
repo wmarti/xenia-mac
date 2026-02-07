@@ -150,7 +150,12 @@ void iOSWindow::RequestPaintImpl() {
   });
 }
 
+}  // namespace ui
+}  // namespace xe
+
 // Helper Objective-C class for display link callback.
+// Must be at global scope (ObjC declarations cannot appear inside C++
+// namespaces).
 @interface XeniaDisplayLinkTarget : NSObject {
   xe::ui::iOSWindow* _window;
 }
@@ -173,6 +178,9 @@ void iOSWindow::RequestPaintImpl() {
 @end
 
 static XeniaDisplayLinkTarget* g_display_link_target = nil;
+
+namespace xe {
+namespace ui {
 
 void iOSWindow::SetupDisplayLink() {
   if (display_link_) return;
