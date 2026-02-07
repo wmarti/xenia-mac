@@ -202,8 +202,7 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   }
   // MSL 2.4 (macOS 12+ / iOS 15+) — supports argument buffers,
   // simdgroup functions, raster order groups.
-  opts.msl_version =
-      spirv_cross::CompilerMSL::Options::make_msl_version(2, 4);
+  opts.msl_version = spirv_cross::CompilerMSL::Options::make_msl_version(2, 4);
   // Use direct buffer/texture/sampler bindings (no argument buffers).
   // This is simpler and avoids the indirection overhead of the old
   // IRDescriptorTable model. Can be switched to argument buffers later
