@@ -397,9 +397,6 @@ if os.istarget("macosx") and not is_ios_target() then
     })
     xcodebuildsettings({
       ["MACOSX_DEPLOYMENT_TARGET"] = "15.0",
-      -- Disable Clang modules so that system header includes in C++ files
-      -- do not transitively import Objective-C framework headers.
-      ["CLANG_ENABLE_MODULES"] = "NO",
     })
     local qt_dir = os.getenv("QT_DIR")
     if not qt_dir then
@@ -471,12 +468,12 @@ if is_ios_target() then
       ["IPHONEOS_DEPLOYMENT_TARGET"] = "17.0",
       ["SDKROOT"] = "iphoneos",
       ["TARGETED_DEVICE_FAMILY"] = "1,2",  -- iPhone and iPad
-      -- Disable Clang modules so that #include <dispatch/dispatch.h> in C++
-      -- files does not transitively import Foundation (Objective-C) headers.
-      ["CLANG_ENABLE_MODULES"] = "NO",
     })
     buildoptions({
       "-w",
+      -- Prevent #include <dispatch/dispatch.h> (used by metal-cpp) from
+      -- triggering implicit module imports that pull in Foundation (ObjC).
+      "-fno-modules",
     })
     removefatalwarnings("All")
   filter({})
