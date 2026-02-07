@@ -301,7 +301,8 @@ MetalCommandProcessor::~MetalCommandProcessor() {
     depth_stencil_texture_ = nullptr;
   }
 
-  // Release pipeline cache
+#if METAL_SHADER_CONVERTER_AVAILABLE
+  // Release MSC pipeline caches
   for (auto& pair : pipeline_cache_) {
     if (pair.second) {
       pair.second->release();
@@ -332,6 +333,7 @@ MetalCommandProcessor::~MetalCommandProcessor() {
     }
   }
   geometry_shader_stage_cache_.clear();
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   for (auto& pair : depth_stencil_state_cache_) {
     if (pair.second) {
