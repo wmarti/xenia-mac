@@ -20,7 +20,9 @@
 #include <string>
 #if XE_PLATFORM_APPLE
 #include <mach/mach.h>
+#if XE_PLATFORM_MAC
 #include <mach/mach_vm.h>
+#endif
 #include <mach/vm_region.h>
 #endif
 #include <cstddef>
@@ -276,16 +278,30 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 #if XE_PLATFORM_APPLE
   access_out = PageAccess::kNoAccess;
 
+  // Use mach_vm_region on macOS, vm_region_64 on iOS (mach_vm.h is
+  // unavailable on iOS, but vm_region_64 is equivalent on arm64).
+#if XE_PLATFORM_MAC
   mach_vm_address_t address =
       static_cast<mach_vm_address_t>(reinterpret_cast<uintptr_t>(base_address));
   mach_vm_size_t region_size = 0;
+#else
+  vm_address_t address =
+      static_cast<vm_address_t>(reinterpret_cast<uintptr_t>(base_address));
+  vm_size_t region_size = 0;
+#endif
   vm_region_basic_info_data_64_t info;
   mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
   mach_port_t object_name = MACH_PORT_NULL;
 
+#if XE_PLATFORM_MAC
   kern_return_t kr = mach_vm_region(
       mach_task_self(), &address, &region_size, VM_REGION_BASIC_INFO_64,
       reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+#else
+  kern_return_t kr = vm_region_64(
+      mach_task_self(), &address, &region_size, VM_REGION_BASIC_INFO_64,
+      reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+#endif
 
   if (object_name != MACH_PORT_NULL) {
     mach_port_deallocate(mach_task_self(), object_name);
