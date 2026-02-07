@@ -1382,7 +1382,16 @@ void MetalCommandProcessor::InitializeShaderStorage(
     completion_callback();
   }
 }
+#else
+void MetalCommandProcessor::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+    std::function<void()> completion_callback) {
+  CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking,
+                                            completion_callback);
+}
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
+#if METAL_SHADER_CONVERTER_AVAILABLE
 bool MetalCommandProcessor::InitializeShaderStorageInternal(
     const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) {
   ShutdownShaderStorage();

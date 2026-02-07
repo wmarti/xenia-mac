@@ -744,6 +744,45 @@ workspace("xenia")
   include("third_party/cxxopts.lua")
   include("third_party/tomlplusplus.lua")
   include("third_party/FFmpeg/premake5.lua")
+  -- The FFmpeg premake files are auto-generated and only know about Mac/Linux/
+  -- Windows/Android platforms.  Patch in iOS-ARM64 support here so the
+  -- submodule stays unmodified.
+  if is_ios_target() then
+    local ffmpeg_dir = "third_party/FFmpeg"
+    project("libavcodec")
+      filter("platforms:iOS-ARM64")
+        buildoptions({ "-include config_macos_aarch64.h" })
+        includedirs({ ffmpeg_dir .. "/compat/atomics/gcc" })
+        files({
+          ffmpeg_dir .. "/libavcodec/aarch64/fft_init_aarch64.c",
+          ffmpeg_dir .. "/libavcodec/aarch64/idctdsp_init_aarch64.c",
+          ffmpeg_dir .. "/libavcodec/aarch64/fft_neon.S",
+          ffmpeg_dir .. "/libavcodec/aarch64/simple_idct_neon.S",
+          ffmpeg_dir .. "/libavcodec/aarch64/mdct_neon.S",
+        })
+      filter({})
+    project("libavutil")
+      filter("platforms:iOS-ARM64")
+        buildoptions({ "-include config_macos_aarch64.h" })
+        includedirs({ ffmpeg_dir .. "/compat/atomics/gcc" })
+        files({
+          ffmpeg_dir .. "/libavutil/aarch64/cpu.c",
+          ffmpeg_dir .. "/libavutil/aarch64/float_dsp_init.c",
+          ffmpeg_dir .. "/libavutil/aarch64/float_dsp_neon.S",
+        })
+      filter({})
+    project("libavformat")
+      filter("platforms:iOS-ARM64")
+        buildoptions({ "-include config_macos_aarch64.h" })
+        includedirs({ ffmpeg_dir .. "/compat/atomics/gcc" })
+        files({
+          ffmpeg_dir .. "/libavformat/network.c",
+          ffmpeg_dir .. "/libavformat/riffdec.c",
+          ffmpeg_dir .. "/libavformat/wavdec.c",
+          ffmpeg_dir .. "/libavformat/pcm.c",
+        })
+      filter({})
+  end
   include("third_party/fmt.lua")
   include("third_party/glslang-spirv.lua")
   include("third_party/imgui.lua")
