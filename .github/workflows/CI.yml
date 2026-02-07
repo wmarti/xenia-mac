@@ -437,7 +437,7 @@ jobs:
           if-no-files-found: error
 
   build-ios-arm64:
-    name: Build iOS ARM64 (libraries)
+    name: Build iOS ARM64
     needs: lint
     runs-on: macos-15
     steps:
@@ -523,9 +523,9 @@ jobs:
 
       - name: Build
         run: |
-          # Build Metal GPU library for iOS (verifies SPIRV-Cross path compiles).
+          # Build the full iOS app target (no code signing on CI).
           # Use --no_premake since premake was already run in the Setup step.
-          ./xenia-build.py build --config=Release --target_os=ios --target=xenia-gpu-metal --no_premake
+          ./xenia-build.py build --config=Release --target_os=ios --no_premake -- CODE_SIGNING_ALLOWED=NO
 
   build-macos-x86_64:
     name: Build macOS x86_64
