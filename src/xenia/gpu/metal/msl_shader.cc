@@ -209,7 +209,7 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   // if CPU binding overhead becomes a bottleneck.
   opts.argument_buffers = false;
   // Use simdgroup functions on iOS (A13+).
-  opts.ios_use_simdgroup_functions = true;
+  opts.ios_use_simdgroup_functions = is_ios;
   // Force sample rate shading to be available if needed.
   opts.force_sample_rate_shading = false;
   // Ensure buffer sizes are not padded.
@@ -257,6 +257,10 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
          msl_source_.size(), entry_point_name_);
 
   // Compile MSL source to a Metal library.
+  // Use a local autorelease pool to ensure NS::String factory objects and any
+  // NS::Error autoreleased by the Metal driver are cleaned up promptly.
+  NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+
   NS::Error* error = nullptr;
   auto* source_str =
       NS::String::string(msl_source_.c_str(), NS::UTF8StringEncoding);
@@ -275,6 +279,7 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
     } else {
       XELOGE("MslShader: Metal library compilation failed (unknown error)");
     }
+    pool->release();
     return false;
   }
 
@@ -287,8 +292,11 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
            entry_point_name_);
     metal_library_->release();
     metal_library_ = nullptr;
+    pool->release();
     return false;
   }
+
+  pool->release();
 
   XELOGD("MslShader: Successfully created Metal function '{}'",
          entry_point_name_);
