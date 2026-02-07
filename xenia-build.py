@@ -1455,8 +1455,7 @@ class BaseBuildCommand(Command):
                         ] + ([targets] if targets else []) + pass_args)
         elif sys.platform == "darwin":
             if target_os == "ios":
-                # iOS: build library targets (no app target)
-                schemes = args["target"] or ["xenia-gpu-metal"]
+                schemes = args["target"] or ["xenia-app"]
             else:
                 schemes = args["target"] or ["xenia-app"]
             result = 0
