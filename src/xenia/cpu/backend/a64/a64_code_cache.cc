@@ -14,6 +14,8 @@
 #include <cstring>
 
 #if XE_PLATFORM_APPLE
+#include <mach/mach.h>
+#include <mach/vm_map.h>
 #include <pthread.h>
 #endif
 
@@ -214,7 +216,11 @@ bool A64CodeCache::Initialize() {
 #endif
   } else {
 #if XE_PLATFORM_APPLE && XE_ARCH_ARM64
-    // On macOS ARM64, always use OS-chosen addresses for the views.
+    // On Apple ARM64, use OS-chosen addresses for the dual-mapping views.
+    // Try the shm_open-based MapFileView first (works on macOS and iOS with
+    // CS_DEBUGGED).  If that fails (e.g. iOS sandbox restrictions on
+    // shm_open), fall back to vm_remap, which is the technique used by
+    // UTM/QEMU and DolphiniOS for JIT on iOS.
     generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
         xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
                                 xe::memory::PageAccess::kExecuteReadOnly, 0));
@@ -222,8 +228,63 @@ bool A64CodeCache::Initialize() {
         xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
                                 xe::memory::PageAccess::kReadWrite, 0));
     if (!generated_code_execute_base_ || !generated_code_write_base_) {
-      XELOGE("Unable to allocate code cache generated code storage");
-      return false;
+      // shm_open dual-mapping failed — try vm_remap fallback.
+      // 1. Allocate an anonymous RW region.
+      // 2. Use vm_remap to create a second mapping of the same pages.
+      // 3. Set the second mapping to RX.
+      XELOGW("shm_open dual-mapping failed, trying vm_remap fallback");
+      if (generated_code_execute_base_) {
+        xe::memory::UnmapFileView(mapping_, generated_code_execute_base_,
+                                  kGeneratedCodeSize);
+        generated_code_execute_base_ = nullptr;
+      }
+      if (generated_code_write_base_) {
+        xe::memory::UnmapFileView(mapping_, generated_code_write_base_,
+                                  kGeneratedCodeSize);
+        generated_code_write_base_ = nullptr;
+      }
+
+      // Allocate anonymous RW region.
+      generated_code_write_base_ = reinterpret_cast<uint8_t*>(
+          mmap(nullptr, kGeneratedCodeSize, PROT_READ | PROT_WRITE,
+               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+      if (generated_code_write_base_ == MAP_FAILED) {
+        generated_code_write_base_ = nullptr;
+        XELOGE("vm_remap fallback: failed to allocate RW region");
+        return false;
+      }
+
+      // Create a second mapping of the same physical pages via vm_remap.
+      vm_address_t remap_addr = 0;
+      vm_prot_t cur_prot, max_prot;
+      kern_return_t kr =
+          vm_remap(mach_task_self(), &remap_addr, kGeneratedCodeSize,
+                   0,  // mask
+                   VM_FLAGS_ANYWHERE, mach_task_self(),
+                   reinterpret_cast<vm_address_t>(generated_code_write_base_),
+                   FALSE,  // copy = false (share the same physical pages)
+                   &cur_prot, &max_prot, VM_INHERIT_NONE);
+      if (kr != KERN_SUCCESS) {
+        XELOGE("vm_remap fallback: vm_remap failed with error {}", kr);
+        munmap(generated_code_write_base_, kGeneratedCodeSize);
+        generated_code_write_base_ = nullptr;
+        return false;
+      }
+
+      // Set the remapped region to read-execute.
+      if (vm_protect(mach_task_self(), remap_addr, kGeneratedCodeSize, FALSE,
+                     VM_PROT_READ | VM_PROT_EXECUTE) != KERN_SUCCESS) {
+        XELOGE("vm_remap fallback: vm_protect RX failed");
+        vm_deallocate(mach_task_self(), remap_addr, kGeneratedCodeSize);
+        munmap(generated_code_write_base_, kGeneratedCodeSize);
+        generated_code_write_base_ = nullptr;
+        return false;
+      }
+
+      generated_code_execute_base_ = reinterpret_cast<uint8_t*>(remap_addr);
+      XELOGI("vm_remap JIT dual-mapping: write={:p} execute={:p}",
+             static_cast<void*>(generated_code_write_base_),
+             static_cast<void*>(generated_code_execute_base_));
     }
 #else
     generated_code_execute_base_ =

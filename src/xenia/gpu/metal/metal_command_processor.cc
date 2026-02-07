@@ -3477,8 +3477,6 @@ bool MetalCommandProcessor::IssueDrawMsl(
       return false;
     }
 
-    // Fill tessellation factors on the CPU (all patches get uniform factors
-    // for discrete/continuous modes).
     // IEEE 754 float32 → float16 conversion for tessellation factors.
     auto f32_to_f16 = [](float v) -> uint16_t {
       uint32_t b;
@@ -3490,38 +3488,126 @@ bool MetalCommandProcessor::IssueDrawMsl(
       if (e >= 31) return uint16_t(s | 0x7C00u);
       return uint16_t(s | (e << 10) | (m >> 13));
     };
-    uint16_t ef = f32_to_f16(max_tess);
+
+    // Determine tessellation mode from the register file.
+    auto tess_mode = regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
+
     uint8_t* factor_data =
         static_cast<uint8_t*>(tess_factor_buffer_->contents());
-    if (is_quad_domain) {
-      // MTLQuadTessellationFactorsHalf: 4 edge + 2 inside = 12 bytes
-      struct QuadFactors {
-        uint16_t edge[4];
-        uint16_t inside[2];
-      };
-      static_assert(sizeof(QuadFactors) == 12);
-      auto* factors = reinterpret_cast<QuadFactors*>(factor_data);
-      for (uint32_t i = 0; i < patch_count; ++i) {
-        factors[i].edge[0] = ef;
-        factors[i].edge[1] = ef;
-        factors[i].edge[2] = ef;
-        factors[i].edge[3] = ef;
-        factors[i].inside[0] = ef;
-        factors[i].inside[1] = ef;
+
+    if (tess_mode == xenos::TessellationMode::kAdaptive && shared_memory_) {
+      // ------------------------------------------------------------------
+      // Adaptive tessellation: per-edge factors from shared memory.
+      // The guest "index buffer" is repurposed as a factor buffer
+      // containing big-endian float32 edge factors.
+      // ------------------------------------------------------------------
+      xenos::Endian index_endian =
+          primitive_processing_result.host_shader_index_endian;
+      uint32_t factor_base = primitive_processing_result.guest_index_base;
+      const uint8_t* xbox_ram = shared_memory_->GetXboxRamBase();
+      // Minimum factor: for fractional_even, must be >= 2.0 (1.0 + the
+      // minimum Xbox factor of 1.0).  We use 2.0 as the floor.
+      float factor_min = 2.0f;
+      float factor_max = max_tess;
+
+      if (is_quad_domain) {
+        // Quad: 4 edge factors per patch.
+        struct QuadFactors {
+          uint16_t edge[4];
+          uint16_t inside[2];
+        };
+        static_assert(sizeof(QuadFactors) == 12);
+        auto* factors = reinterpret_cast<QuadFactors*>(factor_data);
+        for (uint32_t i = 0; i < patch_count; ++i) {
+          // Read 4 edge factors from guest memory.
+          float ef[4];
+          for (uint32_t j = 0; j < 4; ++j) {
+            uint32_t addr = factor_base + (i * 4 + j) * sizeof(float);
+            float raw;
+            std::memcpy(&raw, xbox_ram + addr, sizeof(float));
+            // Endian-swap per the index endian mode.
+            raw = xenos::GpuSwap(raw, index_endian);
+            // Add 1.0 per Xbox 360 convention, clamp.
+            ef[j] = std::clamp(raw + 1.0f, factor_min, factor_max);
+          }
+          // Map Xbox 360 edge order to Metal:
+          //   edge[i] = input[(i+3) & 3]
+          //   (from adaptive_quad.hs.glsl)
+          factors[i].edge[0] = f32_to_f16(ef[3]);
+          factors[i].edge[1] = f32_to_f16(ef[0]);
+          factors[i].edge[2] = f32_to_f16(ef[1]);
+          factors[i].edge[3] = f32_to_f16(ef[2]);
+          // Inside factors: minimum of opposing edges.
+          // inside[0] along U = min(mapped_edge[1], mapped_edge[3])
+          // inside[1] along V = min(mapped_edge[0], mapped_edge[2])
+          factors[i].inside[0] = f32_to_f16(std::min(ef[0], ef[2]));
+          factors[i].inside[1] = f32_to_f16(std::min(ef[3], ef[1]));
+        }
+      } else {
+        // Triangle: 3 edge factors per patch.
+        struct TriFactors {
+          uint16_t edge[3];
+          uint16_t inside;
+        };
+        static_assert(sizeof(TriFactors) == 8);
+        auto* factors = reinterpret_cast<TriFactors*>(factor_data);
+        for (uint32_t i = 0; i < patch_count; ++i) {
+          // Read 3 edge factors from guest memory.
+          float ef[3];
+          for (uint32_t j = 0; j < 3; ++j) {
+            uint32_t addr = factor_base + (i * 3 + j) * sizeof(float);
+            float raw;
+            std::memcpy(&raw, xbox_ram + addr, sizeof(float));
+            raw = xenos::GpuSwap(raw, index_endian);
+            ef[j] = std::clamp(raw + 1.0f, factor_min, factor_max);
+          }
+          // Map Xbox 360 edge order to Metal:
+          //   Metal edge[0] = U0 (v1->v2) = ef[1]
+          //   Metal edge[1] = V0 (v2->v0) = ef[2]
+          //   Metal edge[2] = W0 (v0->v1) = ef[0]
+          //   (from adaptive_triangle.hs.glsl)
+          factors[i].edge[0] = f32_to_f16(ef[1]);
+          factors[i].edge[1] = f32_to_f16(ef[2]);
+          factors[i].edge[2] = f32_to_f16(ef[0]);
+          // Inside factor = minimum of all edge factors.
+          factors[i].inside =
+              f32_to_f16(std::min(std::min(ef[0], ef[1]), ef[2]));
+        }
       }
     } else {
-      // MTLTriangleTessellationFactorsHalf: 3 edge + 1 inside = 8 bytes
-      struct TriFactors {
-        uint16_t edge[3];
-        uint16_t inside;
-      };
-      static_assert(sizeof(TriFactors) == 8);
-      auto* factors = reinterpret_cast<TriFactors*>(factor_data);
-      for (uint32_t i = 0; i < patch_count; ++i) {
-        factors[i].edge[0] = ef;
-        factors[i].edge[1] = ef;
-        factors[i].edge[2] = ef;
-        factors[i].inside = ef;
+      // ------------------------------------------------------------------
+      // Uniform tessellation (discrete / continuous modes).
+      // All patches get the same factor from VGT_HOS_MAX_TESS_LEVEL.
+      // ------------------------------------------------------------------
+      uint16_t ef = f32_to_f16(max_tess);
+      if (is_quad_domain) {
+        struct QuadFactors {
+          uint16_t edge[4];
+          uint16_t inside[2];
+        };
+        static_assert(sizeof(QuadFactors) == 12);
+        auto* factors = reinterpret_cast<QuadFactors*>(factor_data);
+        for (uint32_t i = 0; i < patch_count; ++i) {
+          factors[i].edge[0] = ef;
+          factors[i].edge[1] = ef;
+          factors[i].edge[2] = ef;
+          factors[i].edge[3] = ef;
+          factors[i].inside[0] = ef;
+          factors[i].inside[1] = ef;
+        }
+      } else {
+        struct TriFactors {
+          uint16_t edge[3];
+          uint16_t inside;
+        };
+        static_assert(sizeof(TriFactors) == 8);
+        auto* factors = reinterpret_cast<TriFactors*>(factor_data);
+        for (uint32_t i = 0; i < patch_count; ++i) {
+          factors[i].edge[0] = ef;
+          factors[i].edge[1] = ef;
+          factors[i].edge[2] = ef;
+          factors[i].inside = ef;
+        }
       }
     }
 
@@ -6344,60 +6430,8 @@ MetalCommandProcessor::GetCurrentPixelShaderModification(
 // SPIRV-Cross tessellation support.
 // ==========================================================================
 
-// Embedded MSL source for tessellation factor compute kernels.
-// These compute shaders broadcast uniform tessellation factors to all patches,
-// supporting discrete and continuous tessellation modes.
-static const char* kTessFactorKernelTriangle = R"msl(
-#include <metal_stdlib>
-using namespace metal;
-
-struct TessFactorParams {
-  float edge_factor;
-  float inside_factor;
-  uint  patch_count;
-};
-
-kernel void tess_factor_triangle(
-    device MTLTriangleTessellationFactorsHalf* factors [[buffer(0)]],
-    constant TessFactorParams& params [[buffer(1)]],
-    uint tid [[thread_position_in_grid]])
-{
-  if (tid >= params.patch_count) return;
-  half ef = half(params.edge_factor);
-  half inf = half(params.inside_factor);
-  factors[tid].edgeTessellationFactor[0] = ef;
-  factors[tid].edgeTessellationFactor[1] = ef;
-  factors[tid].edgeTessellationFactor[2] = ef;
-  factors[tid].insideTessellationFactor = inf;
-}
-)msl";
-
-static const char* kTessFactorKernelQuad = R"msl(
-#include <metal_stdlib>
-using namespace metal;
-
-struct TessFactorParams {
-  float edge_factor;
-  float inside_factor;
-  uint  patch_count;
-};
-
-kernel void tess_factor_quad(
-    device MTLQuadTessellationFactorsHalf* factors [[buffer(0)]],
-    constant TessFactorParams& params [[buffer(1)]],
-    uint tid [[thread_position_in_grid]])
-{
-  if (tid >= params.patch_count) return;
-  half ef = half(params.edge_factor);
-  half inf = half(params.inside_factor);
-  factors[tid].edgeTessellationFactor[0] = ef;
-  factors[tid].edgeTessellationFactor[1] = ef;
-  factors[tid].edgeTessellationFactor[2] = ef;
-  factors[tid].edgeTessellationFactor[3] = ef;
-  factors[tid].insideTessellationFactor[0] = inf;
-  factors[tid].insideTessellationFactor[1] = inf;
-}
-)msl";
+// Tessellation factor compute kernels are defined in msl_tess_factor_kernels.h.
+#include "xenia/gpu/metal/msl_tess_factor_kernels.h"
 
 bool MetalCommandProcessor::InitializeMslTessellation() {
   if (!device_) return false;
@@ -6435,14 +6469,31 @@ bool MetalCommandProcessor::InitializeMslTessellation() {
     return pso;
   };
 
+  // Uniform factor kernels (discrete / continuous modes).
   tess_factor_pipeline_tri_ =
-      compile_kernel(kTessFactorKernelTriangle, "tess_factor_triangle");
+      compile_kernel(kMslTessFactorUniformTriangle, "tess_factor_triangle");
   tess_factor_pipeline_quad_ =
-      compile_kernel(kTessFactorKernelQuad, "tess_factor_quad");
+      compile_kernel(kMslTessFactorUniformQuad, "tess_factor_quad");
 
   if (!tess_factor_pipeline_tri_ || !tess_factor_pipeline_quad_) {
-    XELOGW("SPIRV-Cross: Failed to create tessellation factor pipelines");
+    XELOGW(
+        "SPIRV-Cross: Failed to create uniform tessellation factor "
+        "pipelines");
     return false;
+  }
+
+  // Adaptive factor kernels (per-edge factors from shared memory).
+  tess_factor_pipeline_adaptive_tri_ = compile_kernel(
+      kMslTessFactorAdaptiveTriangle, "tess_factor_adaptive_triangle");
+  tess_factor_pipeline_adaptive_quad_ =
+      compile_kernel(kMslTessFactorAdaptiveQuad, "tess_factor_adaptive_quad");
+
+  if (!tess_factor_pipeline_adaptive_tri_ ||
+      !tess_factor_pipeline_adaptive_quad_) {
+    XELOGW(
+        "SPIRV-Cross: Failed to create adaptive tessellation factor "
+        "pipelines (adaptive tessellation will fall back to uniform)");
+    // Non-fatal — adaptive tessellation will degrade to uniform factors.
   }
 
   XELOGI("SPIRV-Cross: Tessellation factor pipelines initialized");
@@ -6466,6 +6517,14 @@ void MetalCommandProcessor::ShutdownMslTessellation() {
   if (tess_factor_pipeline_quad_) {
     tess_factor_pipeline_quad_->release();
     tess_factor_pipeline_quad_ = nullptr;
+  }
+  if (tess_factor_pipeline_adaptive_tri_) {
+    tess_factor_pipeline_adaptive_tri_->release();
+    tess_factor_pipeline_adaptive_tri_ = nullptr;
+  }
+  if (tess_factor_pipeline_adaptive_quad_) {
+    tess_factor_pipeline_adaptive_quad_->release();
+    tess_factor_pipeline_adaptive_quad_ = nullptr;
   }
 }
 
