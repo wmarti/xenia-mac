@@ -231,10 +231,9 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
       execution_model = entry_points[0].execution_model;
     } else {
       // Fallback: infer from shader type (pre-tessellation behavior).
-      execution_model =
-          shader().type() == xenos::ShaderType::kVertex
-              ? spv::ExecutionModelVertex
-              : spv::ExecutionModelFragment;
+      execution_model = shader().type() == xenos::ShaderType::kVertex
+                            ? spv::ExecutionModelVertex
+                            : spv::ExecutionModelFragment;
     }
   }
   AddResourceBindings(compiler, execution_model);

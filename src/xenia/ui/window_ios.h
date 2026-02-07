@@ -59,8 +59,7 @@ class iOSWindow : public Window {
   void LoadAndApplyIcon(const void* buffer, size_t size,
                         bool can_apply_state_in_current_phase) override {}
 
-  std::unique_ptr<Surface> CreateSurfaceImpl(
-      Surface::TypeFlags allowed_types) override;
+  std::unique_ptr<Surface> CreateSurfaceImpl(Surface::TypeFlags allowed_types) override;
   void RequestPaintImpl() override;
 
  private:
