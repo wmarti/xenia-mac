@@ -459,11 +459,11 @@ jobs:
           path: |
             third_party
             .git/modules/third_party
-          key: ${{ runner.os }}-${{ runner.arch }}-submodules-ios-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-submodules-
+          key: ${{ runner.os }}-${{ runner.arch }}-submodules-ios-v2-${{ hashFiles('.gitmodules') }}-${{ hashFiles('.git/modules/third_party/*/HEAD') }}
 
       - name: Setup
+        env:
+          XE_TARGET_IOS: "1"
         run: |
           retry() {
             local n=0
@@ -489,6 +489,11 @@ jobs:
           # cache may have overwritten with stale versions.
           git checkout -- third_party/*.lua
 
+          # Remove any stale premake5 binary left in the submodule tree by
+          # a previous cache run.  premake.py checks this path first and
+          # would use an outdated binary that doesn't support --os=ios.
+          rm -f third_party/premake-core/bin/release/premake5
+
           # Build premake5 as a macOS host tool if not cached, then generate
           # iOS project files.
           mkdir -p tools/build/bin
@@ -510,6 +515,10 @@ jobs:
             exit 1
           fi
           tools/build/bin/premake5 --version
+
+          # Create a sentinel file so premake Lua scripts can reliably
+          # detect an iOS build even if --os=ios handling is broken.
+          touch .ios_target
           ./xenia-build.py premake --target_os=ios
 
       - name: Build
