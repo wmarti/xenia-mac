@@ -11,7 +11,6 @@
 
 #if XE_PLATFORM_APPLE
 
-#include <objc/objc-runtime.h>
 #include <pthread.h>
 #include <chrono>
 
