@@ -218,10 +218,25 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
 
   // Remap SPIR-V descriptor sets/bindings to Metal buffer/texture/sampler
   // indices.
-  spv::ExecutionModel execution_model =
-      shader().type() == xenos::ShaderType::kVertex
-          ? spv::ExecutionModelVertex
-          : spv::ExecutionModelFragment;
+  // Query the actual execution model from the SPIR-V binary rather than
+  // assuming kVertex always maps to spv::ExecutionModelVertex.  The
+  // SpirvShaderTranslator already sets the correct model — domain shaders
+  // (tessellation evaluation) are emitted as TessellationEvaluation, not
+  // Vertex — so we must honour that for SPIRV-Cross resource remapping and
+  // entry-point lookup.
+  spv::ExecutionModel execution_model;
+  {
+    auto entry_points = compiler.get_entry_points_and_stages();
+    if (!entry_points.empty()) {
+      execution_model = entry_points[0].execution_model;
+    } else {
+      // Fallback: infer from shader type (pre-tessellation behavior).
+      execution_model =
+          shader().type() == xenos::ShaderType::kVertex
+              ? spv::ExecutionModelVertex
+              : spv::ExecutionModelFragment;
+    }
+  }
   AddResourceBindings(compiler, execution_model);
 
   // Compile to MSL.

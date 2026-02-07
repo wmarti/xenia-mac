@@ -60,7 +60,7 @@ project("xenia-app")
   filter("system:ios")
     files({
       "../ui/windowed_app_main_ios.mm",
-      "xenia_main_ios.cc",
+      "xenia_main_ios.mm",
     })
     -- iOS uses native UIKit, not the Qt-based desktop emulator window.
     removefiles({
@@ -213,8 +213,10 @@ project("xenia-app")
       "MetalKit.framework",
       "QuartzCore.framework",
       "UIKit.framework",
+      "UniformTypeIdentifiers.framework",
     })
     xcodebuildsettings({
+      ["INFOPLIST_FILE"] = path.getabsolute("Info_ios.plist"),
       ["IPHONEOS_DEPLOYMENT_TARGET"] = "17.0",
       ["SDKROOT"] = "iphoneos",
       ["TARGETED_DEVICE_FAMILY"] = "1,2",

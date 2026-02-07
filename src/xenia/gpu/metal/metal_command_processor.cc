@@ -3405,7 +3405,13 @@ bool MetalCommandProcessor::IssueDrawMsl(
     }
   }
   if (!vertex_translation->is_valid()) {
-    if (!vertex_translation->CompileToMsl(device_)) {
+    constexpr bool kIsIos =
+#if XE_PLATFORM_IOS
+        true;
+#else
+        false;
+#endif
+    if (!vertex_translation->CompileToMsl(device_, kIsIos)) {
       XELOGE("SPIRV-Cross: Failed to compile vertex shader to MSL");
       return false;
     }
@@ -3424,7 +3430,7 @@ bool MetalCommandProcessor::IssueDrawMsl(
       }
     }
     if (!pixel_translation->is_valid()) {
-      if (!pixel_translation->CompileToMsl(device_)) {
+      if (!pixel_translation->CompileToMsl(device_, kIsIos)) {
         XELOGE("SPIRV-Cross: Failed to compile pixel shader to MSL");
         return false;
       }
