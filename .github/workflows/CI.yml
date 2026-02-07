@@ -51,12 +51,10 @@ jobs:
         id: cache-build
         uses: actions/cache@v3
         with:
-          path: |
-            build/obj
-            build/bin/Linux-x86_64/Release/*.a
-          key: ${{ runner.os }}-x86_64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          path: build/build_release
+          key: ${{ runner.os }}-x86_64-ninja-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
           restore-keys: |
-            ${{ runner.os }}-x86_64-build-
+            ${{ runner.os }}-x86_64-ninja-
 
       - name: Cache Qt6
         id: cache-qt-linux
@@ -161,10 +159,7 @@ jobs:
         env:
           CC: clang-21
           CXX: clang++-21
-        run: |
-          # Clear cmake cache to ensure fresh build with updated files
-          rm -rf build/build_release
-          ./xenia-build.py build --config=Release
+        run: ./xenia-build.py build --config=Release
       - name: Prepare artifacts
         id: prepare_artifacts
         run: |
@@ -256,12 +251,10 @@ jobs:
         id: cache-build
         uses: actions/cache@v3
         with:
-          path: |
-            build/obj
-            build/bin/Mac-ARM64/Release/*.a
-          key: ${{ runner.os }}-ARM64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          path: build/DerivedData
+          key: ${{ runner.os }}-ARM64-deriveddata-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
           restore-keys: |
-            ${{ runner.os }}-ARM64-build-
+            ${{ runner.os }}-ARM64-deriveddata-
 
       - name: Cache Qt6
         id: cache-qt-macos
@@ -452,6 +445,15 @@ jobs:
           path: tools/build/bin/premake5
           key: ${{ runner.os }}-premake5-ios-${{ hashFiles('.gitmodules') }}
 
+      - name: Cache build output
+        id: cache-build-ios
+        uses: actions/cache@v3
+        with:
+          path: build/DerivedData
+          key: ${{ runner.os }}-ios-deriveddata-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          restore-keys: |
+            ${{ runner.os }}-ios-deriveddata-
+
       - name: Cache submodules
         id: cache-submodules-ios
         uses: actions/cache@v3
@@ -549,12 +551,10 @@ jobs:
         id: cache-build
         uses: actions/cache@v3
         with:
-          path: |
-            build/obj
-            build/bin/Mac-x86_64/Release/*.a
-          key: ${{ runner.os }}-x86_64-build-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
+          path: build/DerivedData
+          key: ${{ runner.os }}-x86_64-deriveddata-${{ hashFiles('src/**', 'premake5.lua', 'third_party/**/*.lua') }}
           restore-keys: |
-            ${{ runner.os }}-x86_64-build-
+            ${{ runner.os }}-x86_64-deriveddata-
 
       - name: Cache Qt6
         id: cache-qt-macos

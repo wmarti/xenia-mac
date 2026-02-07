@@ -1469,6 +1469,8 @@ class BaseBuildCommand(Command):
                     "-sdk", "iphoneos",
                     "-destination", "generic/platform=iOS",
                 ]
+            # Use a local DerivedData path for cacheable incremental builds.
+            derived_data_path = os.path.join("build", "DerivedData")
             for scheme in schemes:
                 if scheme.endswith("-tests"):
                     build_args = [
@@ -1479,6 +1481,8 @@ class BaseBuildCommand(Command):
                         args["config"].capitalize(),
                         "-scheme",
                         scheme,
+                        "-derivedDataPath",
+                        derived_data_path,
                     ]
                 else:
                     build_args = [
@@ -1489,6 +1493,8 @@ class BaseBuildCommand(Command):
                         args["config"].capitalize(),
                         "-scheme",
                         scheme,
+                        "-derivedDataPath",
+                        derived_data_path,
                     ]
                 build_result = subprocess.call(build_args + extra_arch_args +
                                                ios_args + pass_args,
