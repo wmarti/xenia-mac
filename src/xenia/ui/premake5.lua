@@ -25,7 +25,9 @@ project("xenia-ui")
     })
   filter("system:ios")
     files({
+      "file_picker_ios.mm",
       "surface_ios.mm",
+      "window_ios.mm",
       "windowed_app_context_ios.mm",
     })
     removefiles({
