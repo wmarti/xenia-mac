@@ -923,7 +923,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       cond_.notify_all();
     }
     if (is_current_thread) {
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && defined(__aarch64__)
       pthread_jit_write_protect_np(1);
 #endif
       pthread_exit(reinterpret_cast<void*>(exit_code));
@@ -1347,7 +1347,7 @@ void Thread::Exit(int exit_code) {
     current_thread_->Terminate(exit_code);
   } else {
     // Should only happen with the main thread
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && defined(__aarch64__)
     pthread_jit_write_protect_np(1);
 #endif
     pthread_exit(reinterpret_cast<void*>(exit_code));
