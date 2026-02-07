@@ -1,8 +1,11 @@
--- Robust iOS target detection: checks both os.istarget("ios") (which
--- requires the premake binary to recognise "ios" as a valid --os value)
--- and the raw _OPTIONS["os"] command-line value as a fallback.
+-- Robust iOS target detection. Three checks for maximum compatibility:
+--   1. os.target() == "ios" : raw target OS string set by --os=ios
+--   2. os.istarget("ios")   : system-tag check (needs binary to know iOS)
+--   3. _OPTIONS["os"]       : raw command-line option fallback
 function is_ios_target()
-  return os.istarget("ios") or (_OPTIONS["os"] == "ios")
+  return (os.target() == "ios")
+      or os.istarget("ios")
+      or (_OPTIONS and _OPTIONS["os"] == "ios")
 end
 
 build_root = "build"

@@ -321,6 +321,9 @@ jobs:
           retry git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands')
           # DirectXShaderCompiler has nested submodules needed for dxilconv
           retry git -C third_party/DirectXShaderCompiler submodule update --init --depth=1 external/SPIRV-Headers external/SPIRV-Tools
+          # Restore non-submodule files in third_party/ that the submodule
+          # cache may have overwritten with stale versions.
+          git checkout -- third_party/*.lua
 
           if [ '${{ steps.cache-premake5.outputs.cache-hit }}' != 'true' ]; then
             ./xenia-build.py premake
@@ -482,6 +485,9 @@ jobs:
 
           # Update submodules (no DirectXShaderCompiler needed for iOS)
           retry git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' | grep -v 'premake-androidndk\|premake-export-compile-commands\|DirectXShaderCompiler')
+          # Restore non-submodule files in third_party/ that the submodule
+          # cache may have overwritten with stale versions.
+          git checkout -- third_party/*.lua
 
           # Build premake5 as a macOS host tool if not cached, then generate
           # iOS project files.
