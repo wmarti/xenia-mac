@@ -1,9 +1,9 @@
--- Robust iOS target detection. Three checks for maximum compatibility:
---   1. os.target() == "ios" : raw target OS string set by --os=ios
---   2. os.istarget("ios")   : system-tag check (needs binary to know iOS)
---   3. _OPTIONS["os"]       : raw command-line option fallback
+-- Robust iOS target detection.  The XE_TARGET_IOS env-var is set by
+-- xenia-build.py and is the most reliable signal since it bypasses
+-- premake option handling entirely.
 function is_ios_target()
-  return (os.target() == "ios")
+  return os.getenv("XE_TARGET_IOS") == "1"
+      or (os.target() == "ios")
       or os.istarget("ios")
       or (_OPTIONS and _OPTIONS["os"] == "ios")
 end
