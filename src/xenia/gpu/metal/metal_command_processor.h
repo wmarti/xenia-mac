@@ -439,6 +439,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // SPIRV-Cross tessellation support.
   MTL::ComputePipelineState* tess_factor_pipeline_tri_ = nullptr;
   MTL::ComputePipelineState* tess_factor_pipeline_quad_ = nullptr;
+  // Adaptive tessellation factor pipelines (read per-edge factors from shared
+  // memory instead of using a uniform value).
+  MTL::ComputePipelineState* tess_factor_pipeline_adaptive_tri_ = nullptr;
+  MTL::ComputePipelineState* tess_factor_pipeline_adaptive_quad_ = nullptr;
   MTL::Buffer* tess_factor_buffer_ = nullptr;
   uint32_t tess_factor_buffer_patch_capacity_ = 0;
   std::unordered_map<uint64_t, MTL::RenderPipelineState*>
