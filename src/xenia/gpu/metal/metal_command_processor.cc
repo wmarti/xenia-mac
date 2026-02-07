@@ -1101,8 +1101,7 @@ bool MetalCommandProcessor::InitializeShaderTranslation() {
         false,  // edram_fragment_shader_interlock (host RT path)
         render_target_cache_->draw_resolution_scale_x(),
         render_target_cache_->draw_resolution_scale_y(),
-        nullptr,  // spirv_tools_context (not needed for Metal)
-        false);   // spirv_optimize
+        false);  // spirv_optimize
 
     XELOGI(
         "SpirvShaderTranslator init (SPIRV-Cross MSL path): msaa_2x={}, "
@@ -2304,9 +2303,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   }
 
   uint32_t used_texture_mask =
-      vertex_shader->GetUsedTextureMaskAfterTranslation();
-  if (pixel_shader) {
-    used_texture_mask |= pixel_shader->GetUsedTextureMaskAfterTranslation();
+      metal_vertex_shader->GetUsedTextureMaskAfterTranslation();
+  if (metal_pixel_shader) {
+    used_texture_mask |=
+        metal_pixel_shader->GetUsedTextureMaskAfterTranslation();
   }
   if (texture_cache_ && used_texture_mask) {
     texture_cache_->RequestTextures(used_texture_mask);
