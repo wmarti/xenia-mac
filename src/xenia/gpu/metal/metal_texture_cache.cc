@@ -2331,8 +2331,7 @@ MTL::Texture* MetalTextureCache::RequestSwapTexture(
 }
 
 // Normalize clamp modes to values Metal supports.
-static xenos::ClampMode NormalizeClampModeStatic(
-    xenos::ClampMode clamp_mode) {
+static xenos::ClampMode NormalizeClampModeStatic(xenos::ClampMode clamp_mode) {
   if (clamp_mode == xenos::ClampMode::kClampToHalfway) {
     return xenos::ClampMode::kClampToEdge;
   }
