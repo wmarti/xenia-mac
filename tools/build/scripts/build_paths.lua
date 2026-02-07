@@ -1,9 +1,12 @@
--- Robust iOS target detection.  The XE_TARGET_IOS env-var is set by
--- xenia-build.py and is the most reliable signal since it bypasses
--- premake option handling entirely.
+-- Robust iOS target detection.  Uses multiple fallback signals:
+--   1. Sentinel file (.ios_target) created by CI before running premake
+--   2. XE_TARGET_IOS env-var set by xenia-build.py
+--   3. premake os.target() / os.istarget()
+--   4. Raw _OPTIONS["os"] from command line
 function is_ios_target()
-  return os.getenv("XE_TARGET_IOS") == "1"
-      or (os.target() == "ios")
+  return os.isfile(".ios_target")
+      or os.getenv("XE_TARGET_IOS") == "1"
+      or (os.target and os.target() == "ios")
       or os.istarget("ios")
       or (_OPTIONS and _OPTIONS["os"] == "ios")
 end

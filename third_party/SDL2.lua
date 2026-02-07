@@ -3,11 +3,17 @@
 -- since SDL2 is our robust API there like DirectX is on Windows.
 --
 
--- SDL2 is not used on iOS.  XE_TARGET_IOS is set by xenia-build.py.
-if os.getenv("XE_TARGET_IOS") == "1"
-    or os.target() == "ios"
+-- SDL2 is not used on iOS.
+-- Multiple detection methods: sentinel file (most reliable), env-var,
+-- premake os.target/istarget, and _OPTIONS.
+local _ios =
+    os.isfile(".ios_target")
+    or os.getenv("XE_TARGET_IOS") == "1"
+    or (os.target and os.target() == "ios")
     or os.istarget("ios")
-    or (_OPTIONS and _OPTIONS["os"] == "ios") then
+    or (_OPTIONS and _OPTIONS["os"] == "ios")
+if _ios then
+  print("SDL2.lua: skipping (iOS target detected)")
   function sdl2_include() end
   return
 end

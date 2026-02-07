@@ -14,6 +14,9 @@ Desktop.ini
 # Microprofile settings
 .microprofilepreset.*
 
+# iOS build sentinel (created by CI before premake)
+.ios_target
+
 # ==============================================================================
 # Projects/IDE files
 # ==============================================================================
