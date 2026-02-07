@@ -85,8 +85,10 @@
     didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
   // Initialize cvars with no arguments on iOS (arguments come from config).
   int argc = 1;
-  const char* argv[] = {"xenia_edge"};
-  cvar::ParseLaunchArguments(argc, const_cast<char**>(argv), "", {});
+  char arg0[] = "xenia_edge";
+  char* argv[] = {arg0};
+  char** argv_ptr = argv;
+  cvar::ParseLaunchArguments(argc, argv_ptr, "", {});
 
   // Create the app context and app.
   app_context_ = std::make_unique<xe::ui::IOSWindowedAppContext>();
