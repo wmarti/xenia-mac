@@ -3,9 +3,9 @@
 -- since SDL2 is our robust API there like DirectX is on Windows.
 --
 
--- SDL2 is not used on iOS or Android.  Inline check avoids depending on
--- any helper function that might not be in scope.
-if os.target() == "ios"
+-- SDL2 is not used on iOS.  XE_TARGET_IOS is set by xenia-build.py.
+if os.getenv("XE_TARGET_IOS") == "1"
+    or os.target() == "ios"
     or os.istarget("ios")
     or (_OPTIONS and _OPTIONS["os"] == "ios") then
   function sdl2_include() end

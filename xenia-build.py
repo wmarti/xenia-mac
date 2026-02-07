@@ -974,6 +974,8 @@ def run_premake(target_os, action, cc=None, enable_tests=False,
     env = dict(os.environ)
     if sys.platform == "darwin":
         env["XE_MACOS_ARM64_HOST"] = "1" if is_macos_arm64_host() else "0"
+    if target_os == "ios":
+        env["XE_TARGET_IOS"] = "1"
     ret = subprocess.call(args, env=env)
 
     if ret == 0:
