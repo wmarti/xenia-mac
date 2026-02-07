@@ -272,6 +272,12 @@ class MetalCommandProcessor : public CommandProcessor {
                               reg::RB_DEPTHCONTROL normalized_depth_control);
   void ApplyRasterizerState(bool primitive_polygonal);
 
+  // Constants shared between MSC and SPIRV-Cross paths.
+  static constexpr size_t kStageCount = 2;  // Vertex + pixel.
+  static constexpr size_t kNullBufferSize = 4096;
+  static constexpr size_t kCbvSizeBytes = 4096;
+  static constexpr size_t kUniformsBytesPerTable = 5 * kCbvSizeBytes;
+
 #if METAL_SHADER_CONVERTER_AVAILABLE
   bool EnsureDepthOnlyPixelShader();
 
@@ -317,14 +323,10 @@ class MetalCommandProcessor : public CommandProcessor {
   void PrewarmPipelineBinaryArchive(
       const std::vector<PipelineDiskCacheEntry>& entries);
 
-  // Constants for descriptor heap sizes.
-  static constexpr size_t kStageCount = 2;  // Vertex + pixel.
+  // Constants for MSC descriptor heap sizes.
   static constexpr size_t kResourceHeapSlotsPerTable = 1025 + 2;
   static constexpr size_t kSamplerHeapSlotsPerTable = 257 + 2;
   static constexpr size_t kCbvHeapSlotsPerTable = 5 + 2;
-  static constexpr size_t kNullBufferSize = 4096;
-  static constexpr size_t kCbvSizeBytes = 4096;
-  static constexpr size_t kUniformsBytesPerTable = 5 * kCbvSizeBytes;
   static constexpr size_t kTopLevelABSlotsPerTable = 32;
   static constexpr size_t kTopLevelABBytesPerTable =
       kTopLevelABSlotsPerTable * sizeof(uint64_t);
@@ -511,12 +513,15 @@ class MetalCommandProcessor : public CommandProcessor {
   MTL::Texture* null_texture_ = nullptr;
   MTL::SamplerState* null_sampler_ = nullptr;
 
+  // Uniforms buffer and draw ring count (shared between MSC and SPIRV-Cross)
+  MTL::Buffer* uniforms_buffer_ = nullptr;
+  size_t draw_ring_count_ = 0;
+
 #if METAL_SHADER_CONVERTER_AVAILABLE
   // IR Converter runtime buffers for shader resource binding (MSC path)
   MTL::Buffer* res_heap_ab_ = nullptr;
   MTL::Buffer* smp_heap_ab_ = nullptr;
   MTL::Buffer* cbv_heap_ab_ = nullptr;
-  MTL::Buffer* uniforms_buffer_ = nullptr;
   MTL::Buffer* top_level_ab_ = nullptr;
   MTL::Buffer* draw_args_buffer_ = nullptr;
   MTL::Buffer* tessellator_tables_buffer_ = nullptr;
@@ -524,7 +529,6 @@ class MetalCommandProcessor : public CommandProcessor {
   std::vector<std::shared_ptr<DrawRingBuffers>> draw_ring_pool_;
   std::vector<std::shared_ptr<DrawRingBuffers>> command_buffer_draw_rings_;
   std::mutex draw_ring_mutex_;
-  size_t draw_ring_count_ = 0;
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   MTL::Library* depth_only_pixel_library_ = nullptr;
