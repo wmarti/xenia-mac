@@ -7,32 +7,45 @@
  ******************************************************************************
  */
 
-#include <alloca.h>
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <sys/resource.h>
 
-#include <cstring>
-
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
 #include "xenia/base/string.h"
 #include "xenia/base/system.h"
 
+#if !XE_PLATFORM_IOS
+#include <alloca.h>
+
+#include <cstring>
+
 // Use headers in third party to not depend on system sdl headers for building
 #include "third_party/SDL2/include/SDL.h"
+#endif  // !XE_PLATFORM_IOS
 
 namespace xe {
 
 void LaunchWebBrowser(const std::string_view url) {
+#if XE_PLATFORM_IOS
+  // TODO(wmarti): Implement via UIApplication openURL.
+  XELOGW("LaunchWebBrowser not yet implemented on iOS: {}", url);
+#else
   auto cmd = std::string("open ");
   cmd.append(url);
   system(cmd.c_str());
+#endif
 }
 
 void LaunchFileExplorer(const std::filesystem::path& path) { assert_always(); }
 
 void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
+#if XE_PLATFORM_IOS
+  // TODO(wmarti): Implement via UIAlertController.
+  XELOGW("ShowSimpleMessageBox (iOS): {}", message);
+#else
   // Try multiple library names for cross-platform compatibility
   void* libsdl2 = dlopen("libSDL2.dylib", RTLD_LAZY | RTLD_LOCAL);
   if (!libsdl2) {
@@ -77,6 +90,7 @@ void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
     }
     dlclose(libsdl2);
   }
+#endif  // XE_PLATFORM_IOS
 }
 
 bool SetProcessPriorityClass(const uint32_t priority_class) {
