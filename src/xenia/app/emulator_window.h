@@ -13,9 +13,12 @@
 #include <memory>
 #include <string>
 
-#include <QPointer>
+#include "xenia/base/platform.h"
 
+#if !XE_PLATFORM_IOS
+#include <QPointer>
 class QTimer;
+#endif
 
 #include "xenia/emulator.h"
 #include "xenia/gpu/command_processor.h"
@@ -240,8 +243,10 @@ class EmulatorWindow {
   bool is_game_process_;
   EmulatorWindowListener window_listener_;
 
+#if !XE_PLATFORM_IOS
   // Timer for debouncing resize events (save config after resize is done)
   std::unique_ptr<QTimer> resize_save_timer_;
+#endif
   uint32_t pending_resize_width_ = 0;
   uint32_t pending_resize_height_ = 0;
 
@@ -260,10 +265,14 @@ class EmulatorWindow {
 
   ui::ImGuiPostProcessingDialog* postprocessing_dialog_ = nullptr;
   ui::ImGuiPerformanceDialog* performance_dialog_ = nullptr;
+#if !XE_PLATFORM_IOS
   QPointer<class GameListDialogQt> game_list_dialog_qt_;
+#endif
   ProfileConfigDialog* profile_dialog_ = nullptr;
+#if !XE_PLATFORM_IOS
   QPointer<class SimpleConfigDialogQt> simple_config_dialog_qt_;
   QPointer<class ConfigDialogQt> config_dialog_qt_;
+#endif
   ui::ImGuiContextMenu* context_menu_ = nullptr;
   ui::ImGuiXmpDialog* xmp_dialog_ = nullptr;
 
