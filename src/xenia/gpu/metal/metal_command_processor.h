@@ -396,8 +396,10 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unique_ptr<DxbcShaderTranslator> shader_translator_;
   std::unique_ptr<DxbcToDxilConverter> dxbc_to_dxil_converter_;
   std::unique_ptr<MetalShaderConverter> metal_shader_converter_;
-  StringBuffer ucode_disasm_buffer_;
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
+
+  // Shared between MSC and SPIRV-Cross paths for AnalyzeUcode.
+  StringBuffer ucode_disasm_buffer_;
 
   // SPIRV-Cross (MSL) path - shader translator and cache.
   std::unique_ptr<SpirvShaderTranslator> spirv_shader_translator_;

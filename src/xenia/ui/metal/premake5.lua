@@ -39,6 +39,10 @@ project("xenia-ui-metal")
     links({
       "MetalFX.framework",
     })
+  -- metal_ir_runtime.cc is MSC-only (Metal Shader Converter);
+  -- exclude it from the iOS build.
+  filter("system:ios")
+    removefiles({ "metal_ir_runtime.cc" })
   filter({})
 
 if enableMiscSubprojects then
