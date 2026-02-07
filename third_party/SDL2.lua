@@ -3,8 +3,11 @@
 -- since SDL2 is our robust API there like DirectX is on Windows.
 --
 
--- SDL2 is not used on iOS or Android.
-if is_ios_target and is_ios_target() then
+-- SDL2 is not used on iOS or Android.  Inline check avoids depending on
+-- any helper function that might not be in scope.
+if os.target() == "ios"
+    or os.istarget("ios")
+    or (_OPTIONS and _OPTIONS["os"] == "ios") then
   function sdl2_include() end
   return
 end

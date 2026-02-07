@@ -189,63 +189,59 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
       reinterpret_cast<const uint32_t*>(spirv_data.data());
   size_t spirv_word_count = spirv_data.size() / sizeof(uint32_t);
 
-  try {
-    spirv_cross::CompilerMSL compiler(spirv_words, spirv_word_count);
+  // Note: SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS is defined, so SPIRV-Cross
+  // errors will abort() rather than throw.  No try/catch is needed.
+  spirv_cross::CompilerMSL compiler(spirv_words, spirv_word_count);
 
-    // Configure MSL options.
-    auto opts = compiler.get_msl_options();
-    if (is_ios) {
-      opts.platform = spirv_cross::CompilerMSL::Options::iOS;
-    } else {
-      opts.platform = spirv_cross::CompilerMSL::Options::macOS;
-    }
-    // MSL 2.4 (macOS 12+ / iOS 15+) — supports argument buffers,
-    // simdgroup functions, raster order groups.
-    opts.msl_version =
-        spirv_cross::CompilerMSL::Options::make_msl_version(2, 4);
-    // Use direct buffer/texture/sampler bindings (no argument buffers).
-    // This is simpler and avoids the indirection overhead of the old
-    // IRDescriptorTable model. Can be switched to argument buffers later
-    // if CPU binding overhead becomes a bottleneck.
-    opts.argument_buffers = false;
-    // Use simdgroup functions on iOS (A13+).
-    opts.ios_use_simdgroup_functions = true;
-    // Force sample rate shading to be available if needed.
-    opts.force_sample_rate_shading = false;
-    // Ensure buffer sizes are not padded.
-    opts.pad_fragment_output_components = false;
-    compiler.set_msl_options(opts);
+  // Configure MSL options.
+  auto opts = compiler.get_msl_options();
+  if (is_ios) {
+    opts.platform = spirv_cross::CompilerMSL::Options::iOS;
+  } else {
+    opts.platform = spirv_cross::CompilerMSL::Options::macOS;
+  }
+  // MSL 2.4 (macOS 12+ / iOS 15+) — supports argument buffers,
+  // simdgroup functions, raster order groups.
+  opts.msl_version =
+      spirv_cross::CompilerMSL::Options::make_msl_version(2, 4);
+  // Use direct buffer/texture/sampler bindings (no argument buffers).
+  // This is simpler and avoids the indirection overhead of the old
+  // IRDescriptorTable model. Can be switched to argument buffers later
+  // if CPU binding overhead becomes a bottleneck.
+  opts.argument_buffers = false;
+  // Use simdgroup functions on iOS (A13+).
+  opts.ios_use_simdgroup_functions = true;
+  // Force sample rate shading to be available if needed.
+  opts.force_sample_rate_shading = false;
+  // Ensure buffer sizes are not padded.
+  opts.pad_fragment_output_components = false;
+  compiler.set_msl_options(opts);
 
-    // Remap SPIR-V descriptor sets/bindings to Metal buffer/texture/sampler
-    // indices.
-    spv::ExecutionModel execution_model =
-        shader().type() == xenos::ShaderType::kVertex
-            ? spv::ExecutionModelVertex
-            : spv::ExecutionModelFragment;
-    AddResourceBindings(compiler, execution_model);
+  // Remap SPIR-V descriptor sets/bindings to Metal buffer/texture/sampler
+  // indices.
+  spv::ExecutionModel execution_model =
+      shader().type() == xenos::ShaderType::kVertex
+          ? spv::ExecutionModelVertex
+          : spv::ExecutionModelFragment;
+  AddResourceBindings(compiler, execution_model);
 
-    // Compile to MSL.
-    msl_source_ = compiler.compile();
-    if (msl_source_.empty()) {
-      XELOGE("MslShader: SPIRV-Cross compilation produced empty output");
-      return false;
-    }
-
-    // Get the entry point name that SPIRV-Cross chose.
-    entry_point_name_ =
-        compiler.get_cleansed_entry_point_name("main", execution_model);
-    if (entry_point_name_.empty()) {
-      // Fallback — SPIRV-Cross often names it "main0".
-      entry_point_name_ = "main0";
-    }
-
-    XELOGD("MslShader: Compiled SPIR-V to MSL ({} bytes, entry: {})",
-           msl_source_.size(), entry_point_name_);
-
-  } catch (const spirv_cross::CompilerError& e) {
-    XELOGE("MslShader: SPIRV-Cross compilation failed: {}", e.what());
+  // Compile to MSL.
+  msl_source_ = compiler.compile();
+  if (msl_source_.empty()) {
+    XELOGE("MslShader: SPIRV-Cross compilation produced empty output");
     return false;
   }
+
+  // Get the entry point name that SPIRV-Cross chose.
+  entry_point_name_ =
+      compiler.get_cleansed_entry_point_name("main", execution_model);
+  if (entry_point_name_.empty()) {
+    // Fallback — SPIRV-Cross often names it "main0".
+    entry_point_name_ = "main0";
+  }
+
+  XELOGD("MslShader: Compiled SPIR-V to MSL ({} bytes, entry: {})",
+         msl_source_.size(), entry_point_name_);
 
   // Compile MSL source to a Metal library.
   NS::Error* error = nullptr;
