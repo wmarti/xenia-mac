@@ -48,10 +48,15 @@
 
 // Available graphics systems:
 #include "xenia/gpu/null/null_graphics_system.h"
+#if !XE_PLATFORM_MAC
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
+#endif  // !XE_PLATFORM_MAC
 #if XE_PLATFORM_WIN32
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #endif  // XE_PLATFORM_WIN32
+#if XE_PLATFORM_MAC
+#include "xenia/gpu/metal/metal_graphics_system.h"
+#endif  // XE_PLATFORM_MAC
 
 // Available input drivers:
 #include "xenia/hid/nop/nop_hid.h"
@@ -79,10 +84,13 @@ DEFINE_string(gpu, "vulkan", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #else
 #define APU_OPTIONS "[sdl, nop]"
-#define GPU_OPTIONS "[vulkan, null]"
 #define HID_OPTIONS "[sdl, nop]"
 DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
-DEFINE_string(gpu, "vulkan", "Graphics system. Use: " GPU_OPTIONS, "GPU");
+#if XE_PLATFORM_MAC
+DEFINE_string(gpu, "metal", "Graphics system. Use: [metal, null]", "GPU");
+#else
+DEFINE_string(gpu, "vulkan", "Graphics system. Use: [vulkan, null]", "GPU");
+#endif
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #endif
 
@@ -263,7 +271,7 @@ class EmulatorApp final : public xe::ui::WindowedApp {
     }
 
     std::unique_ptr<T> Create(const std::string_view name, Args... args) {
-      if (!name.empty()) {
+      if (!name.empty() && name != "any") {
         auto it = std::find_if(
             creators_.cbegin(), creators_.cend(),
             [&name](const auto& f) { return name.compare(f.name) == 0; });
@@ -466,7 +474,11 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
 #if XE_PLATFORM_WIN32
   factory.Add<gpu::d3d12::D3D12GraphicsSystem>("d3d12");
 #endif  // XE_PLATFORM_WIN32
+#if XE_PLATFORM_MAC
+  factory.Add<gpu::metal::MetalGraphicsSystem>("metal");
+#else
   factory.Add<gpu::vulkan::VulkanGraphicsSystem>("vulkan");
+#endif  // XE_PLATFORM_MAC
   std::unique_ptr<gpu::GraphicsSystem> gpu_implementation =
       factory.Create(gpu_implementation_name);
   if (!gpu_implementation) {
@@ -833,8 +845,14 @@ void EmulatorApp::EmulatorThread(bool is_game_process) {
       xam->loader_data().host_path = xe::path_to_utf8(abs_path);
     }
 
+#if XE_PLATFORM_MAC
+    // macOS: Run through UI thread for Metal backend requirements.
+    result = app_context().CallInUIThread(
+        [this, abs_path]() { return emulator_window_->RunTitle(abs_path); });
+#else
     // TODO(has207): Add archive format check like in RunTitle?
     result = emulator_->LaunchPath(abs_path);
+#endif
     if (XFAILED(result)) {
       xe::FatalError(fmt::format("Failed to launch target: {:08X}", result));
       app_context().RequestDeferredQuit();
