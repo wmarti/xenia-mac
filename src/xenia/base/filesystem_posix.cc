@@ -73,18 +73,14 @@ std::filesystem::path GetExecutablePath() {
       return std::string();
     }
   }
-#elif XE_PLATFORM_LINUX
+#else
   char buff[FILENAME_MAX] = "";
   ssize_t len = readlink("/proc/self/exe", buff, sizeof(buff) - 1);
   if (len != -1) {
     buff[len] = '\0';
     return std::string(buff);
-  } else {
-    // Error handling
-    return std::string();
   }
-#else
-  // Other platforms.
+  // Fallback for targets without /proc/self/exe support.
   return std::string();
 #endif
 }
