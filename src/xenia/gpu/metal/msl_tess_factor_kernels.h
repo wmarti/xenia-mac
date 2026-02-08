@@ -13,10 +13,9 @@
 // Embedded MSL compute kernels for tessellation factor generation.
 // These are compiled at runtime by MetalCommandProcessor::InitializeMsl-
 // Tessellation() and dispatched before drawPatches() for tessellated draws.
-
-namespace xe {
-namespace gpu {
-namespace metal {
+//
+// NOTE: This header is #include'd inside namespace xe::gpu::metal in
+// metal_command_processor.cc — do NOT add namespace declarations here.
 
 // --------------------------------------------------------------------
 // Uniform tessellation factor kernels (discrete / continuous modes).
@@ -221,9 +220,5 @@ kernel void tess_factor_adaptive_quad(
       half(min(mapped_edge_0, mapped_edge_2));
 }
 )msl";
-
-}  // namespace metal
-}  // namespace gpu
-}  // namespace xe
 
 #endif  // XENIA_GPU_METAL_MSL_TESS_FACTOR_KERNELS_H_
