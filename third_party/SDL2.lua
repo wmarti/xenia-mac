@@ -13,8 +13,11 @@ local _ios =
 if _ios then
   print("SDL2.lua: iOS target detected, building from source")
   include("SDL2-static-ios.lua")
+  -- Capture the third_party directory now (at load time) so that
+  -- sdl2_include() resolves the path correctly regardless of which
+  -- script directory it is called from later.
+  local third_party_path = os.getcwd()
   function sdl2_include()
-    local third_party_path = os.getcwd()
     includedirs({
       path.getrelative(".", third_party_path) .. "/SDL2/include",
     })
