@@ -159,6 +159,12 @@ void AchievementManager::ShowAchievementEarnedNotification(
       emulator->display_window()->app_context();
   ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
 
+  if (!imgui_drawer) {
+    // No UI drawer available (e.g. iOS without ImGui); just log.
+    XELOGI("Achievement unlocked (no UI): {}", description);
+    return;
+  }
+
   // Use game-specified position if enabled, otherwise default to center-bottom
   const uint8_t position = cvars::achievement_notification_position_by_game
                                ? kernel_state()->notification_position_

@@ -385,8 +385,8 @@ static dword_result_t XamShowMessageBoxUi(
   }
 
   X_RESULT result;
-  if (cvars::headless) {
-    // Auto-pick the focused button.
+  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
+    // Auto-pick the focused button (headless or no UI drawer available).
     auto run = [result_ptr, active_button]() -> X_RESULT {
       result_ptr->ButtonPressed = static_cast<uint32_t>(active_button);
       return X_ERROR_SUCCESS;
@@ -484,8 +484,10 @@ dword_result_t XNotifyQueueUI_entry(dword_t exnq, dword_t dwUserIndex,
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
 
-  new xe::ui::XNotifyWindow(imgui_drawer, "", displayText, dwUserIndex,
-                            position_id);
+  if (imgui_drawer) {
+    new xe::ui::XNotifyWindow(imgui_drawer, "", displayText, dwUserIndex,
+                              position_id);
+  }
 
   // XNotifyQueueUI -> XNotifyQueueUIEx -> XMsgProcessRequest ->
   // XMsgStartIORequestEx & XMsgInProcessCall
@@ -507,7 +509,7 @@ dword_result_t XamShowKeyboardUI_entry(
   auto buffer_size = static_cast<size_t>(buffer_length) * 2;
 
   X_RESULT result;
-  if (cvars::headless) {
+  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
     auto run = [default_text, buffer, buffer_length,
                 buffer_size]() -> X_RESULT {
       // Redirect default_text back into the buffer.
@@ -587,8 +589,9 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 
   std::vector<const DummyDeviceInfo*> devices = ListStorageDevices();
 
-  if (cvars::headless || !cvars::storage_selection_dialog) {
-    // Default to the first storage device (HDD) if headless.
+  if (cvars::headless || !cvars::storage_selection_dialog ||
+      !kernel_state()->emulator()->imgui_drawer()) {
+    // Default to the first storage device (HDD) if headless / no UI.
     return xeXamDispatchHeadless(
         [device_id_ptr, devices]() -> X_RESULT {
           if (devices.empty()) return X_ERROR_CANCELLED;
@@ -628,7 +631,8 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
 void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
-  if (cvars::headless) {
+  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
+    XELOGE("Disc Read Error (no UI available)");
     assert_always();
     exit(1);
     return;
@@ -701,7 +705,7 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
     return X_ERROR_NO_SUCH_USER;
   }
 
-  if (cvars::headless) {
+  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
     return xeXamDispatchHeadlessAsync([]() {});
   }
 
@@ -843,7 +847,7 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
     return X_ERROR_NO_SUCH_USER;
   }
 
-  if (cvars::headless) {
+  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
     return xeXamDispatchHeadless(
         [hresult_ptr]() -> X_RESULT {
           if (hresult_ptr) {
@@ -990,7 +994,7 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
     return X_ERROR_INVALID_PARAMETER;
   }
 
-  if (cvars::headless) {
+  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
     return xeXamDispatchHeadlessAsync([users_needed]() {
       std::map<uint8_t, uint64_t> xuids;
 
@@ -1022,7 +1026,7 @@ X_RESULT xeXamShowCreateProfileUIEx(uint32_t user_index, dword_t flag,
   Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
 
-  if (cvars::headless) {
+  if (cvars::headless || !imgui_drawer) {
     return X_ERROR_SUCCESS;
   }
 
@@ -1097,6 +1101,9 @@ dword_result_t XamShowAchievementsUI_entry(dword_t user_index,
 
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
+  if (!imgui_drawer) {
+    return X_ERROR_SUCCESS;
+  }
   xe::hid::InputSystem* input_system =
       kernel_state()->emulator()->input_system();
 
@@ -1116,6 +1123,9 @@ dword_result_t XamShowGamerCardUI_entry(dword_t user_index) {
 
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
+  if (!imgui_drawer) {
+    return X_ERROR_SUCCESS;
+  }
 
   auto close = [](ui::GamercardUI* dialog) -> void {};
   return xeXamDispatchDialogAsync<ui::GamercardUI>(
@@ -1133,6 +1143,9 @@ dword_result_t XamShowEditProfileUI_entry(dword_t user_index) {
 
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
+  if (!imgui_drawer) {
+    return X_ERROR_SUCCESS;
+  }
 
   auto close = [](ui::GamercardUI* dialog) -> void {};
   return xeXamDispatchDialogAsync<ui::GamercardUI>(

@@ -39,7 +39,16 @@ void LaunchWebBrowser(const std::string_view url) {
 #endif
 }
 
-void LaunchFileExplorer(const std::filesystem::path& path) { assert_always(); }
+void LaunchFileExplorer(const std::filesystem::path& path) {
+#if XE_PLATFORM_IOS
+  XELOGW("LaunchFileExplorer not supported on iOS: {}", path.string());
+#else
+  auto cmd = std::string("open \"");
+  cmd.append(path.string());
+  cmd.append("\"");
+  system(cmd.c_str());
+#endif
+}
 
 void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
 #if XE_PLATFORM_IOS

@@ -49,6 +49,7 @@
 @property(nonatomic, strong) UIButton* openGameButton;
 @property(nonatomic, strong) UILabel* titleLabel;
 @property(nonatomic, strong) UILabel* statusLabel;
+@property(nonatomic, strong) NSURL* securityScopedURL;
 @property(nonatomic, assign) xe::ui::IOSWindowedAppContext* appContext;
 @end
 
@@ -153,6 +154,15 @@
   ]];
 }
 
+- (void)viewDidLayoutSubviews {
+  [super viewDidLayoutSubviews];
+  // Notify the app context that the layout changed, so the window and
+  // presenter can update for rotation, split-view, or safe-area changes.
+  if (self.appContext) {
+    self.appContext->NotifyLayoutChanged();
+  }
+}
+
 - (void)openGameTapped:(UIButton*)sender {
   NSArray<UTType*>* contentTypes = @[
     [UTType typeWithFilenameExtension:@"iso"],
@@ -177,11 +187,32 @@
   if (urls.count == 0) return;
 
   NSURL* url = urls[0];
+
+  // Stop any previous security-scoped access before starting a new one.
+  if (self.securityScopedURL) {
+    [self.securityScopedURL stopAccessingSecurityScopedResource];
+    self.securityScopedURL = nil;
+  }
+
   // Start security-scoped access for files outside the sandbox.
-  [url startAccessingSecurityScopedResource];
+  BOOL accessGranted = [url startAccessingSecurityScopedResource];
+  if (accessGranted) {
+    self.securityScopedURL = url;
+  }
 
   NSString* path = url.path;
-  XELOGI("iOS: User selected game file: {}", [path UTF8String]);
+  XELOGI("iOS: User selected game file: {} (security-scoped: {})", [path UTF8String],
+         accessGranted ? "yes" : "no");
+
+  // Save a bookmark for potential future relaunch.
+  NSError* bookmarkError = nil;
+  NSData* bookmark = [url bookmarkDataWithOptions:0
+                   includingResourceValuesForKeys:nil
+                                    relativeToURL:nil
+                                            error:&bookmarkError];
+  if (bookmark) {
+    [[NSUserDefaults standardUserDefaults] setObject:bookmark forKey:@"lastGameBookmark"];
+  }
 
   // Update UI to show loading state.
   self.statusLabel.text =
@@ -298,6 +329,13 @@
 }
 
 - (void)applicationWillTerminate:(UIApplication*)application {
+  // Release security-scoped file access.
+  XeniaViewController* vc = (XeniaViewController*)self.window.rootViewController;
+  if (vc.securityScopedURL) {
+    [vc.securityScopedURL stopAccessingSecurityScopedResource];
+    vc.securityScopedURL = nil;
+  }
+
   if (app_) {
     app_->InvokeOnDestroy();
     app_.reset();

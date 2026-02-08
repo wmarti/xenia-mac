@@ -23,10 +23,14 @@ bool iOSUIViewSurface::GetSizeImpl(uint32_t& width_out,
     return false;
   }
 
+  // Return size in points (logical size), not pixels.
+  // MetalPresenter multiplies by contentScaleFactor (backing_scale) to get
+  // the drawable size in pixels. Returning pixels here would cause
+  // double-scaling (points * scale * scale), leading to massive drawable
+  // sizes, allocation failures, or extreme slowdown on high-DPI iOS devices.
   CGRect bounds = [view_ bounds];
-  CGFloat scale = [view_ contentScaleFactor];
-  width_out = static_cast<uint32_t>(bounds.size.width * scale);
-  height_out = static_cast<uint32_t>(bounds.size.height * scale);
+  width_out = static_cast<uint32_t>(bounds.size.width);
+  height_out = static_cast<uint32_t>(bounds.size.height);
 
   return true;
 }

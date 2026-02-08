@@ -52,10 +52,22 @@ class IOSWindowedAppContext final : public WindowedAppContext {
     }
   }
 
+  // Callback invoked when the view layout changes (rotation, resize, etc.).
+  using LayoutChangedCallback = std::function<void()>;
+  void set_layout_changed_callback(LayoutChangedCallback callback) {
+    layout_changed_callback_ = std::move(callback);
+  }
+  void NotifyLayoutChanged() {
+    if (layout_changed_callback_) {
+      layout_changed_callback_();
+    }
+  }
+
  private:
   UIView* metal_view_ = nullptr;
   UIViewController* view_controller_ = nullptr;
   GameLaunchCallback game_launch_callback_;
+  LayoutChangedCallback layout_changed_callback_;
 };
 
 }  // namespace ui
