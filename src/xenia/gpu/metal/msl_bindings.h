@@ -56,8 +56,10 @@ constexpr uint32_t kUniformsBytesPerStage = 5 * kCbvSizeBytes;
 namespace MslTextureIndex {
 // Textures start at index 0 within each shader stage.
 constexpr uint32_t kBase = 0;
-// Maximum textures per stage (Xbox 360 has 32 fetch constants).
-constexpr uint32_t kMaxPerStage = 32;
+// Maximum textures per stage for the SPIRV-Cross path.
+// The SPIR-V translator may create multiple texture bindings per fetch
+// constant (for signed/unsigned and 2D/3D variants), so this can exceed 32.
+constexpr uint32_t kMaxPerStage = 128;
 }  // namespace MslTextureIndex
 
 namespace MslSamplerIndex {

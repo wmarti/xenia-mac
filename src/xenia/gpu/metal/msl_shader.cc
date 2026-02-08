@@ -16,6 +16,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/gpu/metal/msl_bindings.h"
 
 namespace xe {
 namespace gpu {
@@ -138,7 +139,7 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
     compiler.add_msl_resource_binding(binding);
   }
 
-  // Set 2 (vertex textures) and Set 3 (pixel textures): up to 32 textures.
+  // Set 2 (vertex textures) and Set 3 (pixel textures): texture bindings.
   //
   // The SPIR-V translator places sampler bindings AFTER texture bindings in
   // the same descriptor set (sampler i gets SPIR-V binding texture_count + i).
@@ -153,7 +154,7 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
   //         samplers in step 2).
   for (uint32_t set = SpirvSets::kTexturesVertex;
        set <= SpirvSets::kTexturesPixel; ++set) {
-    for (uint32_t i = 0; i < 32; ++i) {
+    for (uint32_t i = 0; i < MslTextureIndex::kMaxPerStage; ++i) {
       MSLBinding binding;
       binding.stage = stage;
       binding.desc_set = set;
@@ -184,14 +185,15 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
       break;
     }
     // Overwrite the entry for this binding with the compact sampler index.
-    // The texture field is preserved (binding identity) even though there's
-    // no texture at this binding index — it's harmless.
+    // For standalone samplers, don't propagate the SPIR-V binding to
+    // msl_texture; sampler SPIR-V bindings are after image bindings and may
+    // exceed the per-stage Metal texture slot limit.
     MSLBinding binding;
     binding.stage = stage;
     binding.desc_set = set;
     binding.binding = spv_binding;
     binding.msl_buffer = 0;
-    binding.msl_texture = MslBindings::kTextureBase + spv_binding;
+    binding.msl_texture = MslTextureIndex::kBase;
     binding.msl_sampler = MslBindings::kSamplerBase + sampler_msl_index;
     compiler.add_msl_resource_binding(binding);
     sampler_msl_index++;
@@ -275,11 +277,11 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
     size_t texture_count =
         resources.sampled_images.size() + resources.separate_images.size();
     size_t sampler_count = resources.separate_samplers.size();
-    if (texture_count > 32) {
+    if (texture_count > MslTextureIndex::kMaxPerStage) {
       XELOGE(
-          "MslShader: Shader uses {} textures, exceeding Metal's 32-per-stage "
-          "limit — translation should be considered failed",
-          texture_count);
+          "MslShader: Shader uses {} textures, exceeding Metal's {}-per-stage "
+          "limit in this backend",
+          texture_count, MslTextureIndex::kMaxPerStage);
       return false;
     }
     if (sampler_count > 16) {
