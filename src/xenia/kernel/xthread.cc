@@ -96,6 +96,12 @@ XThread::~XThread() {
 
 thread_local XThread* current_xthread_tls_ = nullptr;
 
+namespace {
+void HostThreadExitCleanupThunk(void* argument) {
+  static_cast<XThread*>(argument)->OnHostThreadExitCleanup();
+}
+}  // namespace
+
 bool XThread::IsInThread() { return Thread::IsInThread(); }
 
 bool XThread::IsInThread(XThread* other) {
@@ -118,6 +124,14 @@ uint32_t XThread::GetCurrentThreadHandle() {
 uint32_t XThread::GetCurrentThreadId() {
   XThread* thread = XThread::GetCurrentThread();
   return thread->guest_object<X_KTHREAD>()->thread_id;
+}
+
+void XThread::OnHostThreadExitCleanup() {
+  running_ = false;
+  current_thread_ = nullptr;
+  current_xthread_tls_ = nullptr;
+  xe::Profiler::ThreadExit();
+  ReleaseHandle();
 }
 
 uint32_t XThread::GetLastError() {
@@ -403,15 +417,10 @@ X_STATUS XThread::Create() {
     current_thread_ = this;
     cpu::ThreadState::Bind(this->thread_state());
     running_ = true;
+
+    pthread_cleanup_push(HostThreadExitCleanupThunk, this);
     Execute();
-    running_ = false;
-    current_thread_ = nullptr;
-    current_xthread_tls_ = nullptr;
-
-    xe::Profiler::ThreadExit();
-
-    // Release the self-reference to the thread.
-    ReleaseHandle();
+    pthread_cleanup_pop(1);
   });
 
   if (!thread_) {
@@ -478,12 +487,7 @@ X_STATUS XThread::Exit(int exit_code) {
   emulator()->processor()->OnThreadExit(thread_id_);
 
   // NOTE: unless PlatformExit fails, expect it to never return!
-  current_xthread_tls_ = nullptr;
-  current_thread_ = nullptr;
-  xe::Profiler::ThreadExit();
-
   running_ = false;
-  ReleaseHandle();
 
   // NOTE: this does not return!
   xe::threading::Thread::Exit(exit_code);
@@ -503,11 +507,9 @@ X_STATUS XThread::Terminate(int exit_code) {
 
   running_ = false;
   if (XThread::IsInThread(this)) {
-    ReleaseHandle();
     xe::threading::Thread::Exit(exit_code);
   } else {
     thread_->Terminate(exit_code);
-    ReleaseHandle();
   }
 
   return X_STATUS_SUCCESS;
@@ -1026,16 +1028,10 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       // Execute user code.
       thread->running_ = true;
 
+      pthread_cleanup_push(HostThreadExitCleanupThunk, thread);
       uint32_t pc = state.context.pc;
       thread->kernel_state_->processor()->ExecuteRaw(thread->thread_state_, pc);
-
-      current_thread_ = nullptr;
-      current_xthread_tls_ = nullptr;
-
-      xe::Profiler::ThreadExit();
-
-      // Release the self-reference to the thread.
-      thread->ReleaseHandle();
+      pthread_cleanup_pop(1);
     });
     assert_not_null(thread->thread_);
 
