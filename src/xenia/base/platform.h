@@ -31,11 +31,13 @@
 //   XE_PLATFORM_APPLE  - all Apple platforms (macOS, iOS, etc.)
 //   XE_PLATFORM_MAC    - macOS only
 //   XE_PLATFORM_IOS    - iOS/iPadOS only
+// Note: TARGET_OS_MAC is 1 on ALL Apple platforms (including iOS), so we must
+// check TARGET_OS_IOS / TARGET_OS_IPHONE first and explicitly exclude them.
 #if defined(__APPLE__)
 #define XE_PLATFORM_APPLE 1
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IOS || TARGET_OS_IPHONE
 #define XE_PLATFORM_IOS 1
-#elif TARGET_OS_MAC
+#elif TARGET_OS_MAC && !TARGET_OS_IOS && !TARGET_OS_IPHONE
 #define XE_PLATFORM_MAC 1
 #endif
 #elif defined(WIN32) || defined(_WIN32)
