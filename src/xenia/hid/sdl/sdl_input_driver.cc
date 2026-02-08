@@ -191,9 +191,11 @@ void SDLInputDriver::LoadGameControllerDB() {
 
 X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
                                          X_INPUT_CAPABILITIES* out_caps) {
-  assert(sdl_events_initialized_ && sdl_gamecontroller_initialized_);
   if (user_index >= HID_SDL_USER_COUNT || !out_caps) {
     return X_ERROR_BAD_ARGUMENTS;
+  }
+  if (!sdl_events_initialized_ || !sdl_gamecontroller_initialized_) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   QueueControllerUpdate();
@@ -214,9 +216,11 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 
 X_RESULT SDLInputDriver::GetState(uint32_t user_index,
                                   X_INPUT_STATE* out_state) {
-  assert(sdl_events_initialized_ && sdl_gamecontroller_initialized_);
-  if (user_index >= HID_SDL_USER_COUNT) {
+  if (user_index >= HID_SDL_USER_COUNT || !out_state) {
     return X_ERROR_BAD_ARGUMENTS;
+  }
+  if (!sdl_events_initialized_ || !sdl_gamecontroller_initialized_) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   QueueControllerUpdate();
@@ -236,9 +240,11 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index,
 
 X_RESULT SDLInputDriver::SetState(uint32_t user_index,
                                   X_INPUT_VIBRATION* vibration) {
-  assert(sdl_events_initialized_ && sdl_gamecontroller_initialized_);
-  if (user_index >= HID_SDL_USER_COUNT) {
+  if (user_index >= HID_SDL_USER_COUNT || !vibration) {
     return X_ERROR_BAD_ARGUMENTS;
+  }
+  if (!sdl_events_initialized_ || !sdl_gamecontroller_initialized_) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   QueueControllerUpdate();
@@ -264,7 +270,9 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
                                       X_INPUT_KEYSTROKE* out_keystroke) {
   // TODO(JoelLinn): Figure out the flags
   // https://github.com/evilC/UCR/blob/0489929e2a8e39caa3484c67f3993d3fba39e46f/Libraries/XInput.ahk#L85-L98
-  assert(sdl_events_initialized_ && sdl_gamecontroller_initialized_);
+  if (!sdl_events_initialized_ || !sdl_gamecontroller_initialized_) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
   bool user_any = users == XUserIndexAny;
   if (users >= HID_SDL_USER_COUNT && !user_any) {
     return X_ERROR_BAD_ARGUMENTS;
