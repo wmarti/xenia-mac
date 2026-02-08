@@ -434,6 +434,7 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unique_ptr<SpirvShaderTranslator> spirv_shader_translator_;
   std::unordered_map<uint64_t, std::unique_ptr<MslShader>> msl_shader_cache_;
   SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};
+  SpirvShaderTranslator::ClipPlaneConstants spirv_clip_plane_constants_ = {};
   std::unordered_map<uint64_t, MTL::RenderPipelineState*> msl_pipeline_cache_;
 
   // SPIRV-Cross tessellation support.

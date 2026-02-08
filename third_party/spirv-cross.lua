@@ -9,7 +9,8 @@ project("spirv-cross")
   cppdialect("C++17")
 
   defines {
-    "SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS",
+    -- Exceptions are enabled so SPIRV-Cross errors can be caught and handled
+    -- gracefully instead of calling abort().  See msl_shader.cc CompileToMsl.
   }
 
   includedirs {

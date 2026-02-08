@@ -63,7 +63,7 @@ project("xenia-gpu-metal")
       spirvcross_root,
     }
     defines {
-      "SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS",
+      -- Exceptions are enabled for SPIRV-Cross (see spirv-cross.lua).
     }
     links {
       "Metal.framework",
