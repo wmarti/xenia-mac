@@ -49,7 +49,7 @@
 @property(nonatomic, strong) UIButton* openGameButton;
 @property(nonatomic, strong) UILabel* titleLabel;
 @property(nonatomic, strong) UILabel* statusLabel;
-@property(nonatomic, weak) xe::ui::IOSWindowedAppContext* appContext;
+@property(nonatomic, assign) xe::ui::IOSWindowedAppContext* appContext;
 @end
 
 @implementation XeniaViewController
