@@ -48,9 +48,14 @@ int main(int argc, char** argv) {
   filtered_args.reserve(argc);
   for (int i = 0; i < argc; ++i) {
     std::string_view arg(argv[i]);
-    if (arg.rfind("-NSDocumentRevisionsDebugMode", 0) == 0 ||
-        arg.rfind("-ApplePersistenceIgnoreState", 0) == 0 ||
-        arg.rfind("-YES", 0) == 0 || arg.rfind("YES", 0) == 0) {
+    if (arg == "-NSDocumentRevisionsDebugMode" ||
+        arg == "-ApplePersistenceIgnoreState") {
+      if (i + 1 < argc) {
+        std::string_view value(argv[i + 1]);
+        if (value == "YES" || value == "NO") {
+          ++i;
+        }
+      }
       continue;
     }
     filtered_args.emplace_back(argv[i]);
@@ -73,18 +78,6 @@ int main(int argc, char** argv) {
                              "[Path to .iso/.xex]", {"target"});
 
   bool is_game_process = !cvars::target.empty();
-
-#if XE_PLATFORM_LINUX
-  // UI process: Force X11 backend for proper Qt rendering
-  // Game process: Use QT_QPA_PLATFORM if set, otherwise auto-detect
-  if (!is_game_process) {
-    qputenv("QT_QPA_PLATFORM", "xcb");
-  } else {
-    if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM")) {
-      qunsetenv("QT_QPA_PLATFORM");
-    }
-  }
-#endif
 
   QApplication qt_app(filtered_argc, filtered_argv);
 

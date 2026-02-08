@@ -10,6 +10,11 @@ project("xenia-ui")
     "xenia-base",
   })
   local_platform_files()
+  filter("system:macosx")
+    files({
+      "surface_mac.mm",
+    })
+  filter({})
   removefiles({
     "*_demo.cc",
   })
