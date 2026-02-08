@@ -133,6 +133,14 @@ project("xenia-app")
       "xenia-hid-sdl",
     })
 
+  -- iOS: use SDL for audio and input (built from source as static lib).
+  filter("system:ios")
+    links({
+      "xenia-apu-sdl",
+      "xenia-helper-sdl",
+      "xenia-hid-sdl",
+    })
+
   filter({"platforms:not Android-*", "architecture:ARM64"})
     links({
       "xenia-cpu-backend-a64",
@@ -200,13 +208,14 @@ project("xenia-app")
     libdirs({ dxilconv_libdir_x86_64 })
   filter({})
 
-  -- iOS app configuration (SPIRV-Cross path only, no MSC/SDL dependencies).
+  -- iOS app configuration (SPIRV-Cross path + SDL audio/input).
   filter("system:ios")
     links({
       "xenia-gpu-metal",
       "xenia-ui-metal",
       "spirv-cross",
       "metal-cpp",
+      "SDL2",
       "CoreFoundation.framework",
       "Foundation.framework",
       "Metal.framework",
@@ -214,6 +223,16 @@ project("xenia-app")
       "QuartzCore.framework",
       "UIKit.framework",
       "UniformTypeIdentifiers.framework",
+      -- SDL audio (CoreAudio backend).
+      "CoreAudio.framework",
+      "AudioToolbox.framework",
+      "AVFoundation.framework",
+      -- SDL input (MFi/GameController backend).
+      "GameController.framework",
+      "CoreMotion.framework",
+      "CoreHaptics.framework",
+      "CoreGraphics.framework",
+      "CoreBluetooth.framework",
     })
     xcodebuildsettings({
       ["INFOPLIST_FILE"] = path.getabsolute("Info_ios.plist"),

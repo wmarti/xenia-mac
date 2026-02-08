@@ -3,9 +3,7 @@
 -- since SDL2 is our robust API there like DirectX is on Windows.
 --
 
--- SDL2 is not used on iOS.
--- Multiple detection methods: sentinel file (most reliable), env-var,
--- premake os.target/istarget, and _OPTIONS.
+-- iOS detection: on iOS we build SDL2 from source as a static library.
 local _ios =
     os.isfile(".ios_target")
     or os.getenv("XE_TARGET_IOS") == "1"
@@ -13,8 +11,14 @@ local _ios =
     or os.istarget("ios")
     or (_OPTIONS and _OPTIONS["os"] == "ios")
 if _ios then
-  print("SDL2.lua: skipping (iOS target detected)")
-  function sdl2_include() end
+  print("SDL2.lua: iOS target detected, building from source")
+  include("SDL2-static-ios.lua")
+  function sdl2_include()
+    local third_party_path = os.getcwd()
+    includedirs({
+      path.getrelative(".", third_party_path) .. "/SDL2/include",
+    })
+  end
   return
 end
 
