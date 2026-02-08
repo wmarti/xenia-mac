@@ -1454,6 +1454,35 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
     // any guest page in each host page to avoid over-restricting smaller guest
     // pages within a host page.
     if (page_size_ < xe_page_size) {
+      struct HostPageProtectUpdate {
+        uint32_t host_offset;
+        xe::memory::PageAccess old_access;
+        xe::memory::PageAccess new_access;
+      };
+
+      auto compute_host_access = [&](uint32_t first_guest_page,
+                                     uint32_t last_guest_page,
+                                     bool use_new_protect) {
+        xe::memory::PageAccess host_access = xe::memory::PageAccess::kNoAccess;
+        for (uint32_t p = first_guest_page; p <= last_guest_page; ++p) {
+          uint32_t page_prot = page_table_[p].current_protect;
+          if (use_new_protect && p >= start_page_number &&
+              p <= end_page_number) {
+            page_prot = protect;
+          }
+          xe::memory::PageAccess page_access = ToPageAccess(page_prot);
+          if (page_access == xe::memory::PageAccess::kReadWrite) {
+            host_access = xe::memory::PageAccess::kReadWrite;
+            break;
+          }
+          if (page_access == xe::memory::PageAccess::kReadOnly &&
+              host_access == xe::memory::PageAccess::kNoAccess) {
+            host_access = xe::memory::PageAccess::kReadOnly;
+          }
+        }
+        return host_access;
+      };
+
       uint32_t start_offset =
           host_address_offset_ + (start_page_number << page_size_shift_);
       uint32_t end_offset = host_address_offset_ +
@@ -1461,6 +1490,7 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
 
       uint32_t aligned_start_offset = start_offset & ~page_size_mask;
       uint32_t aligned_end_offset = (end_offset | page_size_mask) + 1;
+      std::vector<HostPageProtectUpdate> host_updates;
 
       for (uint32_t host_offset = aligned_start_offset;
            host_offset < aligned_end_offset; host_offset += xe_page_size) {
@@ -1479,26 +1509,36 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
           last_guest_page = static_cast<uint32_t>(page_table_.size()) - 1;
         }
 
-        xe::memory::PageAccess host_access = xe::memory::PageAccess::kNoAccess;
-        for (uint32_t p = first_guest_page; p <= last_guest_page; ++p) {
-          uint32_t page_prot = (p >= start_page_number && p <= end_page_number)
-                                   ? protect
-                                   : page_table_[p].current_protect;
-          xe::memory::PageAccess page_access = ToPageAccess(page_prot);
-          if (page_access == xe::memory::PageAccess::kReadWrite) {
-            host_access = xe::memory::PageAccess::kReadWrite;
-            break;
-          }
-          if (page_access == xe::memory::PageAccess::kReadOnly &&
-              host_access == xe::memory::PageAccess::kNoAccess) {
-            host_access = xe::memory::PageAccess::kReadOnly;
+        host_updates.push_back(
+            {host_offset,
+             compute_host_access(first_guest_page, last_guest_page, false),
+             compute_host_access(first_guest_page, last_guest_page, true)});
+      }
+
+      for (size_t i = 0; i < host_updates.size(); ++i) {
+        auto host_address =
+            reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(membase_) +
+                                    heap_base_ + host_updates[i].host_offset);
+        if (xe::memory::Protect(host_address, xe_page_size,
+                                host_updates[i].new_access, nullptr)) {
+          continue;
+        }
+        XELOGE(
+            "BaseHeap::Protect failed due to host page protect failure at "
+            "offset {:08X}",
+            host_updates[i].host_offset);
+        for (size_t rollback_idx = 0; rollback_idx < i; ++rollback_idx) {
+          auto rollback_host_address = reinterpret_cast<void*>(
+              reinterpret_cast<uintptr_t>(membase_) + heap_base_ +
+              host_updates[rollback_idx].host_offset);
+          if (!xe::memory::Protect(rollback_host_address, xe_page_size,
+                                   host_updates[rollback_idx].old_access,
+                                   nullptr)) {
+            XELOGE("BaseHeap::Protect rollback failed at offset {:08X}",
+                   host_updates[rollback_idx].host_offset);
           }
         }
-
-        xe::memory::Protect(
-            reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(membase_) +
-                                    heap_base_ + host_offset),
-            xe_page_size, host_access, nullptr);
+        return false;
       }
 
       if (old_protect) {
