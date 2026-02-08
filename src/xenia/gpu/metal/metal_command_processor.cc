@@ -3111,6 +3111,12 @@ bool MetalCommandProcessor::IssueDrawMsl(
   }
 
   // Get or create shader translations.
+  constexpr bool kIsIos =
+#if XE_PLATFORM_IOS
+      true;
+#else
+      false;
+#endif
   auto* vertex_translation = static_cast<MslShader::MslTranslation*>(
       msl_vertex_shader->GetOrCreateTranslation(
           vertex_shader_modification.value));
@@ -3122,12 +3128,6 @@ bool MetalCommandProcessor::IssueDrawMsl(
     }
   }
   if (!vertex_translation->is_valid()) {
-    constexpr bool kIsIos =
-#if XE_PLATFORM_IOS
-        true;
-#else
-        false;
-#endif
     if (!vertex_translation->CompileToMsl(device_, kIsIos)) {
       XELOGE("SPIRV-Cross: Failed to compile vertex shader to MSL");
       return false;
