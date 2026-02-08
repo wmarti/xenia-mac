@@ -3472,6 +3472,72 @@ bool MetalCommandProcessor::IssueDrawMsl(
     texture_cache_->RequestTextures(used_texture_mask);
   }
 
+  // Ensure shared-memory ranges used by translated shaders are synchronized.
+  // The SPIRV-Cross path bypasses the MSC setup path, so it must request
+  // vertex fetch and memexport ranges explicitly.
+  if (shared_memory_) {
+    const Shader::ConstantRegisterMap& constant_map_vertex =
+        msl_vertex_shader->constant_register_map();
+    for (uint32_t i = 0;
+         i < xe::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+      uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
+      uint32_t j;
+      while (xe::bit_scan_forward(vfetch_bits_remaining, &j)) {
+        vfetch_bits_remaining &= ~(uint32_t(1) << j);
+        uint32_t vfetch_index = i * 32 + j;
+        xenos::xe_gpu_vertex_fetch_t vfetch = regs.GetVertexFetch(vfetch_index);
+        switch (vfetch.type) {
+          case xenos::FetchConstantType::kVertex:
+            break;
+          case xenos::FetchConstantType::kInvalidVertex:
+            if (::cvars::gpu_allow_invalid_fetch_constants) {
+              break;
+            }
+            XELOGW(
+                "SPIRV-Cross: Vertex fetch constant {} ({:08X} {:08X}) has "
+                "\"invalid\" type. Use --gpu_allow_invalid_fetch_constants to "
+                "bypass.",
+                vfetch_index, vfetch.dword_0, vfetch.dword_1);
+            return false;
+          default:
+            XELOGW(
+                "SPIRV-Cross: Vertex fetch constant {} ({:08X} {:08X}) is "
+                "invalid.",
+                vfetch_index, vfetch.dword_0, vfetch.dword_1);
+            return false;
+        }
+        uint32_t buffer_offset = vfetch.address << 2;
+        uint32_t buffer_length = vfetch.size << 2;
+        if (buffer_offset > SharedMemory::kBufferSize ||
+            SharedMemory::kBufferSize - buffer_offset < buffer_length) {
+          XELOGW(
+              "SPIRV-Cross: Vertex fetch constant {} out of range "
+              "(offset=0x{:08X} size={})",
+              vfetch_index, buffer_offset, buffer_length);
+          return false;
+        }
+        if (!shared_memory_->RequestRange(buffer_offset, buffer_length)) {
+          XELOGE(
+              "SPIRV-Cross: Failed to request vertex buffer at 0x{:08X} "
+              "(size {}) in shared memory",
+              buffer_offset, buffer_length);
+          return false;
+        }
+      }
+    }
+
+    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+      uint32_t base_bytes = memexport_range.base_address_dwords << 2;
+      if (!shared_memory_->RequestRange(base_bytes, memexport_range.size_bytes)) {
+        XELOGE(
+            "SPIRV-Cross: Failed to request memexport stream at 0x{:08X} "
+            "(size {}) in shared memory",
+            base_bytes, memexport_range.size_bytes);
+        return false;
+      }
+    }
+  }
+
   // Viewport info for system constants (same as the MSC path).
   draw_util::ViewportInfo viewport_info;
   constexpr uint32_t kViewportBoundsMax = 32767;
