@@ -82,9 +82,18 @@ A64CodeCache::~A64CodeCache() {
   // Unmap all views and close mapping.
   if (mapping_ != xe::memory::kFileMappingHandleInvalid) {
 #if XE_PLATFORM_APPLE && XE_ARCH_ARM64
-    // On macOS ARM64, we used AllocFixed instead of MapFileView, so use
-    // DeallocFixed
-    if (generated_code_execute_base_) {
+    // Apple ARM64 can use either:
+    // 1) single MAP_JIT allocation (execute == write), or
+    // 2) dual mapping (execute != write), including vm_remap fallback on iOS.
+    if (generated_code_write_base_ &&
+        generated_code_write_base_ != generated_code_execute_base_) {
+      xe::memory::UnmapFileView(mapping_, generated_code_write_base_,
+                                kGeneratedCodeSize);
+      if (generated_code_execute_base_) {
+        xe::memory::UnmapFileView(mapping_, generated_code_execute_base_,
+                                  kGeneratedCodeSize);
+      }
+    } else if (generated_code_execute_base_) {
       xe::memory::DeallocFixed(generated_code_execute_base_, kGeneratedCodeSize,
                                xe::memory::DeallocationType::kRelease);
     }
