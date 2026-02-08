@@ -905,7 +905,7 @@ workspace("xenia")
   include("src/xenia/ui/vulkan")
   include("src/xenia/vfs")
 
-  if not os.istarget("android") and not is_ios_target() then
+  if not os.istarget("android") then
     include("src/xenia/apu/sdl")
     include("src/xenia/helper/sdl")
     include("src/xenia/hid/sdl")
