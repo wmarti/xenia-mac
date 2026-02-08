@@ -10,6 +10,7 @@
 #include "xenia/gpu/metal/msl_shader.h"
 
 #include <cstring>
+#include <stdexcept>
 
 #include "spirv_msl.hpp"
 
@@ -138,33 +139,62 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
   }
 
   // Set 2 (vertex textures) and Set 3 (pixel textures): up to 32 textures.
-  // Map all possible texture bindings.
+  //
+  // The SPIR-V translator places sampler bindings AFTER texture bindings in
+  // the same descriptor set (sampler i gets SPIR-V binding texture_count + i).
+  // Metal only supports 16 samplers per stage, so we must remap sampler
+  // bindings to compact indices 0..M-1 regardless of their SPIR-V binding.
+  //
+  // Use a single MSLResourceBinding entry per SPIR-V binding to avoid
+  // overwrite issues (SPIRV-Cross keys entries by {stage, set, binding}).
+  //
+  // Step 1: Map all 32 possible texture bindings with identity mapping.
+  //         Set msl_sampler = 0 as a safe default (overridden for real
+  //         samplers in step 2).
   for (uint32_t set = SpirvSets::kTexturesVertex;
        set <= SpirvSets::kTexturesPixel; ++set) {
     for (uint32_t i = 0; i < 32; ++i) {
-      // Texture binding.
-      {
-        MSLBinding binding;
-        binding.stage = stage;
-        binding.desc_set = set;
-        binding.binding = i;
-        binding.msl_buffer = 0;
-        binding.msl_texture = MslBindings::kTextureBase + i;
-        binding.msl_sampler = 0;
-        compiler.add_msl_resource_binding(binding);
-      }
-      // Sampler binding (same index).
-      {
-        MSLBinding binding;
-        binding.stage = stage;
-        binding.desc_set = set;
-        binding.binding = i;
-        binding.msl_buffer = 0;
-        binding.msl_texture = 0;
-        binding.msl_sampler = MslBindings::kSamplerBase + i;
-        compiler.add_msl_resource_binding(binding);
-      }
+      MSLBinding binding;
+      binding.stage = stage;
+      binding.desc_set = set;
+      binding.binding = i;
+      binding.msl_buffer = 0;
+      binding.msl_texture = MslBindings::kTextureBase + i;
+      binding.msl_sampler = 0;
+      compiler.add_msl_resource_binding(binding);
     }
+  }
+
+  // Step 2: Query the actual SPIR-V resources to find sampler bindings
+  //         and remap them to compact Metal sampler indices 0..M-1.
+  //         This handles the case where SPIR-V sampler bindings exceed 15
+  //         (which would violate Metal's 16-sampler-per-stage limit).
+  auto resources = compiler.get_shader_resources();
+  uint32_t sampler_msl_index = 0;
+  for (const auto& samp : resources.separate_samplers) {
+    uint32_t set =
+        compiler.get_decoration(samp.id, spv::DecorationDescriptorSet);
+    uint32_t spv_binding =
+        compiler.get_decoration(samp.id, spv::DecorationBinding);
+    if (sampler_msl_index >= 16) {
+      XELOGW(
+          "MslShader: Too many samplers ({} >= 16), sampler at set={} "
+          "binding={} will not be bound",
+          sampler_msl_index, set, spv_binding);
+      break;
+    }
+    // Overwrite the entry for this binding with the compact sampler index.
+    // The texture field is preserved (binding identity) even though there's
+    // no texture at this binding index — it's harmless.
+    MSLBinding binding;
+    binding.stage = stage;
+    binding.desc_set = set;
+    binding.binding = spv_binding;
+    binding.msl_buffer = 0;
+    binding.msl_texture = MslBindings::kTextureBase + spv_binding;
+    binding.msl_sampler = MslBindings::kSamplerBase + sampler_msl_index;
+    compiler.add_msl_resource_binding(binding);
+    sampler_msl_index++;
   }
 }
 
@@ -189,8 +219,9 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
       reinterpret_cast<const uint32_t*>(spirv_data.data());
   size_t spirv_word_count = spirv_data.size() / sizeof(uint32_t);
 
-  // Note: SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS is defined, so SPIRV-Cross
-  // errors will abort() rather than throw.  No try/catch is needed.
+  // SPIRV-Cross throws exceptions on translation errors.  We catch them
+  // below and return false so the draw can be skipped gracefully instead
+  // of crashing the process.
   spirv_cross::CompilerMSL compiler(spirv_words, spirv_word_count);
 
   // Configure MSL options.
@@ -238,16 +269,48 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   }
   AddResourceBindings(compiler, execution_model);
 
-  // Compile to MSL.
-  msl_source_ = compiler.compile();
+  // Validate resource counts against Metal limits before compilation.
+  {
+    auto resources = compiler.get_shader_resources();
+    size_t texture_count =
+        resources.sampled_images.size() + resources.separate_images.size();
+    size_t sampler_count = resources.separate_samplers.size();
+    if (texture_count > 32) {
+      XELOGE(
+          "MslShader: Shader uses {} textures, exceeding Metal's 32-per-stage "
+          "limit — translation should be considered failed",
+          texture_count);
+      return false;
+    }
+    if (sampler_count > 16) {
+      XELOGE(
+          "MslShader: Shader uses {} samplers, exceeding Metal's 16-per-stage "
+          "limit — translation should be considered failed",
+          sampler_count);
+      return false;
+    }
+  }
+
+  // Compile to MSL.  SPIRV-Cross throws on translation errors.
+  try {
+    msl_source_ = compiler.compile();
+  } catch (const std::exception& e) {
+    XELOGE("MslShader: SPIRV-Cross compilation failed: {}", e.what());
+    return false;
+  }
   if (msl_source_.empty()) {
     XELOGE("MslShader: SPIRV-Cross compilation produced empty output");
     return false;
   }
 
   // Get the entry point name that SPIRV-Cross chose.
-  entry_point_name_ =
-      compiler.get_cleansed_entry_point_name("main", execution_model);
+  try {
+    entry_point_name_ =
+        compiler.get_cleansed_entry_point_name("main", execution_model);
+  } catch (const std::exception& e) {
+    XELOGE("MslShader: SPIRV-Cross entry point lookup failed: {}", e.what());
+    entry_point_name_ = "main0";
+  }
   if (entry_point_name_.empty()) {
     // Fallback — SPIRV-Cross often names it "main0".
     entry_point_name_ = "main0";
@@ -268,6 +331,11 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   // Use fast math for better performance (matches Xbox 360 behavior better
   // than strict IEEE — the 360's ALU doesn't fully conform to IEEE anyway).
   compile_options->setFastMathEnabled(true);
+  // Set the MSL language version to match what SPIRV-Cross generates (2.4).
+  // Without this, the Metal compiler uses the OS default, which could reject
+  // MSL 2.4 features on older OS versions or accept newer syntax on newer OS
+  // versions — causing inconsistent behavior.
+  compile_options->setLanguageVersion(MTL::LanguageVersion2_4);
 
   metal_library_ = device->newLibrary(source_str, compile_options, &error);
   compile_options->release();

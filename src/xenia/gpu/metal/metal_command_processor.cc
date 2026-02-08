@@ -3063,20 +3063,10 @@ bool MetalCommandProcessor::IssueDrawMsl(
   auto* msl_vertex_shader = static_cast<MslShader*>(vertex_shader);
   auto* msl_pixel_shader = static_cast<MslShader*>(pixel_shader);
 
-  // Tessellation draws use a separate pipeline path with Metal's native
-  // tessellation: a compute kernel generates tessellation factors and the
-  // domain shader (TES) runs as the post-tessellation vertex function.
+  // Tessellation draws use Metal's native tessellation: tessellation factors
+  // are computed on the CPU and the domain shader (TES) runs as the
+  // post-tessellation vertex function.
   const bool is_tessellated = primitive_processing_result.IsTessellated();
-  if (is_tessellated && !tess_factor_pipeline_tri_) {
-    static bool tess_logged = false;
-    if (!tess_logged) {
-      tess_logged = true;
-      XELOGW(
-          "SPIRV-Cross: Tessellation factor pipelines not available; "
-          "skipping tessellated draw");
-    }
-    return true;
-  }
 
   // Determine the host vertex shader type for geometry expansion.
   // The primitive processor has already set kPointListAsTriangleStrip or
@@ -3342,6 +3332,12 @@ bool MetalCommandProcessor::IssueDrawMsl(
               &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
               kFetchConstantCount * sizeof(uint32_t));
 
+  // b5 (msl_buffer 6): Clip plane constants (separate buffer for SPIR-V path).
+  const size_t kClipPlaneConstantOffset = 4 * kCBVSize;
+  std::memcpy(uniforms_vertex + kClipPlaneConstantOffset,
+              &spirv_clip_plane_constants_,
+              sizeof(SpirvShaderTranslator::ClipPlaneConstants));
+
   // Bind shared memory buffer at msl_buffer 0.
   MTL::Buffer* shared_mem_buffer =
       shared_memory_ ? shared_memory_->GetBuffer() : nullptr;
@@ -3353,6 +3349,14 @@ bool MetalCommandProcessor::IssueDrawMsl(
     current_render_encoder_->setFragmentBuffer(shared_mem_buffer, 0,
                                                MslBufferIndex::kSharedMemory);
     UseRenderEncoderResource(shared_mem_buffer, shared_memory_usage);
+  }
+
+  // Bind a null buffer at the EDRAM slot (msl_buffer 30) as a safety measure.
+  // FSI/EDRAM is disabled on this path (fragment_shader_sample_interlock =
+  // false), so no shader should reference it, but binding a dummy prevents
+  // GPU faults if any code path unexpectedly accesses buffer(30).
+  if (null_buffer_) {
+    current_render_encoder_->setFragmentBuffer(null_buffer_, 0, 30);
   }
 
   // Bind uniforms buffer at the appropriate indices.
@@ -3391,6 +3395,12 @@ bool MetalCommandProcessor::IssueDrawMsl(
   current_render_encoder_->setFragmentBuffer(uniforms_buffer_,
                                              ps_base_offset + 3 * kCBVSize,
                                              MslBufferIndex::kFetchConstants);
+
+  // Clip plane constants (msl_buffer 6) — vertex shader only.
+  // The SPIR-V translator uses a separate constant buffer for clip planes.
+  current_render_encoder_->setVertexBuffer(uniforms_buffer_,
+                                           vs_base_offset + 4 * kCBVSize,
+                                           MslBufferIndex::kClipPlaneConstants);
 
   UseRenderEncoderResource(uniforms_buffer_, MTL::ResourceUsageRead);
 
@@ -3437,16 +3447,12 @@ bool MetalCommandProcessor::IssueDrawMsl(
     if (!shader || !texture_cache_) {
       return;
     }
-    // In the SPIR-V translator, sampler bindings are placed after texture
-    // bindings in the same descriptor set: sampler i gets binding index
-    // (texture_count + i).  SPIRV-Cross maps binding N → msl_sampler N
-    // (identity mapping in AddResourceBindings), so the Metal sampler index
-    // must also be texture_count + i to match the compiled MSL.
-    uint32_t texture_count = static_cast<uint32_t>(
-        shader->GetTextureBindingsAfterTranslation().size());
+    // Samplers are remapped to compact Metal indices 0..M-1 in the
+    // SPIRV-Cross resource binding setup (AddResourceBindings), so we
+    // bind them at index i (not texture_count + i).
     const auto& sampler_bindings = shader->GetSamplerBindingsAfterTranslation();
     for (size_t i = 0; i < sampler_bindings.size(); ++i) {
-      uint32_t smp_index = texture_count + static_cast<uint32_t>(i);
+      uint32_t smp_index = static_cast<uint32_t>(i);
       if (smp_index >= MslSamplerIndex::kMaxPerStage) {
         break;
       }
@@ -3523,14 +3529,44 @@ bool MetalCommandProcessor::IssueDrawMsl(
     }
 
     // IEEE 754 float32 → float16 conversion for tessellation factors.
+    // Uses round-to-nearest-even and handles subnormals for accuracy
+    // near tessellation factor boundaries.
     auto f32_to_f16 = [](float v) -> uint16_t {
       uint32_t b;
       std::memcpy(&b, &v, 4);
       uint16_t s = (b >> 16) & 0x8000u;
       int e = int((b >> 23) & 0xFFu) - 127 + 15;
       uint32_t m = b & 0x7FFFFFu;
-      if (e <= 0) return s;
-      if (e >= 31) return uint16_t(s | 0x7C00u);
+      if (e <= 0) {
+        // Subnormal or zero in half precision.
+        if (e < -10) return s;  // Too small, flush to signed zero.
+        // Subnormal half: shift mantissa (with implicit leading 1) right.
+        m = (m | 0x800000u) >> (1 - e);
+        // Round to nearest even.
+        if ((m & 0x1FFFu) > 0x1000u ||
+            ((m & 0x1FFFu) == 0x1000u && (m & 0x2000u))) {
+          m += 0x2000u;
+        }
+        return uint16_t(s | (m >> 13));
+      }
+      if (e >= 31) {
+        // Overflow → infinity (or NaN passthrough).
+        if (e == 31 && m != 0) {
+          // NaN: preserve at least one mantissa bit.
+          return uint16_t(s | 0x7C00u | std::max(m >> 13, uint32_t(1)));
+        }
+        return uint16_t(s | 0x7C00u);
+      }
+      // Round to nearest even: check the 13 bits being truncated.
+      if ((m & 0x1FFFu) > 0x1000u ||
+          ((m & 0x1FFFu) == 0x1000u && (m & 0x2000u))) {
+        m += 0x2000u;
+        if (m & 0x800000u) {
+          m = 0;
+          e++;
+          if (e >= 31) return uint16_t(s | 0x7C00u);
+        }
+      }
       return uint16_t(s | (e << 10) | (m >> 13));
     };
 
@@ -3550,9 +3586,10 @@ bool MetalCommandProcessor::IssueDrawMsl(
           primitive_processing_result.host_shader_index_endian;
       uint32_t factor_base = primitive_processing_result.guest_index_base;
       const uint8_t* xbox_ram = shared_memory_->GetXboxRamBase();
-      // Minimum factor: for fractional_even, must be >= 2.0 (1.0 + the
-      // minimum Xbox factor of 1.0).  We use 2.0 as the floor.
-      float factor_min = 2.0f;
+      // Minimum factor from VGT_HOS_MIN_TESS_LEVEL + 1.0 (Xbox 360
+      // convention). For fractional_even partitioning, must be >= 2.0.
+      float factor_min = std::max(
+          2.0f, regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f);
       float factor_max = max_tess;
 
       if (is_quad_domain) {
@@ -6758,7 +6795,8 @@ MetalCommandProcessor::GetOrCreateMslTessPipelineState(
       MTL::TessellationControlPointIndexTypeNone);
 
   // Render target attachments with blend state (same as non-tess pipeline).
-  desc->setAlphaToCoverageEnabled(key_data.alpha_to_mask_enable != 0);
+  // Alpha-to-mask is handled in the shader via gl_SampleMask (SPIR-V path).
+  desc->setAlphaToCoverageEnabled(false);
   for (uint32_t i = 0; i < 4; ++i) {
     auto* color_attachment = desc->colorAttachments()->object(i);
     color_attachment->setPixelFormat(color_formats[i]);
@@ -7017,7 +7055,10 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateMslPipelineState(
   desc->setDepthAttachmentPixelFormat(depth_format);
   desc->setStencilAttachmentPixelFormat(stencil_format);
   desc->setSampleCount(sample_count);
-  desc->setAlphaToCoverageEnabled(key_data.alpha_to_mask_enable != 0);
+  // Alpha-to-mask is implemented purely in the SPIR-V shader via
+  // gl_SampleMask output (matching the Vulkan backend).  Enabling
+  // pipeline-level alphaToCoverage would double-apply coverage.
+  desc->setAlphaToCoverageEnabled(false);
 
   // Blending and color write masks.
   for (uint32_t i = 0; i < 4; ++i) {
@@ -7276,6 +7317,26 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
     *reinterpret_cast<int32_t*>(&color_exp_bias_scale) =
         UINT32_C(0x3F800000) + (color_exp_bias << 23);
     consts.color_exp_bias[i] = color_exp_bias_scale;
+  }
+
+  // Clip plane constants (separate buffer for the SPIR-V translator).
+  // The SPIR-V translator reads clip planes from a dedicated uniform buffer
+  // (kConstantBufferClipPlanes), not from system constants.
+  auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  std::memset(&spirv_clip_plane_constants_, 0,
+              sizeof(spirv_clip_plane_constants_));
+  if (!pa_cl_clip_cntl.clip_disable && pa_cl_clip_cntl.ucp_ena) {
+    float* clip_plane_write_ptr =
+        spirv_clip_plane_constants_.user_clip_planes[0];
+    uint32_t clip_planes_remaining = pa_cl_clip_cntl.ucp_ena;
+    uint32_t clip_plane_index;
+    while (xe::bit_scan_forward(clip_planes_remaining, &clip_plane_index)) {
+      clip_planes_remaining &= ~(UINT32_C(1) << clip_plane_index);
+      const float* clip_plane_regs = reinterpret_cast<const float*>(
+          &regs.values[XE_GPU_REG_PA_CL_UCP_0_X + clip_plane_index * 4]);
+      std::memcpy(clip_plane_write_ptr, clip_plane_regs, 4 * sizeof(float));
+      clip_plane_write_ptr += 4;
+    }
   }
 }
 
