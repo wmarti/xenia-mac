@@ -32,6 +32,9 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
 #include "xenia/base/system.h"
+#if XE_PLATFORM_IOS
+#include <sys/mman.h>
+#endif
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/backend/null_backend.h"
 #if XE_ARCH_ARM64
@@ -282,14 +285,25 @@ X_STATUS Emulator::Setup(
   std::unique_ptr<xe::cpu::backend::Backend> backend;
 
   // On iOS, probe whether JIT (executable memory) is available at runtime.
-  // JIT requires a debugger attachment (e.g. AltStore/SideJIT) to set the
-  // CS_DEBUGGED flag, which enables mprotect W^X toggling.
+  // JIT requires a debugger attachment (e.g. StikDebug/AltJIT/SideJITServer)
+  // to set the CS_DEBUGGED flag, which allows mmap with PROT_EXEC.
+  // We use the dual-mapping (split W^X via vm_remap) approach, not MAP_JIT.
 #if XE_PLATFORM_IOS
-  bool jit_available = xe::memory::IsWritableExecutableMemorySupported();
+  bool jit_available = []() {
+    // Test whether we can mmap executable memory (requires CS_DEBUGGED).
+    const size_t test_size = xe::memory::page_size();
+    void* test = mmap(nullptr, test_size, PROT_READ | PROT_EXEC,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (test == MAP_FAILED) {
+      return false;
+    }
+    munmap(test, test_size);
+    return true;
+  }();
   if (!jit_available) {
     XELOGW(
         "JIT is not available. Games will not run.\n"
-        "If installed via AltStore, long-press the app icon -> Enable JIT.\n"
+        "Enable JIT via StikDebug, AltJIT, or SideJITServer.\n"
         "If installed via Xcode, launch with the debugger attached.");
   }
 #else

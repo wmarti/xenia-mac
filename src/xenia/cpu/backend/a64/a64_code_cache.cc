@@ -556,7 +556,9 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
         old_commit_mark, new_commit_mark));
 
     // Copy code and fill padding while in write mode on MAP_JIT.
-#if XE_PLATFORM_APPLE && defined(__aarch64__)
+    // pthread_jit_write_protect_np is only available on macOS ARM64, not iOS.
+    // On iOS the dual-mapping (split W^X) path is used instead.
+#if XE_PLATFORM_MAC && defined(__aarch64__)
     const bool jit_write =
         (generated_code_execute_base_ == generated_code_write_base_);
     if (jit_write) {
@@ -569,7 +571,7 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
       std::memset(tail_write_address, 0x00,
                   static_cast<size_t>(end_write_address - tail_write_address));
     }
-#if XE_PLATFORM_APPLE && defined(__aarch64__)
+#if XE_PLATFORM_MAC && defined(__aarch64__)
     if (jit_write) {
       pthread_jit_write_protect_np(1);
     }
@@ -657,7 +659,9 @@ uint32_t A64CodeCache::PlaceData(const void* data, size_t length) {
                                                              new_commit_mark));
 
   // Copy data.
-#if XE_PLATFORM_APPLE && defined(__aarch64__)
+  // pthread_jit_write_protect_np is only available on macOS ARM64, not iOS.
+  // On iOS the dual-mapping (split W^X) path is used instead.
+#if XE_PLATFORM_MAC && defined(__aarch64__)
   if (generated_code_execute_base_ == generated_code_write_base_) {
     pthread_jit_write_protect_np(0);
     std::memcpy(data_address, data, length);

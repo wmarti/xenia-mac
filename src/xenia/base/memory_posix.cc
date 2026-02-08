@@ -115,7 +115,13 @@ PageAccess ToXeniaProtectFlags(const char* protection) {
 }
 
 bool IsWritableExecutableMemorySupported() {
-#if XE_PLATFORM_APPLE
+#if XE_PLATFORM_IOS
+  // On iOS, pthread_jit_write_protect_np is unavailable, so MAP_JIT with
+  // single-mapping RWX is not usable.  iOS emulators (DolphiniOS, PPSSPP, UTM)
+  // all use dual-mapping (split W^X via vm_remap) instead.  Return false here
+  // so that Xenia takes the dual-mapping code path.
+  return false;
+#elif XE_PLATFORM_APPLE
   static const bool supported = []() {
     const size_t test_size = page_size();
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
