@@ -802,13 +802,15 @@ workspace("xenia")
     include("third_party/libusb.lua")
   end
 
-  if not os.istarget("android") and not is_ios_target() then
+  if not os.istarget("android") then
     -- SDL2 requires sdl2-config, and as of November 2020 isn't high-quality on
     -- Android yet, most importantly in game controllers - the keycode and axis
     -- enums are being ruined during conversion to SDL2 enums resulting in only
     -- one controller (Nvidia Shield) being supported, digital triggers are also
     -- not supported; lifecycle management (especially surface loss) is also
-    -- complicated. SDL2 is also not appropriate for iOS.
+    -- complicated.
+    -- On iOS, SDL2.lua detects the target and builds SDL2 from source via
+    -- SDL2-static-ios.lua (CoreAudio audio + MFi gamecontroller).
     include("third_party/SDL2.lua")
   else
     -- Provide a no-op stub so callers don't need to guard every call.
