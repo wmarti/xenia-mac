@@ -1077,21 +1077,12 @@ bool MetalCommandProcessor::SetupContext() {
   }
   SetActiveDrawRing(ring);
 #else
-  // SPIRV-Cross path: allocate a standalone uniforms buffer for shader
-  // constant binding (no MSC draw ring infrastructure needed).
-  {
-    const size_t kDescriptorTableCount = kStageCount * draw_ring_count_;
-    const size_t kUniformsBufferSize =
-        kUniformsBytesPerTable * kDescriptorTableCount;
-    uniforms_buffer_ =
-        device_->newBuffer(kUniformsBufferSize, MTL::ResourceStorageModeShared);
-    if (!uniforms_buffer_) {
-      XELOGE("Failed to create uniforms buffer for SPIRV-Cross path");
+  // SPIRV-Cross path: use command-buffer-scoped uniforms buffers so CPU writes
+  // to the next submission can't race with in-flight GPU reads.
+  if (cvars::metal_use_spirvcross) {
+    if (!EnsureSpirvUniformBuffer()) {
       return false;
     }
-    uniforms_buffer_->setLabel(
-        NS::String::string("MslUniformsBuffer", NS::UTF8StringEncoding));
-    std::memset(uniforms_buffer_->contents(), 0, kUniformsBufferSize);
   }
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
@@ -4594,6 +4585,15 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
   current_command_buffer_->setLabel(
       NS::String::string("XeniaCommandBuffer", NS::UTF8StringEncoding));
 
+#if !METAL_SHADER_CONVERTER_AVAILABLE
+  if (cvars::metal_use_spirvcross && !EnsureSpirvUniformBuffer()) {
+    XELOGE("EnsureCommandBuffer: failed to prepare SPIRV-Cross uniforms buffer");
+    current_command_buffer_->release();
+    current_command_buffer_ = nullptr;
+    return nullptr;
+  }
+#endif  // !METAL_SHADER_CONVERTER_AVAILABLE
+
   return current_command_buffer_;
 }
 
@@ -4700,12 +4700,20 @@ bool MetalCommandProcessor::EndSubmission(bool is_swap) {
       if (completion_timeline_) {
         completion_timeline_->SignalAndAdvance(current_command_buffer_);
       }
+#if METAL_SHADER_CONVERTER_AVAILABLE
       ScheduleDrawRingRelease(current_command_buffer_);
+#else
+      if (cvars::metal_use_spirvcross) {
+        ScheduleSpirvUniformBufferRelease(current_command_buffer_);
+      }
+#endif
       current_command_buffer_->commit();
       current_command_buffer_->release();
       current_command_buffer_ = nullptr;
     }
+#if METAL_SHADER_CONVERTER_AVAILABLE
     SetActiveDrawRing(nullptr);
+#endif
     current_draw_index_ = 0;
 
     submission_open_ = false;
@@ -4950,6 +4958,43 @@ void MetalCommandProcessor::EnsureDrawRingCapacity() {
   current_draw_index_ = 0;
 }
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
+
+#if !METAL_SHADER_CONVERTER_AVAILABLE
+bool MetalCommandProcessor::EnsureSpirvUniformBuffer() {
+  if (uniforms_buffer_) {
+    return true;
+  }
+  if (!device_) {
+    XELOGE("EnsureSpirvUniformBuffer: Metal device is null");
+    return false;
+  }
+  const size_t kDescriptorTableCount = kStageCount * draw_ring_count_;
+  const size_t kUniformsBufferSize =
+      kUniformsBytesPerTable * kDescriptorTableCount;
+  uniforms_buffer_ =
+      device_->newBuffer(kUniformsBufferSize, MTL::ResourceStorageModeShared);
+  if (!uniforms_buffer_) {
+    XELOGE("Failed to create uniforms buffer for SPIRV-Cross path");
+    return false;
+  }
+  uniforms_buffer_->setLabel(
+      NS::String::string("MslUniformsBuffer", NS::UTF8StringEncoding));
+  std::memset(uniforms_buffer_->contents(), 0, kUniformsBufferSize);
+  return true;
+}
+
+void MetalCommandProcessor::ScheduleSpirvUniformBufferRelease(
+    MTL::CommandBuffer* command_buffer) {
+  if (!command_buffer || !uniforms_buffer_) {
+    return;
+  }
+  MTL::Buffer* submitted_uniforms = uniforms_buffer_;
+  uniforms_buffer_ = nullptr;
+  command_buffer->addCompletedHandler([submitted_uniforms](MTL::CommandBuffer*) {
+    submitted_uniforms->release();
+  });
+}
+#endif  // !METAL_SHADER_CONVERTER_AVAILABLE
 
 void MetalCommandProcessor::EndCommandBuffer() { EndSubmission(false); }
 

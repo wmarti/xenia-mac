@@ -191,6 +191,12 @@ class MetalCommandProcessor : public CommandProcessor {
   void EnsureDrawRingCapacity();
   void UseRenderEncoderAttachmentHeaps(MTL::RenderPassDescriptor* descriptor);
   void UseRenderEncoderHeap(MTL::Heap* heap);
+#if !METAL_SHADER_CONVERTER_AVAILABLE
+  // SPIRV-Cross path only: uniforms buffer is command-buffer scoped to avoid
+  // CPU writes racing ahead of in-flight GPU reads.
+  bool EnsureSpirvUniformBuffer();
+  void ScheduleSpirvUniformBufferRelease(MTL::CommandBuffer* command_buffer);
+#endif  // !METAL_SHADER_CONVERTER_AVAILABLE
 
 #if METAL_SHADER_CONVERTER_AVAILABLE
   // Pipeline state management (MSC path)
