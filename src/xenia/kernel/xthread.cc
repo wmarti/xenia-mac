@@ -418,9 +418,14 @@ X_STATUS XThread::Create() {
     cpu::ThreadState::Bind(this->thread_state());
     running_ = true;
 
+#if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID || XE_PLATFORM_APPLE
     pthread_cleanup_push(HostThreadExitCleanupThunk, this);
     Execute();
     pthread_cleanup_pop(1);
+#else
+    Execute();
+    OnHostThreadExitCleanup();
+#endif
   });
 
   if (!thread_) {
@@ -1028,10 +1033,16 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       // Execute user code.
       thread->running_ = true;
 
+#if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID || XE_PLATFORM_APPLE
       pthread_cleanup_push(HostThreadExitCleanupThunk, thread);
       uint32_t pc = state.context.pc;
       thread->kernel_state_->processor()->ExecuteRaw(thread->thread_state_, pc);
       pthread_cleanup_pop(1);
+#else
+      uint32_t pc = state.context.pc;
+      thread->kernel_state_->processor()->ExecuteRaw(thread->thread_state_, pc);
+      thread->OnHostThreadExitCleanup();
+#endif
     });
     assert_not_null(thread->thread_);
 
