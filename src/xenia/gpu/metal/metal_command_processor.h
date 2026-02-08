@@ -367,7 +367,8 @@ class MetalCommandProcessor : public CommandProcessor {
       uint32_t interpolator_mask) const;
   SpirvShaderTranslator::Modification GetCurrentSpirvPixelShaderModification(
       const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
-      reg::RB_DEPTHCONTROL normalized_depth_control) const;
+      reg::RB_DEPTHCONTROL normalized_depth_control,
+      uint32_t normalized_color_mask) const;
   void UpdateSpirvSystemConstantValues(
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
       bool primitive_polygonal, uint32_t line_loop_closing_index,
