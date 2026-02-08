@@ -1828,7 +1828,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
   bool use_tessellation_emulation = false;
   if (primitive_processing_result.IsTessellated()) {
-    if (!mesh_shader_supported_) {
+    // The MSC path uses mesh shader emulation for tessellation, so it requires
+    // mesh shader support. The SPIRV-Cross path uses native Metal tessellation
+    // (drawPatches), so mesh shaders are not needed.
+    if (!cvars::metal_use_spirvcross && !mesh_shader_supported_) {
       static bool tess_mesh_logged = false;
       if (!tess_mesh_logged) {
         tess_mesh_logged = true;
@@ -3059,6 +3062,7 @@ bool MetalCommandProcessor::IssueDrawMsl(
     const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
     bool primitive_polygonal, bool is_rasterization_done, bool memexport_used,
     uint32_t normalized_color_mask, const RegisterFile& regs) {
+  assert_not_null(vertex_shader);
   // Cast to MslShader for the SPIRV-Cross path.
   auto* msl_vertex_shader = static_cast<MslShader*>(vertex_shader);
   auto* msl_pixel_shader = static_cast<MslShader*>(pixel_shader);
@@ -3093,10 +3097,18 @@ bool MetalCommandProcessor::IssueDrawMsl(
       GetCurrentSpirvVertexShaderModification(
           *msl_vertex_shader, host_vertex_shader_type, interpolator_mask);
   SpirvShaderTranslator::Modification pixel_shader_modification =
-      msl_pixel_shader ? GetCurrentSpirvPixelShaderModification(
-                             *msl_pixel_shader, interpolator_mask,
-                             ps_param_gen_pos, normalized_depth_control)
-                       : SpirvShaderTranslator::Modification(0);
+      msl_pixel_shader
+          ? GetCurrentSpirvPixelShaderModification(
+                *msl_pixel_shader, interpolator_mask, ps_param_gen_pos,
+                normalized_depth_control, normalized_color_mask)
+          : SpirvShaderTranslator::Modification(0);
+
+  // Sanity: if a pixel shader writes color targets and any RT is enabled,
+  // color_targets_used must be non-zero or fragments will produce no output.
+  if (msl_pixel_shader && msl_pixel_shader->writes_color_targets() &&
+      normalized_color_mask) {
+    assert_not_zero(pixel_shader_modification.pixel.color_targets_used);
+  }
 
   // Get or create shader translations.
   auto* vertex_translation = static_cast<MslShader::MslTranslation*>(
@@ -3694,6 +3706,7 @@ bool MetalCommandProcessor::IssueDrawMsl(
     }
 
     // Draw with tessellation.
+    assert_not_null(tess_factor_buffer_);
     UseRenderEncoderResource(tess_factor_buffer_, MTL::ResourceUsageRead);
     current_render_encoder_->setTessellationFactorBuffer(tess_factor_buffer_, 0,
                                                          0);
@@ -6895,7 +6908,8 @@ MetalCommandProcessor::GetCurrentSpirvVertexShaderModification(
 SpirvShaderTranslator::Modification
 MetalCommandProcessor::GetCurrentSpirvPixelShaderModification(
     const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
-    reg::RB_DEPTHCONTROL normalized_depth_control) const {
+    reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask) const {
   const auto& regs = *register_file_;
 
   SpirvShaderTranslator::Modification modification(
@@ -6938,6 +6952,15 @@ MetalCommandProcessor::GetCurrentSpirvPixelShaderModification(
   modification.pixel.rt0_blend_rgb_factor_for_premult =
       xenos::BlendFactor::kOne;
   modification.pixel.rt0_blend_a_factor_for_premult = xenos::BlendFactor::kOne;
+
+  // Extract 1 bit per RT from the 4-bits-per-RT normalized_color_mask.
+  // Without this, color_targets_used defaults to 0 and the SPIR-V translator
+  // declares NO fragment color outputs, producing black/transparent rendering.
+  modification.pixel.color_targets_used =
+      (((normalized_color_mask >> 0) & 0xF) ? 1 : 0) |
+      (((normalized_color_mask >> 4) & 0xF) ? 2 : 0) |
+      (((normalized_color_mask >> 8) & 0xF) ? 4 : 0) |
+      (((normalized_color_mask >> 12) & 0xF) ? 8 : 0);
 
   return modification;
 }
