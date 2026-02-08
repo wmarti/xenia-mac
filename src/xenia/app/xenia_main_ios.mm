@@ -22,6 +22,7 @@
 #include "xenia/config.h"
 #include "xenia/emulator.h"
 #include "xenia/ui/window.h"
+#include "xenia/ui/window_ios.h"
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context_ios.h"
 
@@ -172,9 +173,17 @@ bool EmulatorAppIOS::OnInitialize() {
          window_->GetActualPhysicalWidth(),
          window_->GetActualPhysicalHeight());
 
-  // Register game launch callback with the app context.
+  // Register callbacks with the app context.
   auto& ios_context =
       static_cast<ui::IOSWindowedAppContext&>(app_context());
+
+  // Forward layout changes (rotation, resize) to the window.
+  ios_context.set_layout_changed_callback([this]() {
+    if (window_) {
+      static_cast<ui::iOSWindow*>(window_.get())->HandleSizeChange();
+    }
+  });
+
   ios_context.set_game_launch_callback(
       [this](const std::string& path) {
         XELOGI("iOS: Game launch requested: {}", path);

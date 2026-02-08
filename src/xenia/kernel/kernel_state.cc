@@ -700,13 +700,19 @@ X_RESULT KernelState::ApplyTitleUpdate(
     // First module that is loaded is always main executable. That way we can
     // prevent random message spam in case of loading/unloading.
     if (!GetExecutableModule()) {
-      emulator_->display_window()->app_context().CallInUIThread([&]() {
-        new xe::ui::HostNotificationWindow(
-            emulator_->imgui_drawer(), "Warning!",
+      if (emulator_->imgui_drawer()) {
+        emulator_->display_window()->app_context().CallInUIThread([&]() {
+          new xe::ui::HostNotificationWindow(
+              emulator_->imgui_drawer(), "Warning!",
+              "Title Update signature doesn't match. This can cause unexpected "
+              "issues or crashes!",
+              0);
+        });
+      } else {
+        XELOGW(
             "Title Update signature doesn't match. This can cause unexpected "
-            "issues or crashes!",
-            0);
-      });
+            "issues or crashes!");
+      }
     }
   }
 
