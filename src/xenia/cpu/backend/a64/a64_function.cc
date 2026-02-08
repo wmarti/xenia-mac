@@ -12,7 +12,7 @@
 // pthread_jit_write_protect_np is only available on macOS ARM64.
 // On iOS, the dual-mapping (split W^X via vm_remap) path is used instead,
 // so we never need to toggle JIT write protection per-thread.
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE && !XE_PLATFORM_IOS
 #include <pthread.h>
 #endif
 
@@ -21,7 +21,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
 
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && !XE_PLATFORM_IOS && defined(__aarch64__)
 thread_local bool jit_thread_initialized = false;
 
 // Initialize JIT execution for the current thread
@@ -52,7 +52,7 @@ void A64Function::Setup(uint8_t* machine_code, size_t machine_code_length) {
 }
 
 bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_APPLE && !XE_PLATFORM_IOS && defined(__aarch64__)
   // Initialize JIT execution for this thread (macOS only).
   // On iOS, the dual-mapping path means execute pages are always executable.
   InitializeJITThread();
