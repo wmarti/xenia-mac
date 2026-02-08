@@ -869,12 +869,18 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     }
     WaitStarted();
     std::unique_lock lock(state_mutex_);
-    if (state_ != State::kSuspended) return false;
-    if (suspend_count_ == 0) return false;
+    // Check if thread has any suspend count (Windows allows resume even if
+    // running).
+    if (suspend_count_ == 0) {
+      return false;
+    }
     if (out_previous_suspend_count) {
       *out_previous_suspend_count = suspend_count_;
     }
     --suspend_count_;
+    if (suspend_count_ == 0 && state_ == State::kSuspended) {
+      state_ = State::kRunning;
+    }
     state_signal_.notify_all();
     return true;
   }
@@ -884,6 +890,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       *out_previous_suspend_count = 0;
     }
     WaitStarted();
+    bool is_current_thread = pthread_self() == thread_;
     {
       std::unique_lock lock(state_mutex_);
       if (out_previous_suspend_count) {
@@ -891,6 +898,10 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       }
       state_ = State::kSuspended;
       ++suspend_count_;
+    }
+    if (is_current_thread) {
+      WaitSuspended();
+      return true;
     }
     int result =
         pthread_kill(thread_, GetSystemSignal(SignalType::kThreadSuspend));
