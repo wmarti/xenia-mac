@@ -93,6 +93,44 @@ namespace gpu {
 namespace metal {
 
 namespace {
+void GetBoundRenderTargetSize(const MetalRenderTargetCache* render_target_cache,
+                              uint32_t fallback_width, uint32_t fallback_height,
+                              uint32_t& width_out, uint32_t& height_out) {
+  width_out = std::max(fallback_width, uint32_t(1));
+  height_out = std::max(fallback_height, uint32_t(1));
+  if (!render_target_cache) {
+    return;
+  }
+  MTL::Texture* pass_size_texture = render_target_cache->GetColorTarget(0);
+  if (!pass_size_texture) {
+    pass_size_texture = render_target_cache->GetDepthTarget();
+  }
+  if (!pass_size_texture) {
+    pass_size_texture = render_target_cache->GetDummyColorTarget();
+  }
+  if (!pass_size_texture) {
+    return;
+  }
+  width_out =
+      std::max(static_cast<uint32_t>(pass_size_texture->width()), uint32_t(1));
+  height_out =
+      std::max(static_cast<uint32_t>(pass_size_texture->height()), uint32_t(1));
+}
+
+void ClampScissorToBounds(draw_util::Scissor& scissor, uint32_t width,
+                          uint32_t height) {
+  width = std::max(width, uint32_t(1));
+  height = std::max(height, uint32_t(1));
+
+  scissor.offset[0] = std::min(scissor.offset[0], width);
+  scissor.offset[1] = std::min(scissor.offset[1], height);
+
+  uint32_t max_scissor_width = width - scissor.offset[0];
+  uint32_t max_scissor_height = height - scissor.offset[1];
+  scissor.extent[0] = std::min(scissor.extent[0], max_scissor_width);
+  scissor.extent[1] = std::min(scissor.extent[1], max_scissor_height);
+}
+
 void LogMetalErrorDetails(const char* label, NS::Error* error) {
   if (!error) {
     return;
@@ -2468,23 +2506,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
     // Get viewport info for NDC transform. Use the actual RT0 dimensions
     // when available so system constants match the current render target.
-    uint32_t vp_width = render_target_width_;
-    uint32_t vp_height = render_target_height_;
-    if (render_target_cache_) {
-      MTL::Texture* rt0_tex = render_target_cache_->GetColorTarget(0);
-      if (rt0_tex) {
-        vp_width = rt0_tex->width();
-        vp_height = rt0_tex->height();
-      } else if (MTL::Texture* depth_tex =
-                     render_target_cache_->GetDepthTarget()) {
-        vp_width = depth_tex->width();
-        vp_height = depth_tex->height();
-      } else if (MTL::Texture* dummy =
-                     render_target_cache_->GetDummyColorTarget()) {
-        vp_width = dummy->width();
-        vp_height = dummy->height();
-      }
-    }
+    uint32_t vp_width = 1;
+    uint32_t vp_height = 1;
+    GetBoundRenderTargetSize(render_target_cache_.get(), render_target_width_,
+                             render_target_height_, vp_width, vp_height);
     draw_util::ViewportInfo viewport_info;
     auto depth_control = draw_util::GetNormalizedDepthControl(regs);
     constexpr uint32_t kViewportBoundsMax = 32767;
@@ -2519,14 +2544,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     scissor.extent[1] *= draw_resolution_scale_y;
 
     // Clamp scissor to actual render target bounds (Metal requires this).
-    if (scissor.offset[0] + scissor.extent[0] > vp_width) {
-      scissor.extent[0] =
-          (scissor.offset[0] < vp_width) ? (vp_width - scissor.offset[0]) : 0;
-    }
-    if (scissor.offset[1] + scissor.extent[1] > vp_height) {
-      scissor.extent[1] =
-          (scissor.offset[1] < vp_height) ? (vp_height - scissor.offset[1]) : 0;
-    }
+    ClampScissorToBounds(scissor, vp_width, vp_height);
 
     MTL::Viewport mtl_viewport;
     mtl_viewport.originX = static_cast<double>(viewport_info.xy_offset[0]);
@@ -3493,17 +3511,12 @@ bool MetalCommandProcessor::IssueDrawMsl(
     scissor.extent[0] *= draw_resolution_scale_x;
     scissor.extent[1] *= draw_resolution_scale_y;
 
-    // Clamp scissor to render target bounds (Metal requires this).
-    uint32_t vp_width = std::max(viewport_info.xy_extent[0], uint32_t(1));
-    uint32_t vp_height = std::max(viewport_info.xy_extent[1], uint32_t(1));
-    if (scissor.offset[0] + scissor.extent[0] > vp_width) {
-      scissor.extent[0] =
-          (scissor.offset[0] < vp_width) ? (vp_width - scissor.offset[0]) : 0;
-    }
-    if (scissor.offset[1] + scissor.extent[1] > vp_height) {
-      scissor.extent[1] =
-          (scissor.offset[1] < vp_height) ? (vp_height - scissor.offset[1]) : 0;
-    }
+    // Clamp scissor to actual render target bounds (Metal requires this).
+    uint32_t rt_width = 1;
+    uint32_t rt_height = 1;
+    GetBoundRenderTargetSize(render_target_cache_.get(), render_target_width_,
+                             render_target_height_, rt_width, rt_height);
+    ClampScissorToBounds(scissor, rt_width, rt_height);
 
     MTL::Viewport mtl_viewport;
     mtl_viewport.originX = static_cast<double>(viewport_info.xy_offset[0]);
