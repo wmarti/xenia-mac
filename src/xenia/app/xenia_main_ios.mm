@@ -30,10 +30,10 @@
 #include "xenia/gpu/metal/metal_graphics_system.h"
 
 // Audio systems.
-#include "xenia/apu/nop/nop_audio_system.h"
+#include "xenia/apu/sdl/sdl_audio_system.h"
 
 // Input drivers.
-#include "xenia/hid/nop/nop_hid.h"
+#include "xenia/hid/sdl/sdl_hid.h"
 
 // CVars normally defined in xenia_main.cc (excluded on iOS).
 DEFINE_path(
@@ -257,9 +257,8 @@ void EmulatorAppIOS::EmulatorThread(
 
 std::unique_ptr<apu::AudioSystem> EmulatorAppIOS::CreateAudioSystem(
     cpu::Processor* processor) {
-  // iOS: Use nop audio for now. A CoreAudio / AVAudioEngine backend
-  // can be added later for real audio output.
-  return std::make_unique<apu::nop::NopAudioSystem>(processor);
+  // SDL2 uses CoreAudio on iOS for audio output.
+  return std::make_unique<apu::sdl::SDLAudioSystem>(processor);
 }
 
 std::unique_ptr<gpu::GraphicsSystem> EmulatorAppIOS::CreateGraphicsSystem() {
@@ -269,10 +268,8 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorAppIOS::CreateGraphicsSystem() {
 std::vector<std::unique_ptr<hid::InputDriver>>
 EmulatorAppIOS::CreateInputDrivers(ui::Window* window) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
-  // iOS: Use nop input for now. A GCController-based driver can be
-  // added later for MFi and Bluetooth gamepad support.
-  drivers.emplace_back(
-      xe::hid::nop::Create(window, kZOrderHidInput));
+  // SDL2 uses the GameController framework on iOS for MFi/Bluetooth gamepads.
+  drivers.emplace_back(xe::hid::sdl::Create(window, kZOrderHidInput));
   return drivers;
 }
 
