@@ -17,6 +17,7 @@
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <pthread.h>
+#include <sys/mman.h>
 #endif
 
 #include "third_party/fmt/include/fmt/format.h"
