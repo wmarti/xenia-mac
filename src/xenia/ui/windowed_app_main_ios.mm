@@ -11,6 +11,7 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#include <sys/mman.h>
 #include <memory>
 #include <string>
 
@@ -24,6 +25,22 @@
 @class XeniaAppDelegate;
 @class XeniaViewController;
 @class XeniaMetalView;
+
+// ---------------------------------------------------------------------------
+// JIT availability check -- tests whether executable memory can be mapped.
+// Requires CS_DEBUGGED (set by StikDebug, AltJIT, SideJITServer, etc.).
+// ---------------------------------------------------------------------------
+static BOOL xe_check_jit_available(void) {
+  long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) page_size = 16384;
+  void* test =
+      mmap(NULL, (size_t)page_size, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (test == MAP_FAILED) {
+    return NO;
+  }
+  munmap(test, (size_t)page_size);
+  return YES;
+}
 
 // ---------------------------------------------------------------------------
 // XeniaMetalView - a UIView backed by a CAMetalLayer.
@@ -51,6 +68,14 @@
 @property(nonatomic, strong) UILabel* statusLabel;
 @property(nonatomic, strong) NSURL* securityScopedURL;
 @property(nonatomic, assign) xe::ui::IOSWindowedAppContext* appContext;
+
+// JIT gate overlay.
+@property(nonatomic, strong) UIView* jitOverlay;
+@property(nonatomic, strong) UIView* jitPulseView;
+@property(nonatomic, strong) UIView* jitStatusDot;
+@property(nonatomic, strong) UILabel* jitStatusLabel;
+@property(nonatomic, strong) NSTimer* jitPollTimer;
+@property(nonatomic, assign) BOOL jitAcquired;
 @end
 
 @implementation XeniaViewController
@@ -58,6 +83,7 @@
 - (void)viewDidLoad {
   [super viewDidLoad];
   self.view.backgroundColor = [UIColor blackColor];
+  self.jitAcquired = NO;
 
   // Create the Metal-backed rendering view (full screen, behind everything).
   self.metalView = [[XeniaMetalView alloc] initWithFrame:self.view.bounds];
@@ -66,10 +92,237 @@
   self.metalView.contentScaleFactor = [UIScreen mainScreen].scale;
   [self.view addSubview:self.metalView];
 
-  // Create the launcher overlay UI.
+  // Create the launcher overlay UI (starts hidden until JIT is acquired).
   [self setupLauncherOverlay];
+  self.launcherOverlay.hidden = YES;
+  self.launcherOverlay.alpha = 0.0;
+
+  // Create the JIT gate overlay (blocks interaction until JIT is available).
+  [self setupJITOverlay];
+
+  // Start polling for JIT.
+  [self startJITPoll];
 }
 
+// ---------------------------------------------------------------------------
+// JIT gate overlay -- shown until JIT is acquired.
+// ---------------------------------------------------------------------------
+- (void)setupJITOverlay {
+  self.jitOverlay = [[UIView alloc] initWithFrame:self.view.bounds];
+  self.jitOverlay.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  self.jitOverlay.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.95];
+  [self.view addSubview:self.jitOverlay];
+
+  // Container for centered content.
+  UIView* container = [[UIView alloc] init];
+  container.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.jitOverlay addSubview:container];
+
+  // Pulsing circle behind the icon.
+  self.jitPulseView = [[UIView alloc] init];
+  self.jitPulseView.translatesAutoresizingMaskIntoConstraints = NO;
+  self.jitPulseView.backgroundColor = [UIColor colorWithRed:0.0 green:0.478 blue:1.0 alpha:0.15];
+  self.jitPulseView.layer.cornerRadius = 50;
+  [container addSubview:self.jitPulseView];
+
+  // CPU icon.
+  UIImageView* iconView = [[UIImageView alloc]
+      initWithImage:
+          [UIImage systemImageNamed:@"cpu"
+                  withConfiguration:[UIImageSymbolConfiguration
+                                        configurationWithPointSize:50
+                                                            weight:UIImageSymbolWeightMedium]]];
+  iconView.tintColor = [UIColor systemBlueColor];
+  iconView.translatesAutoresizingMaskIntoConstraints = NO;
+  iconView.contentMode = UIViewContentModeCenter;
+  [container addSubview:iconView];
+
+  // "Waiting for JIT" title.
+  UILabel* jitTitle = [[UILabel alloc] init];
+  jitTitle.text = @"Waiting for JIT";
+  jitTitle.textColor = [UIColor whiteColor];
+  jitTitle.font = [UIFont systemFontOfSize:24 weight:UIFontWeightSemibold];
+  jitTitle.textAlignment = NSTextAlignmentCenter;
+  jitTitle.translatesAutoresizingMaskIntoConstraints = NO;
+  [container addSubview:jitTitle];
+
+  // Subtitle.
+  UILabel* jitSubtitle = [[UILabel alloc] init];
+  jitSubtitle.text = @"Waiting for Just-In-Time compilation...";
+  jitSubtitle.textColor = [UIColor secondaryLabelColor];
+  jitSubtitle.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
+  jitSubtitle.textAlignment = NSTextAlignmentCenter;
+  jitSubtitle.translatesAutoresizingMaskIntoConstraints = NO;
+  [container addSubview:jitSubtitle];
+
+  // Info card background.
+  UIView* infoCard = [[UIView alloc] init];
+  infoCard.translatesAutoresizingMaskIntoConstraints = NO;
+  infoCard.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
+  infoCard.layer.cornerRadius = 12;
+  [container addSubview:infoCard];
+
+  // Info row 1: blue info icon + description.
+  UIImageView* infoIcon =
+      [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"info.circle.fill"]];
+  infoIcon.tintColor = [UIColor systemBlueColor];
+  infoIcon.translatesAutoresizingMaskIntoConstraints = NO;
+  [infoCard addSubview:infoIcon];
+
+  UILabel* infoText = [[UILabel alloc] init];
+  infoText.text = @"JIT compilation is required for Xenia to run "
+                  @"Xbox 360 games. It dynamically translates and "
+                  @"executes code at full speed.";
+  infoText.textColor = [UIColor secondaryLabelColor];
+  infoText.font = [UIFont systemFontOfSize:13];
+  infoText.numberOfLines = 0;
+  infoText.translatesAutoresizingMaskIntoConstraints = NO;
+  [infoCard addSubview:infoText];
+
+  // Info row 2: green check icon + instructions.
+  UIImageView* checkIcon =
+      [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill"]];
+  checkIcon.tintColor = [UIColor systemGreenColor];
+  checkIcon.translatesAutoresizingMaskIntoConstraints = NO;
+  [infoCard addSubview:checkIcon];
+
+  UILabel* checkText = [[UILabel alloc] init];
+  checkText.text = @"Enable JIT using StikDebug, SideJITServer, "
+                   @"or AltJIT. If running from Xcode, attach the "
+                   @"debugger.";
+  checkText.textColor = [UIColor secondaryLabelColor];
+  checkText.font = [UIFont systemFontOfSize:13];
+  checkText.numberOfLines = 0;
+  checkText.translatesAutoresizingMaskIntoConstraints = NO;
+  [infoCard addSubview:checkText];
+
+  // Layout.
+  CGFloat maxCardWidth = 360;
+  [NSLayoutConstraint activateConstraints:@[
+    // Container centered in overlay.
+    [container.centerXAnchor constraintEqualToAnchor:self.jitOverlay.centerXAnchor],
+    [container.centerYAnchor constraintEqualToAnchor:self.jitOverlay.centerYAnchor],
+    [container.widthAnchor constraintLessThanOrEqualToConstant:maxCardWidth],
+    [container.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.jitOverlay.leadingAnchor
+                                                         constant:24],
+
+    // Pulse circle.
+    [self.jitPulseView.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+    [self.jitPulseView.topAnchor constraintEqualToAnchor:container.topAnchor],
+    [self.jitPulseView.widthAnchor constraintEqualToConstant:100],
+    [self.jitPulseView.heightAnchor constraintEqualToConstant:100],
+
+    // Icon centered on pulse.
+    [iconView.centerXAnchor constraintEqualToAnchor:self.jitPulseView.centerXAnchor],
+    [iconView.centerYAnchor constraintEqualToAnchor:self.jitPulseView.centerYAnchor],
+
+    // Title below icon.
+    [jitTitle.topAnchor constraintEqualToAnchor:self.jitPulseView.bottomAnchor constant:20],
+    [jitTitle.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+
+    // Subtitle below title.
+    [jitSubtitle.topAnchor constraintEqualToAnchor:jitTitle.bottomAnchor constant:8],
+    [jitSubtitle.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+
+    // Info card below subtitle.
+    [infoCard.topAnchor constraintEqualToAnchor:jitSubtitle.bottomAnchor constant:24],
+    [infoCard.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+    [infoCard.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+    [infoCard.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
+
+    // Info row 1.
+    [infoIcon.leadingAnchor constraintEqualToAnchor:infoCard.leadingAnchor constant:14],
+    [infoIcon.topAnchor constraintEqualToAnchor:infoCard.topAnchor constant:14],
+    [infoIcon.widthAnchor constraintEqualToConstant:18],
+    [infoIcon.heightAnchor constraintEqualToConstant:18],
+
+    [infoText.leadingAnchor constraintEqualToAnchor:infoIcon.trailingAnchor constant:10],
+    [infoText.trailingAnchor constraintEqualToAnchor:infoCard.trailingAnchor constant:-14],
+    [infoText.topAnchor constraintEqualToAnchor:infoIcon.topAnchor constant:-2],
+
+    // Info row 2.
+    [checkIcon.leadingAnchor constraintEqualToAnchor:infoCard.leadingAnchor constant:14],
+    [checkIcon.topAnchor constraintEqualToAnchor:infoText.bottomAnchor constant:14],
+    [checkIcon.widthAnchor constraintEqualToConstant:18],
+    [checkIcon.heightAnchor constraintEqualToConstant:18],
+
+    [checkText.leadingAnchor constraintEqualToAnchor:checkIcon.trailingAnchor constant:10],
+    [checkText.trailingAnchor constraintEqualToAnchor:infoCard.trailingAnchor constant:-14],
+    [checkText.topAnchor constraintEqualToAnchor:checkIcon.topAnchor constant:-2],
+    [checkText.bottomAnchor constraintEqualToAnchor:infoCard.bottomAnchor constant:-14],
+  ]];
+
+  // Start the pulsing animation.
+  [self startPulseAnimation];
+}
+
+- (void)startPulseAnimation {
+  self.jitPulseView.alpha = 1.0;
+  self.jitPulseView.transform = CGAffineTransformIdentity;
+
+  [UIView animateWithDuration:1.5
+                        delay:0.0
+                      options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionRepeat |
+                              UIViewAnimationOptionAllowUserInteraction
+                   animations:^{
+                     self.jitPulseView.transform = CGAffineTransformMakeScale(1.3, 1.3);
+                     self.jitPulseView.alpha = 0.0;
+                   }
+                   completion:nil];
+}
+
+// ---------------------------------------------------------------------------
+// JIT polling -- checks every 0.5s until JIT is available.
+// ---------------------------------------------------------------------------
+- (void)startJITPoll {
+  // Check immediately first.
+  if (xe_check_jit_available()) {
+    [self onJITAcquired];
+    return;
+  }
+
+  XELOGI("iOS: JIT not yet available, polling...");
+  self.jitPollTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                       target:self
+                                                     selector:@selector(pollJIT:)
+                                                     userInfo:nil
+                                                      repeats:YES];
+}
+
+- (void)pollJIT:(NSTimer*)timer {
+  if (xe_check_jit_available()) {
+    [timer invalidate];
+    self.jitPollTimer = nil;
+    [self onJITAcquired];
+  }
+}
+
+- (void)onJITAcquired {
+  self.jitAcquired = YES;
+  XELOGI("iOS: JIT acquired!");
+
+  // Update the JIT status indicator on the launcher.
+  [self updateJITStatusIndicator];
+
+  // Fade out JIT overlay, reveal launcher.
+  self.launcherOverlay.hidden = NO;
+  [UIView animateWithDuration:0.4
+      delay:0.0
+      options:UIViewAnimationOptionCurveEaseOut
+      animations:^{
+        self.jitOverlay.alpha = 0.0;
+        self.launcherOverlay.alpha = 1.0;
+      }
+      completion:^(BOOL finished) {
+        [self.jitOverlay removeFromSuperview];
+        self.jitOverlay = nil;
+      }];
+}
+
+// ---------------------------------------------------------------------------
+// Launcher overlay with Open Game button.
+// ---------------------------------------------------------------------------
 - (void)setupLauncherOverlay {
   self.launcherOverlay =
       [[UIView alloc] initWithFrame:self.view.bounds];
@@ -78,6 +331,24 @@
   self.launcherOverlay.backgroundColor =
       [UIColor colorWithWhite:0.0 alpha:0.85];
   [self.view addSubview:self.launcherOverlay];
+
+  // JIT status indicator (green/red dot + label) at the top.
+  UIView* statusContainer = [[UIView alloc] init];
+  statusContainer.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.launcherOverlay addSubview:statusContainer];
+
+  self.jitStatusDot = [[UIView alloc] init];
+  self.jitStatusDot.translatesAutoresizingMaskIntoConstraints = NO;
+  self.jitStatusDot.backgroundColor = [UIColor systemRedColor];
+  self.jitStatusDot.layer.cornerRadius = 5;
+  [statusContainer addSubview:self.jitStatusDot];
+
+  self.jitStatusLabel = [[UILabel alloc] init];
+  self.jitStatusLabel.text = @"JIT Not Acquired";
+  self.jitStatusLabel.textColor = [UIColor systemRedColor];
+  self.jitStatusLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+  self.jitStatusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+  [statusContainer addSubview:self.jitStatusLabel];
 
   // Title label.
   self.titleLabel = [[UILabel alloc] init];
@@ -128,30 +399,49 @@
 
   // Layout constraints.
   [NSLayoutConstraint activateConstraints:@[
-    [self.titleLabel.centerXAnchor
-        constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
-    [self.titleLabel.bottomAnchor
-        constraintEqualToAnchor:subtitleLabel.topAnchor
-                       constant:-4],
+    // JIT status indicator at top center.
+    [statusContainer.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
+    [statusContainer.topAnchor
+        constraintEqualToAnchor:self.launcherOverlay.safeAreaLayoutGuide.topAnchor
+                       constant:16],
 
-    [subtitleLabel.centerXAnchor
-        constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
-    [subtitleLabel.bottomAnchor
-        constraintEqualToAnchor:self.openGameButton.topAnchor
-                       constant:-32],
+    [self.jitStatusDot.leadingAnchor constraintEqualToAnchor:statusContainer.leadingAnchor],
+    [self.jitStatusDot.centerYAnchor constraintEqualToAnchor:statusContainer.centerYAnchor],
+    [self.jitStatusDot.widthAnchor constraintEqualToConstant:10],
+    [self.jitStatusDot.heightAnchor constraintEqualToConstant:10],
 
-    [self.openGameButton.centerXAnchor
-        constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
-    [self.openGameButton.centerYAnchor
-        constraintEqualToAnchor:self.launcherOverlay.centerYAnchor
-                       constant:20],
+    [self.jitStatusLabel.leadingAnchor constraintEqualToAnchor:self.jitStatusDot.trailingAnchor
+                                                      constant:6],
+    [self.jitStatusLabel.trailingAnchor constraintEqualToAnchor:statusContainer.trailingAnchor],
+    [self.jitStatusLabel.centerYAnchor constraintEqualToAnchor:statusContainer.centerYAnchor],
 
-    [self.statusLabel.centerXAnchor
-        constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
-    [self.statusLabel.topAnchor
-        constraintEqualToAnchor:self.openGameButton.bottomAnchor
-                       constant:20],
+    // Title and subtitle.
+    [self.titleLabel.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
+    [self.titleLabel.bottomAnchor constraintEqualToAnchor:subtitleLabel.topAnchor constant:-4],
+
+    [subtitleLabel.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
+    [subtitleLabel.bottomAnchor constraintEqualToAnchor:self.openGameButton.topAnchor constant:-32],
+
+    [self.openGameButton.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
+    [self.openGameButton.centerYAnchor constraintEqualToAnchor:self.launcherOverlay.centerYAnchor
+                                                      constant:20],
+
+    [self.statusLabel.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
+    [self.statusLabel.topAnchor constraintEqualToAnchor:self.openGameButton.bottomAnchor
+                                               constant:20],
   ]];
+}
+
+- (void)updateJITStatusIndicator {
+  if (self.jitAcquired) {
+    self.jitStatusDot.backgroundColor = [UIColor systemGreenColor];
+    self.jitStatusLabel.text = @"JIT Enabled";
+    self.jitStatusLabel.textColor = [UIColor systemGreenColor];
+  } else {
+    self.jitStatusDot.backgroundColor = [UIColor systemRedColor];
+    self.jitStatusLabel.text = @"JIT Not Acquired";
+    self.jitStatusLabel.textColor = [UIColor systemRedColor];
+  }
 }
 
 - (void)viewDidLayoutSubviews {
@@ -260,10 +550,15 @@
   self.launcherOverlay.hidden = NO;
   self.openGameButton.enabled = YES;
   self.statusLabel.text = @"";
+  [self updateJITStatusIndicator];
   [UIView animateWithDuration:0.3
                    animations:^{
                      self.launcherOverlay.alpha = 1.0;
                    }];
+}
+
+- (void)dealloc {
+  [self.jitPollTimer invalidate];
 }
 
 @end
