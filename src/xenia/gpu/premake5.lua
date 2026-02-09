@@ -16,9 +16,13 @@ project("xenia-gpu")
     "xxhash",
   })
   includedirs({
-    project_root.."/third_party/Vulkan-Headers/include",
     project_root.."/third_party/glslang",  -- For glslang SPIRV headers
   })
+  filter("platforms:Linux-* or Windows-* or Android-*")
+    includedirs({
+      project_root.."/third_party/Vulkan-Headers/include",
+    })
+  filter({})
 
   -- Include SPIRV-Tools headers from Vulkan SDK for Windows
   filter("platforms:Windows-*")
@@ -29,7 +33,17 @@ project("xenia-gpu")
 
   local_platform_files()
 
-if enableMiscSubprojects then
+  if os.istarget("macosx") then
+    removefiles({
+      "spirv_shader*.cc",
+      "spirv_shader*.h",
+    })
+    filter("files:**/spirv_shader*.cc")
+      flags({ "ExcludeFromBuild" })
+    filter({})
+  end
+
+if enableMiscSubprojects and not os.istarget("macosx") then
   group("src")
   project("xenia-gpu-shader-compiler")
     uuid("ad76d3e4-4c62-439b-a0f6-f83fcf0e83c5")
