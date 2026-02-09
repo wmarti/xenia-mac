@@ -282,7 +282,7 @@ class MetalCommandProcessor : public CommandProcessor {
   static constexpr size_t kStageCount = 2;  // Vertex + pixel.
   static constexpr size_t kNullBufferSize = 4096;
   static constexpr size_t kCbvSizeBytes = 4096;
-  static constexpr size_t kUniformsBytesPerTable = 5 * kCbvSizeBytes;
+  static constexpr size_t kUniformsBytesPerTable = 6 * kCbvSizeBytes;
 
 #if METAL_SHADER_CONVERTER_AVAILABLE
   bool EnsureDepthOnlyPixelShader();
@@ -442,6 +442,8 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unordered_map<uint64_t, std::unique_ptr<MslShader>> msl_shader_cache_;
   SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};
   SpirvShaderTranslator::ClipPlaneConstants spirv_clip_plane_constants_ = {};
+  SpirvShaderTranslator::TessellationConstants
+      spirv_tessellation_constants_ = {};
   std::unordered_map<uint64_t, MTL::RenderPipelineState*> msl_pipeline_cache_;
 
   // SPIRV-Cross tessellation support.

@@ -3705,6 +3705,15 @@ bool MetalCommandProcessor::IssueDrawMsl(
               &spirv_clip_plane_constants_,
               sizeof(SpirvShaderTranslator::ClipPlaneConstants));
 
+  // b6 (msl_buffer 7): Tessellation constants.
+  const size_t kTessellationConstantOffset = 5 * kCBVSize;
+  std::memcpy(uniforms_vertex + kTessellationConstantOffset,
+              &spirv_tessellation_constants_,
+              sizeof(SpirvShaderTranslator::TessellationConstants));
+  std::memcpy(uniforms_pixel + kTessellationConstantOffset,
+              &spirv_tessellation_constants_,
+              sizeof(SpirvShaderTranslator::TessellationConstants));
+
   // Bind shared memory buffer at msl_buffer 0.
   MTL::Buffer* shared_mem_buffer =
       shared_memory_ ? shared_memory_->GetBuffer() : nullptr;
@@ -3768,6 +3777,14 @@ bool MetalCommandProcessor::IssueDrawMsl(
   current_render_encoder_->setVertexBuffer(uniforms_buffer_,
                                            vs_base_offset + 4 * kCBVSize,
                                            MslBufferIndex::kClipPlaneConstants);
+
+  // Tessellation constants (msl_buffer 7).
+  current_render_encoder_->setVertexBuffer(
+      uniforms_buffer_, vs_base_offset + 5 * kCBVSize,
+      MslBufferIndex::kTessellationConstants);
+  current_render_encoder_->setFragmentBuffer(
+      uniforms_buffer_, ps_base_offset + 5 * kCBVSize,
+      MslBufferIndex::kTessellationConstants);
 
   UseRenderEncoderResource(uniforms_buffer_, MTL::ResourceUsageRead);
 
@@ -8230,6 +8247,26 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
       clip_plane_write_ptr += 4;
     }
   }
+
+  // Tessellation constants (separate buffer for the SPIR-V translator).
+  // Mirror Vulkan constant buffer population to keep shader inputs identical.
+  std::memset(&spirv_tessellation_constants_, 0,
+              sizeof(spirv_tessellation_constants_));
+  float tess_factor_min = regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) +
+                          1.0f;
+  float tess_factor_max = regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) +
+                          1.0f;
+  spirv_tessellation_constants_.tessellation_factor_range[0] = tess_factor_min;
+  spirv_tessellation_constants_.tessellation_factor_range[1] = tess_factor_max;
+  auto vgt_dma_size = regs.Get<reg::VGT_DMA_SIZE>();
+  spirv_tessellation_constants_.vertex_index_endian =
+      static_cast<uint32_t>(vgt_dma_size.swap_mode);
+  spirv_tessellation_constants_.vertex_index_offset =
+      regs[XE_GPU_REG_VGT_INDX_OFFSET];
+  spirv_tessellation_constants_.vertex_index_min_max[0] =
+      regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
+  spirv_tessellation_constants_.vertex_index_min_max[1] =
+      regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
 }
 
 #if METAL_SHADER_CONVERTER_AVAILABLE

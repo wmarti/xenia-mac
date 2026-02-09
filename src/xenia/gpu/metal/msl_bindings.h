@@ -48,9 +48,9 @@ constexpr uint32_t kConstantBufferCount = 8;
 constexpr uint32_t kCbvSizeBytes = 4096;
 
 // Total size of the uniforms buffer region for one stage (one draw).
-// system(4KB) + float(4KB) + bool_loop(4KB) + fetch(4KB) = 16KB minimum.
-// Allocate 5 * 4KB to match the existing MSC layout.
-constexpr uint32_t kUniformsBytesPerStage = 5 * kCbvSizeBytes;
+// system(4KB) + float(4KB) + bool_loop(4KB) + fetch(4KB) + clip(4KB) +
+// tessellation(4KB) = 24KB.
+constexpr uint32_t kUniformsBytesPerStage = 6 * kCbvSizeBytes;
 }  // namespace MslBufferIndex
 
 namespace MslTextureIndex {
