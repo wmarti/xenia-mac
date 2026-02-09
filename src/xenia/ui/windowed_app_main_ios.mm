@@ -11,7 +11,10 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#include <TargetConditionals.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <memory>
 #include <string>
 
@@ -21,16 +24,32 @@
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context_ios.h"
 
+DECLARE_path(log_file);
+
 // Forward declarations of the Objective-C classes.
 @class XeniaAppDelegate;
 @class XeniaViewController;
 @class XeniaMetalView;
 
-// ---------------------------------------------------------------------------
-// JIT availability check -- tests whether executable memory can be mapped.
-// Requires CS_DEBUGGED (set by StikDebug, AltJIT, SideJITServer, etc.).
-// ---------------------------------------------------------------------------
-static BOOL xe_check_jit_available(void) {
+extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
+extern "C" int ptrace(int request, pid_t pid, caddr_t addr, int data);
+
+#ifndef CS_OPS_STATUS
+#define CS_OPS_STATUS 0
+#endif
+#ifndef CS_DEBUGGED
+#define CS_DEBUGGED 0x10000000
+#endif
+#ifndef PT_TRACE_ME
+#define PT_TRACE_ME 0
+#endif
+
+static BOOL xe_is_cs_debugged(void) {
+  int flags = 0;
+  return !csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) && (flags & CS_DEBUGGED);
+}
+
+static BOOL xe_can_mmap_exec_page(void) {
   long page_size = sysconf(_SC_PAGESIZE);
   if (page_size <= 0) page_size = 16384;
   void* test =
@@ -40,6 +59,40 @@ static BOOL xe_check_jit_available(void) {
   }
   munmap(test, (size_t)page_size);
   return YES;
+}
+
+static BOOL xe_enable_ptrace_jit_hack(void) {
+#if TARGET_OS_TV
+  return NO;
+#else
+  if (xe_is_cs_debugged()) {
+    return YES;
+  }
+
+  // Keep this minimal: only request traced state to obtain CS_DEBUGGED.
+  // Do not alter exception ports; Xenia depends on SIGBUS/SIGSEGV handling.
+  if (ptrace(PT_TRACE_ME, 0, NULL, 0) < 0) {
+    return NO;
+  }
+  return YES;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// JIT availability check -- tests whether executable memory can be mapped.
+// Requires CS_DEBUGGED (set by StikDebug, AltJIT, SideJITServer, etc.).
+// ---------------------------------------------------------------------------
+static BOOL xe_check_jit_available(void) { return xe_is_cs_debugged() && xe_can_mmap_exec_page(); }
+
+static std::filesystem::path xe_get_ios_documents_path() {
+  @autoreleasepool {
+    NSArray* paths =
+        NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (paths.count > 0) {
+      return std::filesystem::path([paths[0] UTF8String]);
+    }
+    return std::filesystem::path([NSHomeDirectory() UTF8String]) / "Documents";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -612,7 +665,10 @@ static BOOL xe_check_jit_available(void) {
 
   // Create and initialize the Xenia app.
   app_ = xe::ui::GetWindowedAppCreator()(*app_context_);
-  xe::InitializeLogging(app_->GetName());
+  if (cvars::log_file.empty()) {
+    cvars::log_file = xe_get_ios_documents_path() / "xenia.log";
+  }
+  xe::InitializeLogging(app_->GetName(), true);
 
   if (!app_->OnInitialize()) {
     XELOGE("iOS: App initialization failed");
@@ -624,6 +680,7 @@ static BOOL xe_check_jit_available(void) {
 }
 
 - (void)applicationWillTerminate:(UIApplication*)application {
+  XELOGI("iOS lifecycle: applicationWillTerminate");
   // Release security-scoped file access.
   XeniaViewController* vc = (XeniaViewController*)self.window.rootViewController;
   if (vc.securityScopedURL) {
@@ -644,6 +701,11 @@ static BOOL xe_check_jit_available(void) {
 // iOS entry point.
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
+  if (xe_enable_ptrace_jit_hack()) {
+    NSLog(@"iOS: Ptrace JIT setup complete.");
+  } else {
+    NSLog(@"iOS: Ptrace JIT setup unavailable; use StikDebug/AltJIT/SideJIT.");
+  }
   @autoreleasepool {
     return UIApplicationMain(argc, argv, nil,
                              NSStringFromClass([XeniaAppDelegate class]));

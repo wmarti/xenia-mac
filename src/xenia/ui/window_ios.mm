@@ -197,6 +197,14 @@ void iOSWindow::RequestPaintImpl() {
                                            selector:@selector(appDidBecomeActive:)
                                                name:UIApplicationDidBecomeActiveNotification
                                              object:nil];
+  [[NSNotificationCenter defaultCenter] addObserver:self
+                                           selector:@selector(appDidEnterBackground:)
+                                               name:UIApplicationDidEnterBackgroundNotification
+                                             object:nil];
+  [[NSNotificationCenter defaultCenter] addObserver:self
+                                           selector:@selector(appWillEnterForeground:)
+                                               name:UIApplicationWillEnterForegroundNotification
+                                             object:nil];
 }
 
 - (void)stopObservingLifecycle {
@@ -204,12 +212,9 @@ void iOSWindow::RequestPaintImpl() {
 }
 
 - (void)appWillResignActive:(NSNotification*)notification {
-  // Pause the display link when the app goes to background to prevent
-  // unnecessary GPU/CPU work and avoid iOS termination for background usage.
-  if (_displayLink) {
-    _displayLink.paused = YES;
-  }
-  XELOGI("iOS lifecycle: display link paused (app resigned active)");
+  // Transient resign-active transitions can happen while remaining visible
+  // (for example around debugger / system overlays), so don't pause here.
+  XELOGI("iOS lifecycle: app resigned active");
 }
 
 - (void)appDidBecomeActive:(NSNotification*)notification {
@@ -222,6 +227,18 @@ void iOSWindow::RequestPaintImpl() {
     _window->HandleSizeChange();
   }
   XELOGI("iOS lifecycle: display link resumed (app became active)");
+}
+
+- (void)appDidEnterBackground:(NSNotification*)notification {
+  // Pause rendering only once the app is actually backgrounded.
+  if (_displayLink) {
+    _displayLink.paused = YES;
+  }
+  XELOGI("iOS lifecycle: display link paused (app entered background)");
+}
+
+- (void)appWillEnterForeground:(NSNotification*)notification {
+  XELOGI("iOS lifecycle: app will enter foreground");
 }
 
 - (void)dealloc {

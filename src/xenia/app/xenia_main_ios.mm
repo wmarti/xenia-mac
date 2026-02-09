@@ -203,8 +203,10 @@ bool EmulatorAppIOS::OnInitialize() {
 }
 
 void EmulatorAppIOS::OnDestroy() {
+  XELOGI("iOS: EmulatorAppIOS::OnDestroy invoked");
   if (emulator_thread_.joinable()) {
     if (emulator_) {
+      XELOGI("iOS: OnDestroy requesting title termination");
       emulator_->TerminateTitle();
     }
     emulator_thread_.join();
@@ -251,7 +253,7 @@ void EmulatorAppIOS::EmulatorThread(
 
     XELOGI("iOS: Game launched successfully");
     emulator_->WaitUntilExit();
-    XELOGI("iOS: Game execution finished");
+    XELOGI("iOS: Game execution finished (WaitUntilExit returned)");
   }
 }
 
