@@ -50,7 +50,7 @@ class PosixMappedMemory : public MappedMemory {
     }
 
     uint64_t file_size = 0;
-#ifdef __APPLE__
+#if XE_PLATFORM_MAC
     struct stat file_stat;
     if (fstat(file_descriptor, &file_stat)) {
       close(file_descriptor);
@@ -79,7 +79,7 @@ class PosixMappedMemory : public MappedMemory {
 
     if (required_size > file_size) {
       if (mode == Mode::kReadWrite) {
-#ifdef __APPLE__
+#if XE_PLATFORM_MAC
         if (ftruncate(file_descriptor, off_t(required_size))) {
           close(file_descriptor);
           return nullptr;
