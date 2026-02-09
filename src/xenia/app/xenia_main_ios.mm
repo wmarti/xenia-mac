@@ -33,6 +33,7 @@
 #include "xenia/apu/sdl/sdl_audio_system.h"
 
 // Input drivers.
+#include "xenia/hid/nop/nop_hid.h"
 #include "xenia/hid/sdl/sdl_hid.h"
 
 // CVars normally defined in xenia_main.cc (excluded on iOS).
@@ -286,7 +287,13 @@ std::vector<std::unique_ptr<hid::InputDriver>>
 EmulatorAppIOS::CreateInputDrivers(ui::Window* window) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
   // SDL2 uses the GameController framework on iOS for MFi/Bluetooth gamepads.
-  drivers.emplace_back(xe::hid::sdl::Create(window, kZOrderHidInput));
+  auto sdl_driver = xe::hid::sdl::Create(window, kZOrderHidInput);
+  if (sdl_driver && XSUCCEEDED(sdl_driver->Setup())) {
+    drivers.emplace_back(std::move(sdl_driver));
+  } else {
+    XELOGW("iOS: SDL input driver setup failed, falling back to nop input");
+    drivers.emplace_back(xe::hid::nop::Create(window, kZOrderHidInput));
+  }
   return drivers;
 }
 
