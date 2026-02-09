@@ -108,22 +108,9 @@ static void xe_request_landscape_orientation(UIViewController* view_controller) 
     return;
   }
 #if !TARGET_OS_TV
-  if (@available(iOS 16.0, *)) {
-    UIWindowScene* window_scene = view_controller.view.window.windowScene;
-    if (window_scene) {
-      UIWindowSceneGeometryPreferencesIOS* prefs = [[UIWindowSceneGeometryPreferencesIOS alloc]
-          initWithInterfaceOrientations:UIInterfaceOrientationMaskLandscape];
-      [window_scene requestGeometryUpdateWithPreferences:prefs
-                                            errorHandler:^(NSError* error) {
-                                              XELOGW("iOS: Landscape request failed: {}",
-                                                     [[error localizedDescription] UTF8String]);
-                                            }];
-    }
-  } else {
-    [[UIDevice currentDevice] setValue:@(UIInterfaceOrientationLandscapeRight)
-                                forKey:@"orientation"];
-    [UIViewController attemptRotationToDeviceOrientation];
-  }
+  [view_controller setNeedsUpdateOfSupportedInterfaceOrientations];
+  [[UIDevice currentDevice] setValue:@(UIInterfaceOrientationLandscapeRight) forKey:@"orientation"];
+  [UIViewController attemptRotationToDeviceOrientation];
 #endif
 }
 
@@ -495,7 +482,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
 @implementation XeniaChoiceListViewController {
   std::vector<IOSConfigChoice> choices_;
-  int64_t selected_value_ = 0;
+  int64_t selected_value_;
   NSString* subtitle_;
   IOSChoiceSelectionHandler on_selection_;
 }
