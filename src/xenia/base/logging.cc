@@ -457,6 +457,17 @@ void InitializeLogging(const std::string_view app_name, bool is_game_process) {
       // Default log file name for game process
       std::string file_name = fmt::format("{}.log", app_name);
       auto file_path = xe::filesystem::GetExecutableFolder() / file_name;
+#if XE_PLATFORM_MAC
+      // Never write logs inside .app bundles - it breaks subsequent code
+      // signing because extra unsigned files appear in Contents/MacOS.
+      auto exe_folder = xe::filesystem::GetExecutableFolder();
+      if (exe_folder.filename() == "MacOS" &&
+          exe_folder.parent_path().filename() == "Contents" &&
+          exe_folder.parent_path().parent_path().extension() == ".app") {
+        file_path = xe::filesystem::GetUserFolder() / "Xenia" / file_name;
+        xe::filesystem::CreateParentFolder(file_path);
+      }
+#endif  // XE_PLATFORM_MAC
       log_file = xe::filesystem::OpenFile(file_path, file_mode);
     } else {
       // User specified log file - use as-is for game process
