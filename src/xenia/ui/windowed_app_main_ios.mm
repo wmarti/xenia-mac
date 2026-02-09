@@ -15,11 +15,19 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <algorithm>
+#include <cctype>
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/config.h"
 #include "xenia/ui/surface_ios.h"
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context_ios.h"
@@ -109,6 +117,715 @@ static std::filesystem::path xe_get_ios_documents_path() {
 
 @end
 
+namespace {
+
+enum class IOSConfigControlType {
+  kToggle,
+  kChoiceInt32,
+  kChoiceUInt64,
+  kAction,
+};
+
+enum class IOSConfigAction {
+  kNone,
+  kViewRecentLog,
+};
+
+struct IOSConfigChoice {
+  std::string title;
+  int64_t value = 0;
+};
+
+struct IOSConfigItem {
+  std::string key;
+  std::string title;
+  std::string subtitle;
+  IOSConfigControlType control_type = IOSConfigControlType::kToggle;
+  bool bool_value = false;
+  int64_t choice_value = 0;
+  IOSConfigAction action = IOSConfigAction::kNone;
+  std::vector<IOSConfigChoice> choices;
+};
+
+struct IOSConfigSection {
+  std::string title;
+  std::string footer;
+  std::vector<IOSConfigItem> items;
+};
+
+std::string TrimAscii(std::string value) {
+  size_t start = 0;
+  while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start]))) {
+    ++start;
+  }
+  size_t end = value.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+    --end;
+  }
+  return value.substr(start, end - start);
+}
+
+NSString* ToNSString(const std::string& value) {
+  return [NSString stringWithUTF8String:value.c_str()];
+}
+
+cvar::IConfigVar* GetConfigVar(const std::string& key) {
+  if (!cvar::ConfigVars) {
+    return nullptr;
+  }
+  auto it = cvar::ConfigVars->find(key);
+  if (it == cvar::ConfigVars->end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+bool HasConfigVar(const std::string& key) { return GetConfigVar(key) != nullptr; }
+
+std::string GetConfigVarString(const std::string& key, const std::string& fallback) {
+  cvar::IConfigVar* var = GetConfigVar(key);
+  if (!var) {
+    return fallback;
+  }
+  return TrimAscii(var->config_value());
+}
+
+bool ParseBoolString(const std::string& text, bool* value_out) {
+  if (!value_out) {
+    return false;
+  }
+  std::string lower = text;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  if (lower == "true" || lower == "1") {
+    *value_out = true;
+    return true;
+  }
+  if (lower == "false" || lower == "0") {
+    *value_out = false;
+    return true;
+  }
+  return false;
+}
+
+bool ParseInt64String(const std::string& text, int64_t* value_out) {
+  if (!value_out) {
+    return false;
+  }
+  char* end = nullptr;
+  errno = 0;
+  long long parsed = std::strtoll(text.c_str(), &end, 10);
+  if (errno != 0 || !end || *end != '\0') {
+    return false;
+  }
+  *value_out = static_cast<int64_t>(parsed);
+  return true;
+}
+
+bool SetConfigVarBool(const std::string& key, bool value) {
+  cvar::IConfigVar* var = GetConfigVar(key);
+  if (!var) {
+    XELOGW("iOS settings: missing config var '{}'", key);
+    return false;
+  }
+  toml::value node(value);
+  var->LoadConfigValue(&node);
+  return true;
+}
+
+bool SetConfigVarInt32(const std::string& key, int32_t value) {
+  cvar::IConfigVar* var = GetConfigVar(key);
+  if (!var) {
+    XELOGW("iOS settings: missing config var '{}'", key);
+    return false;
+  }
+  toml::value node(value);
+  var->LoadConfigValue(&node);
+  return true;
+}
+
+bool SetConfigVarUInt64(const std::string& key, uint64_t value) {
+  cvar::IConfigVar* var = GetConfigVar(key);
+  if (!var) {
+    XELOGW("iOS settings: missing config var '{}'", key);
+    return false;
+  }
+  toml::value node(value);
+  var->LoadConfigValue(&node);
+  return true;
+}
+
+void AddBoolSetting(std::vector<IOSConfigItem>& items, const std::string& key,
+                    const std::string& title, const std::string& subtitle, bool fallback) {
+  if (!HasConfigVar(key)) {
+    return;
+  }
+  IOSConfigItem item;
+  item.key = key;
+  item.title = title;
+  item.subtitle = subtitle;
+  item.control_type = IOSConfigControlType::kToggle;
+  item.bool_value = fallback;
+  ParseBoolString(GetConfigVarString(key, fallback ? "true" : "false"), &item.bool_value);
+  items.push_back(std::move(item));
+}
+
+void AddChoiceSetting(std::vector<IOSConfigItem>& items, IOSConfigControlType control_type,
+                      const std::string& key, const std::string& title, const std::string& subtitle,
+                      int64_t fallback, std::vector<IOSConfigChoice> choices) {
+  if (!HasConfigVar(key) || choices.empty()) {
+    return;
+  }
+  IOSConfigItem item;
+  item.key = key;
+  item.title = title;
+  item.subtitle = subtitle;
+  item.control_type = control_type;
+  item.choice_value = fallback;
+  ParseInt64String(GetConfigVarString(key, std::to_string(fallback)), &item.choice_value);
+  item.choices = std::move(choices);
+  bool found = false;
+  for (const IOSConfigChoice& choice : item.choices) {
+    if (choice.value == item.choice_value) {
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    item.choice_value = item.choices.front().value;
+  }
+  items.push_back(std::move(item));
+}
+
+void AddActionSetting(std::vector<IOSConfigItem>& items, IOSConfigAction action,
+                      const std::string& title, const std::string& subtitle) {
+  IOSConfigItem item;
+  item.title = title;
+  item.subtitle = subtitle;
+  item.control_type = IOSConfigControlType::kAction;
+  item.action = action;
+  items.push_back(std::move(item));
+}
+
+std::string ChoiceTitleForItem(const IOSConfigItem& item) {
+  for (const IOSConfigChoice& choice : item.choices) {
+    if (choice.value == item.choice_value) {
+      return choice.title;
+    }
+  }
+  return item.choices.empty() ? std::string() : item.choices.front().title;
+}
+
+std::filesystem::path GetLogFilePath() {
+  if (!cvars::log_file.empty()) {
+    return cvars::log_file;
+  }
+  return xe_get_ios_documents_path() / "xenia.log";
+}
+
+std::string ReadFileTail(const std::filesystem::path& path, size_t max_bytes) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return std::string();
+  }
+
+  file.seekg(0, std::ios::end);
+  const std::streamoff end = file.tellg();
+  if (end <= 0) {
+    return std::string();
+  }
+
+  const std::streamoff max_read = static_cast<std::streamoff>(max_bytes);
+  const std::streamoff start = end > max_read ? (end - max_read) : 0;
+  file.seekg(start, std::ios::beg);
+
+  std::string content(static_cast<size_t>(end - start), '\0');
+  file.read(content.data(), static_cast<std::streamsize>(content.size()));
+  content.resize(static_cast<size_t>(file.gcount()));
+
+  if (start > 0) {
+    size_t first_newline = content.find('\n');
+    if (first_newline != std::string::npos) {
+      content.erase(0, first_newline + 1);
+    }
+  }
+  return content;
+}
+
+std::vector<IOSConfigSection> BuildIOSConfigSections() {
+  std::vector<IOSConfigSection> sections;
+
+  IOSConfigSection graphics;
+  graphics.title = "Graphics";
+  graphics.footer = "These options affect image scaling and presentation.";
+  AddBoolSetting(graphics.items, "present_letterbox", "Keep Aspect Ratio",
+                 "Adds letterboxing to preserve image proportions.", true);
+  AddChoiceSetting(graphics.items, IOSConfigControlType::kChoiceInt32, "present_safe_area_x",
+                   "Safe Area (Horizontal)", "How much width is kept before cropping.", 100,
+                   {{"90%", 90}, {"95%", 95}, {"100%", 100}});
+  AddChoiceSetting(graphics.items, IOSConfigControlType::kChoiceInt32, "present_safe_area_y",
+                   "Safe Area (Vertical)", "How much height is kept before cropping.", 100,
+                   {{"90%", 90}, {"95%", 95}, {"100%", 100}});
+  AddBoolSetting(graphics.items, "metal_presenter_use_backing_scale", "Retina Backing Scale",
+                 "When off, render at logical size to reduce GPU load.", false);
+  AddChoiceSetting(graphics.items, IOSConfigControlType::kChoiceInt32, "anisotropic_override",
+                   "Anisotropic Filtering", "Texture filtering override level.", -1,
+                   {{"Auto", -1}, {"Off", 0}, {"2x", 2}, {"4x", 4}, {"8x", 8}, {"16x", 16}});
+  if (!graphics.items.empty()) {
+    sections.push_back(std::move(graphics));
+  }
+
+  IOSConfigSection performance;
+  performance.title = "Performance";
+  performance.footer = "Some changes may require relaunching the current game.";
+  AddChoiceSetting(performance.items, IOSConfigControlType::kChoiceUInt64, "framerate_limit",
+                   "Frame Rate Limit", "Host presentation FPS cap. Guest timing is separate.", 0,
+                   {{"Unlimited", 0}, {"30 FPS", 30}, {"60 FPS", 60}, {"120 FPS", 120}});
+  AddBoolSetting(performance.items, "guest_display_refresh_cap", "Cap Guest Display Refresh",
+                 "Runs guest vblank at PAL/NTSC rate instead of unlimited.", true);
+  AddBoolSetting(performance.items, "async_shader_compilation", "Async Shader Compilation",
+                 "Reduces stutter while pipelines compile in background.", true);
+  AddBoolSetting(performance.items, "half_pixel_offset", "Half-Pixel Offset",
+                 "Compatibility adjustment for D3D9-style sampling.", true);
+  AddBoolSetting(performance.items, "occlusion_query_enable", "Hardware Occlusion Queries",
+                 "More accurate but can reduce performance.", false);
+  if (!performance.items.empty()) {
+    sections.push_back(std::move(performance));
+  }
+
+  IOSConfigSection compatibility;
+  compatibility.title = "Compatibility";
+  compatibility.footer = "Saved to xenia-edge.config.toml in the app Documents folder.";
+  AddBoolSetting(compatibility.items, "gpu_allow_invalid_fetch_constants",
+                 "Allow Invalid Fetch Constants",
+                 "Unsafe workaround for games with bad fetch constants.", true);
+  AddBoolSetting(compatibility.items, "gpu_allow_invalid_upload_range",
+                 "Allow Invalid Upload Range", "Allows reads from pages marked no-access.", false);
+  AddBoolSetting(compatibility.items, "ios_jit_brk_use_universal_0xf00d",
+                 "Universal JIT Breakpoint",
+                 "Use brk #0xF00D (x16 command dispatch) instead of legacy "
+                 "brk #0x69.",
+                 false);
+  if (!compatibility.items.empty()) {
+    sections.push_back(std::move(compatibility));
+  }
+
+  IOSConfigSection diagnostics;
+  diagnostics.title = "Diagnostics";
+  diagnostics.footer = "Logs are stored in Documents/xenia.log and can be viewed without Xcode.";
+  AddChoiceSetting(diagnostics.items, IOSConfigControlType::kChoiceInt32, "log_level",
+                   "Log Verbosity", "Lower values reduce log noise and file size.", 2,
+                   {{"Errors Only", 0}, {"Warnings", 1}, {"Info", 2}, {"Debug", 3}});
+  AddActionSetting(diagnostics.items, IOSConfigAction::kViewRecentLog, "View Recent Log",
+                   "Open the most recent xenia.log output.");
+  if (!diagnostics.items.empty()) {
+    sections.push_back(std::move(diagnostics));
+  }
+
+  return sections;
+}
+
+bool ApplyIOSConfigSections(const std::vector<IOSConfigSection>& sections) {
+  bool ok = true;
+  for (const IOSConfigSection& section : sections) {
+    for (const IOSConfigItem& item : section.items) {
+      switch (item.control_type) {
+        case IOSConfigControlType::kToggle:
+          ok &= SetConfigVarBool(item.key, item.bool_value);
+          break;
+        case IOSConfigControlType::kChoiceInt32:
+          ok &= SetConfigVarInt32(item.key, static_cast<int32_t>(item.choice_value));
+          break;
+        case IOSConfigControlType::kChoiceUInt64:
+          ok &= SetConfigVarUInt64(item.key, static_cast<uint64_t>(item.choice_value));
+          break;
+        case IOSConfigControlType::kAction:
+          break;
+      }
+    }
+  }
+  config::SaveConfig();
+  return ok;
+}
+
+}  // namespace
+
+@interface XeniaConfigViewController : UITableViewController
+@end
+
+@interface XeniaLogViewController : UIViewController
+@end
+
+@implementation XeniaLogViewController {
+  UITextView* textView_;
+  UILabel* footerLabel_;
+}
+
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.title = @"Recent Log";
+  self.view.backgroundColor = [UIColor systemBackgroundColor];
+
+  UIBarButtonItem* refresh_button =
+      [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
+                                                    target:self
+                                                    action:@selector(reloadLogTapped:)];
+  UIBarButtonItem* share_button =
+      [[UIBarButtonItem alloc] initWithTitle:@"Share"
+                                       style:UIBarButtonItemStylePlain
+                                      target:self
+                                      action:@selector(shareLogTapped:)];
+  self.navigationItem.rightBarButtonItems = @[ refresh_button, share_button ];
+
+  textView_ = [[UITextView alloc] init];
+  textView_.translatesAutoresizingMaskIntoConstraints = NO;
+  textView_.editable = NO;
+  textView_.selectable = YES;
+  textView_.alwaysBounceVertical = YES;
+  textView_.backgroundColor = [UIColor secondarySystemBackgroundColor];
+  textView_.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+  textView_.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
+  [self.view addSubview:textView_];
+
+  footerLabel_ = [[UILabel alloc] init];
+  footerLabel_.translatesAutoresizingMaskIntoConstraints = NO;
+  footerLabel_.textColor = [UIColor secondaryLabelColor];
+  footerLabel_.font = [UIFont systemFontOfSize:12];
+  footerLabel_.numberOfLines = 2;
+  [self.view addSubview:footerLabel_];
+
+  UILayoutGuide* guide = self.view.safeAreaLayoutGuide;
+  [NSLayoutConstraint activateConstraints:@[
+    [textView_.topAnchor constraintEqualToAnchor:guide.topAnchor constant:8],
+    [textView_.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:10],
+    [textView_.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-10],
+    [textView_.bottomAnchor constraintEqualToAnchor:footerLabel_.topAnchor constant:-8],
+    [footerLabel_.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:12],
+    [footerLabel_.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-12],
+    [footerLabel_.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor constant:-8],
+  ]];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+  [super viewWillAppear:animated];
+  [self reloadLog];
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+  return UIInterfaceOrientationMaskLandscape;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+  return UIInterfaceOrientationLandscapeLeft;
+}
+
+- (void)reloadLogTapped:(id)sender {
+  [self reloadLog];
+}
+
+- (void)shareLogTapped:(id)sender {
+  std::filesystem::path log_path = GetLogFilePath();
+  NSString* log_path_ns = ToNSString(log_path.string());
+  if (![[NSFileManager defaultManager] fileExistsAtPath:log_path_ns]) {
+    UIAlertController* alert =
+        [UIAlertController alertControllerWithTitle:@"Log Not Found"
+                                            message:@"No xenia.log file exists yet."
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+    return;
+  }
+
+  NSURL* log_url = [NSURL fileURLWithPath:log_path_ns];
+  UIActivityViewController* share_controller =
+      [[UIActivityViewController alloc] initWithActivityItems:@[ log_url ]
+                                        applicationActivities:nil];
+  UIPopoverPresentationController* popover = share_controller.popoverPresentationController;
+  if (popover) {
+    popover.barButtonItem = self.navigationItem.rightBarButtonItems.lastObject;
+  }
+  [self presentViewController:share_controller animated:YES completion:nil];
+}
+
+- (void)reloadLog {
+  static constexpr size_t kMaxLogBytes = 256 * 1024;
+  std::filesystem::path log_path = GetLogFilePath();
+  std::string content = ReadFileTail(log_path, kMaxLogBytes);
+  NSString* log_path_ns = ToNSString(log_path.string());
+
+  if (content.empty()) {
+    textView_.text =
+        [NSString stringWithFormat:@"No recent log data found.\n\nExpected file:\n%@\n\n"
+                                   @"Launch a game, then refresh this screen.",
+                                   log_path_ns];
+  } else {
+    NSData* log_data = [NSData dataWithBytes:content.data() length:content.size()];
+    NSString* decoded = [[NSString alloc] initWithData:log_data encoding:NSUTF8StringEncoding];
+    if (!decoded) {
+      decoded = [[NSString alloc] initWithData:log_data encoding:NSISOLatin1StringEncoding];
+    }
+    if (!decoded) {
+      decoded = @"<Unable to decode log data>";
+    }
+    textView_.text = decoded;
+    [textView_ scrollRangeToVisible:NSMakeRange(textView_.text.length, 0)];
+  }
+
+  footerLabel_.text =
+      [NSString stringWithFormat:@"Showing last %zu KB from %@", kMaxLogBytes / 1024, log_path_ns];
+}
+
+@end
+
+@implementation XeniaConfigViewController {
+  std::vector<IOSConfigSection> sections_;
+  BOOL hasPendingChanges_;
+  UIBarButtonItem* saveButton_;
+}
+
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.title = @"Settings";
+  self.tableView.backgroundColor = [UIColor systemBackgroundColor];
+  self.tableView.separatorInset = UIEdgeInsetsMake(0, 16, 0, 16);
+  sections_ = BuildIOSConfigSections();
+  hasPendingChanges_ = NO;
+
+  self.navigationItem.leftBarButtonItem =
+      [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
+                                                    target:self
+                                                    action:@selector(cancelTapped:)];
+  saveButton_ = [[UIBarButtonItem alloc] initWithTitle:@"Save"
+                                                 style:UIBarButtonItemStyleDone
+                                                target:self
+                                                action:@selector(saveTapped:)];
+  saveButton_.enabled = NO;
+  self.navigationItem.rightBarButtonItem = saveButton_;
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+  return UIInterfaceOrientationMaskLandscape;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+  return UIInterfaceOrientationLandscapeLeft;
+}
+
+- (void)markPendingChanges {
+  hasPendingChanges_ = YES;
+  saveButton_.enabled = YES;
+}
+
+- (IOSConfigItem*)itemAtIndexPath:(NSIndexPath*)indexPath {
+  if (indexPath.section < 0 || indexPath.section >= static_cast<NSInteger>(sections_.size())) {
+    return nullptr;
+  }
+  IOSConfigSection& section = sections_[indexPath.section];
+  if (indexPath.row < 0 || indexPath.row >= static_cast<NSInteger>(section.items.size())) {
+    return nullptr;
+  }
+  return &section.items[indexPath.row];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
+  return static_cast<NSInteger>(sections_.size());
+}
+
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+  if (section < 0 || section >= static_cast<NSInteger>(sections_.size())) {
+    return 0;
+  }
+  return static_cast<NSInteger>(sections_[section].items.size());
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
+  if (section < 0 || section >= static_cast<NSInteger>(sections_.size())) {
+    return nil;
+  }
+  return ToNSString(sections_[section].title);
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
+  if (section < 0 || section >= static_cast<NSInteger>(sections_.size())) {
+    return nil;
+  }
+  return ToNSString(sections_[section].footer);
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView
+        cellForRowAtIndexPath:(NSIndexPath*)indexPath {
+  static NSString* const kCellIdentifier = @"XeniaConfigCell";
+  UITableViewCell* cell = [tableView dequeueReusableCellWithIdentifier:kCellIdentifier];
+  if (!cell) {
+    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                  reuseIdentifier:kCellIdentifier];
+  }
+
+  IOSConfigItem* item = [self itemAtIndexPath:indexPath];
+  if (!item) {
+    cell.textLabel.text = @"";
+    cell.detailTextLabel.text = @"";
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.accessoryView = nil;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+  }
+
+  cell.textLabel.text = ToNSString(item->title);
+  cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+  cell.detailTextLabel.numberOfLines = 2;
+  cell.textLabel.numberOfLines = 1;
+
+  if (item->control_type == IOSConfigControlType::kToggle) {
+    cell.textLabel.textColor = [UIColor labelColor];
+    cell.detailTextLabel.text = ToNSString(item->subtitle);
+    UISwitch* toggle = [[UISwitch alloc] init];
+    toggle.on = item->bool_value;
+    [toggle addTarget:self
+                  action:@selector(toggleChanged:)
+        forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+  } else if (item->control_type == IOSConfigControlType::kAction) {
+    cell.textLabel.textColor = self.view.tintColor;
+    cell.detailTextLabel.text = ToNSString(item->subtitle);
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+  } else {
+    cell.textLabel.textColor = [UIColor labelColor];
+    std::string value_title = ChoiceTitleForItem(*item);
+    std::string subtitle = item->subtitle;
+    if (!value_title.empty()) {
+      cell.detailTextLabel.text = ToNSString(value_title + " · " + subtitle);
+    } else {
+      cell.detailTextLabel.text = ToNSString(subtitle);
+    }
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+  }
+
+  return cell;
+}
+
+- (void)toggleChanged:(UISwitch*)sender {
+  CGPoint point = [sender convertPoint:CGPointZero toView:self.tableView];
+  NSIndexPath* indexPath = [self.tableView indexPathForRowAtPoint:point];
+  if (!indexPath) {
+    return;
+  }
+  IOSConfigItem* item = [self itemAtIndexPath:indexPath];
+  if (!item || item->control_type != IOSConfigControlType::kToggle) {
+    return;
+  }
+  item->bool_value = sender.isOn;
+  [self markPendingChanges];
+}
+
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)indexPath {
+  IOSConfigItem* item = [self itemAtIndexPath:indexPath];
+  if (!item || item->control_type == IOSConfigControlType::kToggle) {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    return;
+  }
+
+  if (item->control_type == IOSConfigControlType::kAction) {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    switch (item->action) {
+      case IOSConfigAction::kViewRecentLog: {
+        XeniaLogViewController* log_vc = [[XeniaLogViewController alloc] init];
+        [self.navigationController pushViewController:log_vc animated:YES];
+      } break;
+      case IOSConfigAction::kNone:
+      default:
+        break;
+    }
+    return;
+  }
+
+  UIAlertController* picker =
+      [UIAlertController alertControllerWithTitle:ToNSString(item->title)
+                                          message:ToNSString(item->subtitle)
+                                   preferredStyle:UIAlertControllerStyleActionSheet];
+
+  for (const IOSConfigChoice& choice : item->choices) {
+    const int64_t selected_value = choice.value;
+    const bool is_selected = (selected_value == item->choice_value);
+    std::string option_title = choice.title + (is_selected ? " ✓" : "");
+    NSString* option_title_ns = ToNSString(option_title);
+    [picker
+        addAction:[UIAlertAction actionWithTitle:option_title_ns
+                                           style:UIAlertActionStyleDefault
+                                         handler:^(__unused UIAlertAction* action) {
+                                           item->choice_value = selected_value;
+                                           [self markPendingChanges];
+                                           [self.tableView
+                                               reloadRowsAtIndexPaths:@[ indexPath ]
+                                                     withRowAnimation:UITableViewRowAnimationNone];
+                                         }]];
+  }
+  [picker addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                             style:UIAlertActionStyleCancel
+                                           handler:nil]];
+
+  UIPopoverPresentationController* popover = picker.popoverPresentationController;
+  if (popover) {
+    UITableViewCell* cell = [tableView cellForRowAtIndexPath:indexPath];
+    popover.sourceView = cell;
+    popover.sourceRect = cell.bounds;
+  }
+  [self presentViewController:picker animated:YES completion:nil];
+  [tableView deselectRowAtIndexPath:indexPath animated:YES];
+}
+
+- (void)cancelTapped:(id)sender {
+  if (!hasPendingChanges_) {
+    [self dismissViewControllerAnimated:YES completion:nil];
+    return;
+  }
+
+  UIAlertController* confirm =
+      [UIAlertController alertControllerWithTitle:@"Discard Changes?"
+                                          message:@"You have unsaved setting changes."
+                                   preferredStyle:UIAlertControllerStyleAlert];
+  [confirm addAction:[UIAlertAction actionWithTitle:@"Keep Editing"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+  [confirm addAction:[UIAlertAction actionWithTitle:@"Discard"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(__unused UIAlertAction* action) {
+                                              [self dismissViewControllerAnimated:YES
+                                                                       completion:nil];
+                                            }]];
+  [self presentViewController:confirm animated:YES completion:nil];
+}
+
+- (void)saveTapped:(id)sender {
+  BOOL saved = ApplyIOSConfigSections(sections_) ? YES : NO;
+  hasPendingChanges_ = NO;
+  saveButton_.enabled = NO;
+
+  NSString* title = saved ? @"Settings Saved" : @"Save Completed With Warnings";
+  NSString* message = saved ? @"Saved to xenia-edge.config.toml."
+                            : @"Some settings could not be applied. Check xenia.log.";
+  UIAlertController* alert =
+      [UIAlertController alertControllerWithTitle:title
+                                          message:message
+                                   preferredStyle:UIAlertControllerStyleAlert];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Done"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(__unused UIAlertAction* action) {
+                                            [self dismissViewControllerAnimated:YES completion:nil];
+                                          }]];
+  [self presentViewController:alert animated:YES completion:nil];
+}
+
+@end
+
 // ---------------------------------------------------------------------------
 // XeniaViewController - manages the Metal view and game launcher UI.
 // ---------------------------------------------------------------------------
@@ -117,6 +834,7 @@ static std::filesystem::path xe_get_ios_documents_path() {
 @property(nonatomic, strong) XeniaMetalView* metalView;
 @property(nonatomic, strong) UIView* launcherOverlay;
 @property(nonatomic, strong) UIButton* openGameButton;
+@property(nonatomic, strong) UIButton* settingsButton;
 @property(nonatomic, strong) UILabel* titleLabel;
 @property(nonatomic, strong) UILabel* statusLabel;
 @property(nonatomic, strong) NSURL* securityScopedURL;
@@ -440,6 +1158,22 @@ static std::filesystem::path xe_get_ios_documents_path() {
                 forControlEvents:UIControlEventTouchUpInside];
   [self.launcherOverlay addSubview:self.openGameButton];
 
+  UIButtonConfiguration* settings_config = [UIButtonConfiguration tintedButtonConfiguration];
+  settings_config.title = @"Settings";
+  settings_config.image = [UIImage systemImageNamed:@"slider.horizontal.3"];
+  settings_config.imagePadding = 6;
+  settings_config.baseForegroundColor = [UIColor whiteColor];
+  settings_config.baseBackgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
+  settings_config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+  settings_config.contentInsets = NSDirectionalEdgeInsetsMake(8, 12, 8, 12);
+
+  self.settingsButton = [UIButton buttonWithConfiguration:settings_config primaryAction:nil];
+  self.settingsButton.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.settingsButton addTarget:self
+                          action:@selector(openSettingsTapped:)
+                forControlEvents:UIControlEventTouchUpInside];
+  [self.launcherOverlay addSubview:self.settingsButton];
+
   // Status label (for showing loading state).
   self.statusLabel = [[UILabel alloc] init];
   self.statusLabel.text = @"";
@@ -467,6 +1201,13 @@ static std::filesystem::path xe_get_ios_documents_path() {
                                                       constant:6],
     [self.jitStatusLabel.trailingAnchor constraintEqualToAnchor:statusContainer.trailingAnchor],
     [self.jitStatusLabel.centerYAnchor constraintEqualToAnchor:statusContainer.centerYAnchor],
+
+    [self.settingsButton.trailingAnchor
+        constraintEqualToAnchor:self.launcherOverlay.safeAreaLayoutGuide.trailingAnchor
+                       constant:-16],
+    [self.settingsButton.topAnchor
+        constraintEqualToAnchor:self.launcherOverlay.safeAreaLayoutGuide.topAnchor
+                       constant:12],
 
     // Title and subtitle.
     [self.titleLabel.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
@@ -521,6 +1262,23 @@ static std::filesystem::path xe_get_ios_documents_path() {
   picker.allowsMultipleSelection = NO;
   picker.shouldShowFileExtensions = YES;
   [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)openSettingsTapped:(UIButton*)sender {
+  XeniaConfigViewController* settings_vc =
+      [[XeniaConfigViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+  UINavigationController* nav =
+      [[UINavigationController alloc] initWithRootViewController:settings_vc];
+  nav.modalPresentationStyle = UIModalPresentationFormSheet;
+  if (@available(iOS 15.0, *)) {
+    UISheetPresentationController* sheet = nav.sheetPresentationController;
+    sheet.detents = @[
+      [UISheetPresentationControllerDetent mediumDetent],
+      [UISheetPresentationControllerDetent largeDetent]
+    ];
+    sheet.prefersGrabberVisible = YES;
+  }
+  [self presentViewController:nav animated:YES completion:nil];
 }
 
 #pragma mark - UIDocumentPickerDelegate
@@ -587,6 +1345,14 @@ static std::filesystem::path xe_get_ios_documents_path() {
 
 - (BOOL)prefersStatusBarHidden {
   return YES;
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+  return UIInterfaceOrientationMaskLandscape;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+  return UIInterfaceOrientationLandscapeLeft;
 }
 
 - (BOOL)prefersHomeIndicatorAutoHidden {
@@ -677,6 +1443,11 @@ static std::filesystem::path xe_get_ios_documents_path() {
 
   XELOGI("iOS: Application launched successfully");
   return YES;
+}
+
+- (UIInterfaceOrientationMask)application:(UIApplication*)application
+    supportedInterfaceOrientationsForWindow:(UIWindow*)window {
+  return UIInterfaceOrientationMaskLandscape;
 }
 
 - (void)applicationWillTerminate:(UIApplication*)application {
