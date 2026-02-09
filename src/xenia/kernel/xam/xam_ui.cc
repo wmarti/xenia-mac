@@ -20,6 +20,9 @@
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/imgui_guest_notification.h"
+#if XE_PLATFORM_IOS
+#include "xenia/ui/windowed_app_context_ios.h"
+#endif
 
 #include "xenia/kernel/xam/ui/create_profile_ui.h"
 #include "xenia/kernel/xam/ui/game_achievements_ui.h"
@@ -510,6 +513,38 @@ dword_result_t XamShowKeyboardUI_entry(
 
   X_RESULT result;
   if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
+#if XE_PLATFORM_IOS
+    auto& app_context = kernel_state()->emulator()->display_window()->app_context();
+    auto* ios_context = dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+    if (ios_context) {
+      std::string title_str = title ? xe::to_utf8(title.value()) : "";
+      std::string desc_str = description ? xe::to_utf8(description.value()) : "";
+      std::string def_text_str =
+          default_text ? xe::to_utf8(default_text.value()) : "";
+      auto run = [ios_context, title_str = std::move(title_str),
+                  desc_str = std::move(desc_str),
+                  def_text_str = std::move(def_text_str), buffer,
+                  buffer_length]() -> X_RESULT {
+        std::string typed_text;
+        bool cancelled = true;
+        if (!ios_context->PromptKeyboardUI(title_str, desc_str, def_text_str,
+                                           &typed_text, &cancelled)) {
+          auto default_utf16 = xe::to_utf16(def_text_str);
+          string_util::copy_and_swap_truncating(buffer, default_utf16, buffer_length);
+          return X_ERROR_SUCCESS;
+        }
+        if (cancelled) {
+          return X_ERROR_CANCELLED;
+        }
+        auto text_utf16 = xe::to_utf16(typed_text);
+        string_util::copy_and_swap_truncating(buffer, text_utf16, buffer_length);
+        return X_ERROR_SUCCESS;
+      };
+      result = xeXamDispatchHeadless(run, overlapped);
+      return result;
+    }
+#endif  // XE_PLATFORM_IOS
+
     auto run = [default_text, buffer, buffer_length,
                 buffer_size]() -> X_RESULT {
       // Redirect default_text back into the buffer.
@@ -995,6 +1030,42 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
   }
 
   if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
+    auto* profile_manager = kernel_state()->xam_state()->profile_manager();
+    if (!profile_manager) {
+      return X_ERROR_FUNCTION_FAILED;
+    }
+
+#if XE_PLATFORM_IOS
+    // iOS doesn't use ImGui dialogs. Ask the native UIKit layer to present a
+    // sign-in/profile selection prompt for title requests.
+    auto& app_context = kernel_state()->emulator()->display_window()->app_context();
+    auto* ios_context = dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+    if (ios_context) {
+      return xeXamDispatchHeadless([ios_context, user_index,
+                                    users_needed]() -> X_RESULT {
+        if (ios_context->PromptSignInUI(user_index, users_needed)) {
+          return X_ERROR_SUCCESS;
+        }
+        // Fallback when native prompt couldn't be shown.
+        std::map<uint8_t, uint64_t> xuids;
+        for (uint32_t i = 0; i < XUserMaxUserCount; i++) {
+          UserProfile* profile = kernel_state()->xam_state()->GetUserProfile(i);
+          if (profile) {
+            xuids[i] = profile->xuid();
+            if (xuids.size() >= users_needed) {
+              break;
+            }
+          }
+        }
+        if (xuids.empty()) {
+          return X_ERROR_NO_SUCH_USER;
+        }
+        kernel_state()->xam_state()->profile_manager()->LoginMultiple(xuids);
+        return X_ERROR_SUCCESS;
+      }, 0);
+    }
+#endif  // XE_PLATFORM_IOS
+
     return xeXamDispatchHeadlessAsync([users_needed]() {
       std::map<uint8_t, uint64_t> xuids;
 

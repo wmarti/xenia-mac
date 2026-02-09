@@ -9,8 +9,12 @@
 
 #import <Foundation/Foundation.h>
 
+#include <algorithm>
+#include <atomic>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,6 +39,8 @@
 // Input drivers.
 #include "xenia/hid/nop/nop_hid.h"
 #include "xenia/hid/sdl/sdl_hid.h"
+#include "xenia/kernel/xam/xam.h"
+#include "xenia/kernel/xam/xam_state.h"
 
 // CVars normally defined in xenia_main.cc (excluded on iOS).
 DEFINE_path(
@@ -91,6 +97,7 @@ class EmulatorAppIOS final : public xe::ui::WindowedApp {
   std::unique_ptr<Emulator> emulator_;
   std::unique_ptr<ui::Window> window_;
   std::thread emulator_thread_;
+  std::atomic<bool> emulator_thread_running_{false};
   bool emulator_initialized_ = false;
 };
 
@@ -191,13 +198,102 @@ bool EmulatorAppIOS::OnInitialize() {
         auto game_path = std::filesystem::path(path);
 
         if (emulator_thread_.joinable()) {
-          XELOGW("iOS: Emulator thread already running");
-          return;
+          if (emulator_thread_running_.load(std::memory_order_acquire)) {
+            XELOGW("iOS: Emulator thread already running");
+            return;
+          }
+          emulator_thread_.join();
         }
 
-        emulator_thread_ = std::thread(
-            [this, game_path]() { EmulatorThread(game_path); });
+        emulator_thread_ = std::thread([this, game_path]() {
+          emulator_thread_running_.store(true, std::memory_order_release);
+          EmulatorThread(game_path);
+          emulator_thread_running_.store(false, std::memory_order_release);
+        });
       });
+
+  ios_context.set_game_terminate_callback([this]() {
+    if (!emulator_ || !emulator_thread_running_.load(std::memory_order_acquire)) {
+      return false;
+    }
+    XELOGI("iOS: TerminateCurrentGame requested");
+    emulator_->TerminateTitle();
+    return true;
+  });
+
+  ios_context.set_profiles_list_callback([this]() {
+    std::vector<ui::IOSProfileSummary> profiles;
+    if (!emulator_ || !emulator_->kernel_state() || !emulator_->kernel_state()->xam_state()) {
+      return profiles;
+    }
+    auto* profile_manager = emulator_->kernel_state()->xam_state()->profile_manager();
+    if (!profile_manager) {
+      return profiles;
+    }
+    const auto* accounts = profile_manager->GetAccounts();
+    profiles.reserve(accounts->size());
+    for (const auto& [xuid, account] : *accounts) {
+      ui::IOSProfileSummary summary;
+      summary.xuid = xuid;
+      summary.gamertag = account.GetGamertagString();
+      uint8_t slot = profile_manager->GetUserIndexAssignedToProfile(xuid);
+      summary.signed_in = slot < XUserMaxUserCount;
+      summary.signed_in_slot = slot;
+      profiles.push_back(std::move(summary));
+    }
+    std::sort(profiles.begin(), profiles.end(),
+              [](const ui::IOSProfileSummary& a, const ui::IOSProfileSummary& b) {
+                return a.gamertag < b.gamertag;
+              });
+    return profiles;
+  });
+
+  ios_context.set_profile_create_callback([this](const std::string& gamertag) {
+    if (!emulator_ || !emulator_->kernel_state() || !emulator_->kernel_state()->xam_state()) {
+      return uint64_t(0);
+    }
+    auto* profile_manager = emulator_->kernel_state()->xam_state()->profile_manager();
+    if (!profile_manager) {
+      return uint64_t(0);
+    }
+    if (!xe::kernel::xam::ProfileManager::IsGamertagValid(gamertag)) {
+      return uint64_t(0);
+    }
+
+    std::set<uint64_t> before_ids;
+    for (const auto& [xuid, account] : *profile_manager->GetAccounts()) {
+      before_ids.insert(xuid);
+    }
+
+    if (!profile_manager->CreateProfile(gamertag, false)) {
+      return uint64_t(0);
+    }
+
+    for (const auto& [xuid, account] : *profile_manager->GetAccounts()) {
+      if (!before_ids.contains(xuid)) {
+        return xuid;
+      }
+    }
+    return uint64_t(0);
+  });
+
+  ios_context.set_profile_sign_in_callback([this](uint64_t xuid) {
+    if (!emulator_ || !emulator_->kernel_state() || !emulator_->kernel_state()->xam_state()) {
+      return false;
+    }
+    auto* profile_manager = emulator_->kernel_state()->xam_state()->profile_manager();
+    if (!profile_manager || !profile_manager->GetAccount(xuid)) {
+      return false;
+    }
+
+    for (uint8_t slot = 0; slot < XUserMaxUserCount; ++slot) {
+      if (profile_manager->GetProfile(slot)) {
+        profile_manager->Logout(slot, false);
+      }
+    }
+    profile_manager->Login(xuid, 0, true);
+    return profile_manager->GetProfile(static_cast<uint8_t>(0)) != nullptr;
+  });
 
   XELOGI("iOS: EmulatorAppIOS initialized successfully");
   return true;
@@ -206,11 +302,12 @@ bool EmulatorAppIOS::OnInitialize() {
 void EmulatorAppIOS::OnDestroy() {
   XELOGI("iOS: EmulatorAppIOS::OnDestroy invoked");
   if (emulator_thread_.joinable()) {
-    if (emulator_) {
+    if (emulator_ && emulator_thread_running_.load(std::memory_order_acquire)) {
       XELOGI("iOS: OnDestroy requesting title termination");
       emulator_->TerminateTitle();
     }
     emulator_thread_.join();
+    emulator_thread_running_.store(false, std::memory_order_release);
   }
   emulator_.reset();
   window_.reset();
@@ -219,6 +316,24 @@ void EmulatorAppIOS::OnDestroy() {
 void EmulatorAppIOS::EmulatorThread(
     const std::filesystem::path& game_path) {
   xe::threading::set_name("Emulator Thread");
+  const bool launched_with_game = !game_path.empty();
+  struct ScopeExit {
+    std::function<void()> fn;
+    ~ScopeExit() {
+      if (fn) {
+        fn();
+      }
+    }
+  } notify_exit{[this, launched_with_game]() {
+    if (!launched_with_game) {
+      return;
+    }
+    app_context().CallInUIThread([this]() {
+      auto& ios_context =
+          static_cast<ui::IOSWindowedAppContext&>(app_context());
+      ios_context.NotifyGameExited();
+    });
+  }};
 
   // Load game-specific config if available.
   if (!game_path.empty()) {
