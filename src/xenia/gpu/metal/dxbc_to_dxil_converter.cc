@@ -21,6 +21,8 @@
 #include <fstream>
 #include <string>
 
+#include "dxc/dxcapi.h"
+
 #include "DxbcConverter.h"
 #include "xenia/base/logging.h"
 
