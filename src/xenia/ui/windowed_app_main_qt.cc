@@ -65,7 +65,8 @@ int main(int argc, char** argv) {
   for (auto& s : filtered_args) {
     filtered_argv_vec.push_back(const_cast<char*>(s.c_str()));
   }
-  int filtered_argc = static_cast<int>(filtered_argv_vec.size());
+  filtered_argv_vec.push_back(nullptr);
+  int filtered_argc = static_cast<int>(filtered_argv_vec.size() - 1);
   char** filtered_argv = filtered_argv_vec.data();
 #else
   int filtered_argc = argc;
