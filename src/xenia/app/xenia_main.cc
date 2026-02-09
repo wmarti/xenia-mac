@@ -473,11 +473,13 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
   Factory<gpu::GraphicsSystem> factory;
 #if XE_PLATFORM_WIN32
   factory.Add<gpu::d3d12::D3D12GraphicsSystem>("d3d12");
+  factory.Add<gpu::vulkan::VulkanGraphicsSystem>("vulkan");
 #endif  // XE_PLATFORM_WIN32
+#if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
+  factory.Add<gpu::vulkan::VulkanGraphicsSystem>("vulkan");
+#endif  // XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
 #if XE_PLATFORM_MAC
   factory.Add<gpu::metal::MetalGraphicsSystem>("metal");
-#else
-  factory.Add<gpu::vulkan::VulkanGraphicsSystem>("vulkan");
 #endif  // XE_PLATFORM_MAC
   std::unique_ptr<gpu::GraphicsSystem> gpu_implementation =
       factory.Create(gpu_implementation_name);
