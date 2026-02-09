@@ -557,6 +557,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
            GetSpirvShaderModification().vertex.host_vertex_shader_type ==
                Shader::HostVertexShaderType::kMemExportCompute;
   }
+  bool IsSpirvRectListAsTriangleStrip() const {
+    return IsSpirvVertexShader() &&
+           GetSpirvShaderModification().vertex.host_vertex_shader_type ==
+               Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
+  }
 
   bool IsExecutionModeEarlyFragmentTests() const {
     return is_pixel_shader() &&
@@ -584,6 +589,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   void StartVertexOrTessEvalShaderBeforeMain();
   void StartVertexOrTessEvalShaderInMain();
   void CompleteVertexOrTessEvalShaderInMain();
+  void ResetUcodeInvocationStateInMain();
+  void ResetVertexShaderInvocationStateInMain();
+  void WriteVertexIndexToRegister0(spv::Id vertex_index);
 
   void StartFragmentShaderBeforeMain();
   void StartFragmentShaderInMain();
@@ -993,6 +1001,18 @@ class SpirvShaderTranslator : public ShaderTranslator {
   unsigned int output_per_vertex_clip_distance_member_index_ = 0;
   unsigned int output_per_vertex_cull_distance_member_index_ = 0;
 
+  // VS, only for HostVertexShaderType::kRectangleListAsTriangleStrip.
+  bool main_vertex_rect_list_as_triangle_strip_ = false;
+  // uint (lower 2 bits of the expanded host vertex index).
+  spv::Id var_main_rect_list_strip_vertex_;
+  // int3 (guest indices for the 3 rectangle vertices after base addition).
+  spv::Id var_main_rect_list_guest_vertex_indices_;
+  // float4[3] (guest clip-space positions for the 3 rectangle vertices).
+  spv::Id var_main_rect_list_guest_positions_;
+  // For used interpolators only: float4[3].
+  std::array<spv::Id, xenos::kMaxInterpolators>
+      var_main_rect_list_guest_interpolators_;
+
   // Function-scoped variables for fragment color data.
   // Used by both FSI and FBO paths so that color values can be read back
   // (e.g., for alpha test). For FBO, these are copied to output_fragment_data_
@@ -1094,6 +1114,15 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Block* main_loop_continue_;
   spv::Block* main_loop_merge_;
   spv::Id main_loop_pc_next_;
+  // VS only, for HostVertexShaderType::kRectangleListAsTriangleStrip.
+  spv::Block* main_rect_list_loop_header_;
+  spv::Block* main_rect_list_loop_continue_;
+  spv::Block* main_rect_list_loop_merge_;
+  // int (0..2), OpPhi in main_rect_list_loop_header_.
+  spv::Id main_rect_list_loop_vertex_index_;
+  // int, produced in main_rect_list_loop_continue_ and consumed by the OpPhi in
+  // main_rect_list_loop_header_.
+  spv::Id main_rect_list_loop_vertex_index_next_;
   spv::Block* main_switch_header_;
   std::unique_ptr<spv::Instruction> main_switch_op_;
   spv::Block* main_switch_merge_;
