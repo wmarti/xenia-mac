@@ -103,6 +103,30 @@ static std::filesystem::path xe_get_ios_documents_path() {
   }
 }
 
+static void xe_request_landscape_orientation(UIViewController* view_controller) {
+  if (!view_controller) {
+    return;
+  }
+#if !TARGET_OS_TV
+  if (@available(iOS 16.0, *)) {
+    UIWindowScene* window_scene = view_controller.view.window.windowScene;
+    if (window_scene) {
+      UIWindowSceneGeometryPreferencesIOS* prefs = [[UIWindowSceneGeometryPreferencesIOS alloc]
+          initWithInterfaceOrientations:UIInterfaceOrientationMaskLandscape];
+      [window_scene requestGeometryUpdateWithPreferences:prefs
+                                            errorHandler:^(NSError* error) {
+                                              XELOGW("iOS: Landscape request failed: {}",
+                                                     [[error localizedDescription] UTF8String]);
+                                            }];
+    }
+  } else {
+    [[UIDevice currentDevice] setValue:@(UIInterfaceOrientationLandscapeRight)
+                                forKey:@"orientation"];
+    [UIViewController attemptRotationToDeviceOrientation];
+  }
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // XeniaMetalView - a UIView backed by a CAMetalLayer.
 // ---------------------------------------------------------------------------
@@ -453,7 +477,116 @@ bool ApplyIOSConfigSections(const std::vector<IOSConfigSection>& sections) {
 @interface XeniaConfigViewController : UITableViewController
 @end
 
+typedef void (^IOSChoiceSelectionHandler)(int64_t value);
+
+@interface XeniaChoiceListViewController : UITableViewController
+- (instancetype)initWithTitle:(NSString*)title
+                     subtitle:(NSString*)subtitle
+                      choices:(const std::vector<IOSConfigChoice>&)choices
+                selectedValue:(int64_t)selectedValue
+                  onSelection:(IOSChoiceSelectionHandler)onSelection;
+@end
+
 @interface XeniaLogViewController : UIViewController
+@end
+
+@interface XeniaLandscapeNavigationController : UINavigationController
+@end
+
+@implementation XeniaChoiceListViewController {
+  std::vector<IOSConfigChoice> choices_;
+  int64_t selected_value_ = 0;
+  NSString* subtitle_;
+  IOSChoiceSelectionHandler on_selection_;
+}
+
+- (instancetype)initWithTitle:(NSString*)title
+                     subtitle:(NSString*)subtitle
+                      choices:(const std::vector<IOSConfigChoice>&)choices
+                selectedValue:(int64_t)selectedValue
+                  onSelection:(IOSChoiceSelectionHandler)onSelection {
+  self = [super initWithStyle:UITableViewStyleInsetGrouped];
+  if (self) {
+    self.title = title;
+    subtitle_ = [subtitle copy];
+    choices_ = choices;
+    selected_value_ = selectedValue;
+    on_selection_ = [onSelection copy];
+  }
+  return self;
+}
+
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.tableView.backgroundColor = [UIColor systemBackgroundColor];
+  self.tableView.separatorInset = UIEdgeInsetsMake(0, 16, 0, 16);
+
+  if (subtitle_.length > 0) {
+    UILabel* header_label = [[UILabel alloc] initWithFrame:CGRectZero];
+    header_label.text = subtitle_;
+    header_label.textColor = [UIColor secondaryLabelColor];
+    header_label.font = [UIFont systemFontOfSize:13];
+    header_label.numberOfLines = 0;
+    header_label.textAlignment = NSTextAlignmentLeft;
+    header_label.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIView* header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 56)];
+    [header addSubview:header_label];
+    [NSLayoutConstraint activateConstraints:@[
+      [header_label.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:18],
+      [header_label.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-18],
+      [header_label.topAnchor constraintEqualToAnchor:header.topAnchor constant:8],
+      [header_label.bottomAnchor constraintEqualToAnchor:header.bottomAnchor constant:-8],
+    ]];
+    self.tableView.tableHeaderView = header;
+  }
+}
+
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+  return static_cast<NSInteger>(choices_.size());
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView
+        cellForRowAtIndexPath:(NSIndexPath*)indexPath {
+  static NSString* const kChoiceCellIdentifier = @"XeniaChoiceCell";
+  UITableViewCell* cell = [tableView dequeueReusableCellWithIdentifier:kChoiceCellIdentifier];
+  if (!cell) {
+    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                  reuseIdentifier:kChoiceCellIdentifier];
+  }
+  if (indexPath.row < 0 || indexPath.row >= static_cast<NSInteger>(choices_.size())) {
+    cell.textLabel.text = @"";
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    return cell;
+  }
+  const IOSConfigChoice& choice = choices_[indexPath.row];
+  cell.textLabel.text = ToNSString(choice.title);
+  cell.accessoryType = (choice.value == selected_value_) ? UITableViewCellAccessoryCheckmark
+                                                         : UITableViewCellAccessoryNone;
+  return cell;
+}
+
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)indexPath {
+  if (indexPath.row < 0 || indexPath.row >= static_cast<NSInteger>(choices_.size())) {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    return;
+  }
+  const IOSConfigChoice& choice = choices_[indexPath.row];
+  selected_value_ = choice.value;
+  if (on_selection_) {
+    on_selection_(selected_value_);
+  }
+  [self.navigationController popViewControllerAnimated:YES];
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+  return UIInterfaceOrientationMaskLandscape;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+  return UIInterfaceOrientationLandscapeLeft;
+}
+
 @end
 
 @implementation XeniaLogViewController {
@@ -575,6 +708,22 @@ bool ApplyIOSConfigSections(const std::vector<IOSConfigSection>& sections) {
 
   footerLabel_.text =
       [NSString stringWithFormat:@"Showing last %zu KB from %@", kMaxLogBytes / 1024, log_path_ns];
+}
+
+@end
+
+@implementation XeniaLandscapeNavigationController
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+  return UIInterfaceOrientationMaskLandscape;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+  return UIInterfaceOrientationLandscapeLeft;
+}
+
+- (BOOL)shouldAutorotate {
+  return YES;
 }
 
 @end
@@ -747,38 +896,18 @@ bool ApplyIOSConfigSections(const std::vector<IOSConfigSection>& sections) {
     return;
   }
 
-  UIAlertController* picker =
-      [UIAlertController alertControllerWithTitle:ToNSString(item->title)
-                                          message:ToNSString(item->subtitle)
-                                   preferredStyle:UIAlertControllerStyleActionSheet];
-
-  for (const IOSConfigChoice& choice : item->choices) {
-    const int64_t selected_value = choice.value;
-    const bool is_selected = (selected_value == item->choice_value);
-    std::string option_title = choice.title + (is_selected ? " ✓" : "");
-    NSString* option_title_ns = ToNSString(option_title);
-    [picker
-        addAction:[UIAlertAction actionWithTitle:option_title_ns
-                                           style:UIAlertActionStyleDefault
-                                         handler:^(__unused UIAlertAction* action) {
-                                           item->choice_value = selected_value;
-                                           [self markPendingChanges];
-                                           [self.tableView
-                                               reloadRowsAtIndexPaths:@[ indexPath ]
-                                                     withRowAnimation:UITableViewRowAnimationNone];
-                                         }]];
-  }
-  [picker addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                             style:UIAlertActionStyleCancel
-                                           handler:nil]];
-
-  UIPopoverPresentationController* popover = picker.popoverPresentationController;
-  if (popover) {
-    UITableViewCell* cell = [tableView cellForRowAtIndexPath:indexPath];
-    popover.sourceView = cell;
-    popover.sourceRect = cell.bounds;
-  }
-  [self presentViewController:picker animated:YES completion:nil];
+  XeniaChoiceListViewController* choice_vc = [[XeniaChoiceListViewController alloc]
+      initWithTitle:ToNSString(item->title)
+           subtitle:ToNSString(item->subtitle)
+            choices:item->choices
+      selectedValue:item->choice_value
+        onSelection:^(int64_t selected_value) {
+          item->choice_value = selected_value;
+          [self markPendingChanges];
+          [self.tableView reloadRowsAtIndexPaths:@[ indexPath ]
+                                withRowAnimation:UITableViewRowAnimationNone];
+        }];
+  [self.navigationController pushViewController:choice_vc animated:YES];
   [tableView deselectRowAtIndexPath:indexPath animated:YES];
 }
 
@@ -873,6 +1002,11 @@ bool ApplyIOSConfigSections(const std::vector<IOSConfigSection>& sections) {
 
   // Start polling for JIT.
   [self startJITPoll];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+  [super viewDidAppear:animated];
+  xe_request_landscape_orientation(self);
 }
 
 // ---------------------------------------------------------------------------
@@ -1267,17 +1401,22 @@ bool ApplyIOSConfigSections(const std::vector<IOSConfigSection>& sections) {
 - (void)openSettingsTapped:(UIButton*)sender {
   XeniaConfigViewController* settings_vc =
       [[XeniaConfigViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-  UINavigationController* nav =
-      [[UINavigationController alloc] initWithRootViewController:settings_vc];
-  nav.modalPresentationStyle = UIModalPresentationFormSheet;
-  if (@available(iOS 15.0, *)) {
-    UISheetPresentationController* sheet = nav.sheetPresentationController;
-    sheet.detents = @[
-      [UISheetPresentationControllerDetent mediumDetent],
-      [UISheetPresentationControllerDetent largeDetent]
-    ];
-    sheet.prefersGrabberVisible = YES;
+  XeniaLandscapeNavigationController* nav =
+      [[XeniaLandscapeNavigationController alloc] initWithRootViewController:settings_vc];
+  if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    if (@available(iOS 15.0, *)) {
+      UISheetPresentationController* sheet = nav.sheetPresentationController;
+      sheet.detents = @[
+        [UISheetPresentationControllerDetent mediumDetent],
+        [UISheetPresentationControllerDetent largeDetent]
+      ];
+      sheet.prefersGrabberVisible = YES;
+    }
+  } else {
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
   }
+  xe_request_landscape_orientation(self);
   [self presentViewController:nav animated:YES completion:nil];
 }
 
@@ -1355,6 +1494,10 @@ bool ApplyIOSConfigSections(const std::vector<IOSConfigSection>& sections) {
   return UIInterfaceOrientationLandscapeLeft;
 }
 
+- (BOOL)shouldAutorotate {
+  return YES;
+}
+
 - (BOOL)prefersHomeIndicatorAutoHidden {
   return YES;
 }
@@ -1413,6 +1556,7 @@ bool ApplyIOSConfigSections(const std::vector<IOSConfigSection>& sections) {
   XeniaViewController* vc = [[XeniaViewController alloc] init];
   self.window.rootViewController = vc;
   [self.window makeKeyAndVisible];
+  xe_request_landscape_orientation(vc);
 
   // Force layout so the Metal view is created.
   [vc.view layoutIfNeeded];
