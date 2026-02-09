@@ -246,6 +246,11 @@ project("xenia-app")
       project_root.."/xenia.entitlements",
       project_root.."/assets/icon/xenia.icns",
     })
+    -- Remove stale runtime logs from prior app launches so code signing
+    -- doesn't fail on extra unsigned files in the bundle.
+    prebuildcommands({
+      'if [ -f "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/MacOS/xenia.log" ]; then rm -f "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/MacOS/xenia.log"; fi',
+    })
     xcodebuildsettings({
       ["INFOPLIST_FILE"] = path.getabsolute("Info.plist"),
       ["CODE_SIGN_ENTITLEMENTS"] =
