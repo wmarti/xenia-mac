@@ -9,6 +9,9 @@
 
 #include "xenia/cpu/backend/a64/a64_function.h"
 
+#include <atomic>
+#include <cstring>
+
 // pthread_jit_write_protect_np is only available on macOS ARM64.
 // On iOS, the dual-mapping (split W^X via vm_remap) path is used instead,
 // so we never need to toggle JIT write protection per-thread.
@@ -17,6 +20,7 @@
 #endif
 
 #include "xenia/base/logging.h"
+#include "xenia/base/memory.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
@@ -61,6 +65,70 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
   auto backend =
       reinterpret_cast<A64Backend*>(thread_state->processor()->backend());
   auto thunk = backend->host_to_guest_thunk();
+
+#if XE_PLATFORM_IOS && defined(__aarch64__)
+  size_t target_region_size = 0;
+  xe::memory::PageAccess target_region_access =
+      xe::memory::PageAccess::kNoAccess;
+  const bool target_region_ok = xe::memory::QueryProtect(
+      machine_code_, target_region_size, target_region_access);
+
+  size_t thunk_region_size = 0;
+  xe::memory::PageAccess thunk_region_access =
+      xe::memory::PageAccess::kNoAccess;
+  const bool thunk_region_ok = xe::memory::QueryProtect(
+      reinterpret_cast<void*>(thunk), thunk_region_size, thunk_region_access);
+
+  const bool target_executable =
+      target_region_access == xe::memory::PageAccess::kExecuteReadOnly ||
+      target_region_access == xe::memory::PageAccess::kExecuteReadWrite;
+  const bool thunk_executable =
+      thunk_region_access == xe::memory::PageAccess::kExecuteReadOnly ||
+      thunk_region_access == xe::memory::PageAccess::kExecuteReadWrite;
+
+  if (!target_region_ok || !target_executable || !thunk_region_ok ||
+      !thunk_executable) {
+    static std::atomic<bool> logged_bad_jit_path{false};
+    bool expected = false;
+    if (logged_bad_jit_path.compare_exchange_strong(
+            expected, true, std::memory_order_relaxed)) {
+      XELOGE(
+          "A64 iOS JIT call blocked due to non-exec QueryProtect: "
+          "thunk={:p} target={:p} return=0x{:08X} "
+          "thunk_ok={} thunk_access={} thunk_size=0x{:X} "
+          "target_ok={} target_access={} target_size=0x{:X}",
+          reinterpret_cast<void*>(thunk), static_cast<void*>(machine_code_),
+          return_address, thunk_region_ok,
+          static_cast<uint32_t>(thunk_region_access),
+          static_cast<uint32_t>(thunk_region_size), target_region_ok,
+          static_cast<uint32_t>(target_region_access),
+          static_cast<uint32_t>(target_region_size));
+    }
+    return false;
+  }
+
+  static std::atomic<bool> logged_first_call{false};
+  bool expected = false;
+  if (logged_first_call.compare_exchange_strong(expected, true,
+                                                std::memory_order_relaxed)) {
+    uint32_t thunk_insn = 0;
+    uint32_t target_insn = 0;
+    std::memcpy(&thunk_insn, reinterpret_cast<void*>(thunk),
+                sizeof(thunk_insn));
+    std::memcpy(&target_insn, machine_code_, sizeof(target_insn));
+    XELOGW(
+        "A64 iOS first call: thunk={:p} target={:p} return=0x{:08X} "
+        "thunk_ok={} thunk_size=0x{:X} thunk_access={} "
+        "target_ok={} target_size=0x{:X} target_access={} "
+        "thunk_insn=0x{:08X} target_insn=0x{:08X}",
+        reinterpret_cast<void*>(thunk), static_cast<void*>(machine_code_),
+        return_address, thunk_region_ok,
+        static_cast<uint32_t>(thunk_region_size),
+        static_cast<uint32_t>(thunk_region_access), target_region_ok,
+        static_cast<uint32_t>(target_region_size),
+        static_cast<uint32_t>(target_region_access), thunk_insn, target_insn);
+  }
+#endif
 
   // Make the actual thunk call
   thunk(machine_code_, thread_state->context(),

@@ -201,6 +201,13 @@ class A64CodeCache : public CodeCache {
   // PageAccess::kExecuteReadWrite is not supported, for writing the generated
   // code. Equals to generated_code_execute_base_ when it's supported.
   uint8_t* generated_code_write_base_ = nullptr;
+  // True when generated code dual mapping is created via vm_remap fallback.
+  // In this mode, pages are already fully mapped/protected at setup time and
+  // additional commit/protect calls can break execute permissions on iOS.
+  bool generated_code_uses_vm_remap_fallback_ = false;
+  // True when iOS generated code uses single-view protection flips (R/RW/RX)
+  // rather than dual-alias mappings.
+  bool generated_code_uses_mprotect_flip_ = false;
   // Current offset to empty space in generated code.
   size_t generated_code_offset_ = 0;
   // Current high water mark of COMMITTED code.

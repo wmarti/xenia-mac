@@ -521,6 +521,7 @@ HostToGuestThunk A64ThunkEmitter::EmitHostToGuestThunk() {
 
   code_offsets.prolog = offset();
 
+  EmitBtiJc();
   SUB(SP, SP, stack_size);
 
   code_offsets.prolog_stack_alloc = offset();
@@ -576,6 +577,7 @@ GuestToHostThunk A64ThunkEmitter::EmitGuestToHostThunk() {
 
   code_offsets.prolog = offset();
 
+  EmitBtiJc();
   SUB(SP, SP, stack_size);
 
   code_offsets.prolog_stack_alloc = offset();
@@ -631,6 +633,7 @@ ResolveFunctionThunk A64ThunkEmitter::EmitResolveFunctionThunk() {
 
   code_offsets.prolog = offset();
 
+  EmitBtiJc();
   // Preserve context register
   STP(ZR, X0, SP, PRE_INDEXED, -16);
 

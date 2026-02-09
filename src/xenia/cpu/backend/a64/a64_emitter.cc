@@ -208,7 +208,11 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
   return new_execute_address;
 }
 
-void A64Emitter::EmitBtiJc() { dw(0xD503241F); }
+void A64Emitter::EmitBtiJc() {
+  // Accept both indirect calls (BLR) and jumps (BR) at JIT entry points.
+  // 0xD50324DF encodes "bti jc".
+  dw(0xD50324DF);
+}
 
 bool A64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
   oaknut::Label epilog_label;
