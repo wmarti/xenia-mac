@@ -68,6 +68,17 @@ DEFINE_int32(metal_presenter_metalfx_scale_x, 0,
              "MetalFX scale factor X (1=1x, 2=2x, etc). 0 = Fit Window.", "GPU");
 DEFINE_int32(metal_presenter_metalfx_scale_y, 0,
              "MetalFX scale factor Y (1=1x, 2=2x, etc). 0 = Fit Window.", "GPU");
+#if XE_PLATFORM_IOS
+DEFINE_bool(metal_presenter_use_backing_scale, false,
+            "Use platform backing scale for CAMetalLayer drawable size. "
+            "If false, drawable size equals logical window size.",
+            "GPU");
+#else
+DEFINE_bool(metal_presenter_use_backing_scale, true,
+            "Use platform backing scale for CAMetalLayer drawable size. "
+            "If false, drawable size equals logical window size.",
+            "GPU");
+#endif
 
 namespace xe {
 namespace ui {
@@ -845,6 +856,9 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   metal_layer.device = (__bridge id<MTLDevice>)device_;
   metal_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
   if (backing_scale <= 0.0) {
+    backing_scale = 1.0;
+  }
+  if (!cvars::metal_presenter_use_backing_scale) {
     backing_scale = 1.0;
   }
   surface_scale_ = static_cast<float>(backing_scale);
