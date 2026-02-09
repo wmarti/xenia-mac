@@ -424,7 +424,7 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
            std::strerror(errno));
     return kFileMappingHandleInvalid;
   }
-#ifdef __APPLE__
+#if XE_PLATFORM_MAC
   if (ftruncate(ret, length) != 0) {
     int err = errno;
     shm_unlink(full_path.c_str());
