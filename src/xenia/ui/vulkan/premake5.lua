@@ -1,6 +1,10 @@
 project_root = "../../../.."
 include(project_root.."/tools/build")
 
+if os.istarget("macosx") then
+  return
+end
+
 group("src")
 project("xenia-ui-vulkan")
   uuid("4933d81e-1c2c-4d5d-b104-3c0eb9dc2f00")
