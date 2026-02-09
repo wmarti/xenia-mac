@@ -115,13 +115,12 @@ PageAccess ToXeniaProtectFlags(const char* protection) {
 }
 
 bool IsWritableExecutableMemorySupported() {
+#if XE_PLATFORM_APPLE
 #if XE_PLATFORM_IOS
-  // On iOS, pthread_jit_write_protect_np is unavailable, so MAP_JIT with
-  // single-mapping RWX is not usable.  iOS emulators (DolphiniOS, PPSSPP, UTM)
-  // all use dual-mapping (split W^X via vm_remap) instead.  Return false here
-  // so that Xenia takes the dual-mapping code path.
+  // iOS app builds don't have MAP_JIT entitlement in this project setup.
+  // Force the code cache to use the dual-mapping path.
   return false;
-#elif XE_PLATFORM_APPLE
+#else
   static const bool supported = []() {
     const size_t test_size = page_size();
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
@@ -132,14 +131,17 @@ bool IsWritableExecutableMemorySupported() {
                               PROT_READ | PROT_WRITE | PROT_EXEC, flags, -1, 0);
     if (test_mapping == MAP_FAILED) {
       const int err = errno;
-      XELOGE("MAP_JIT test failed size=0x{:X} err={} ({})", test_size, err,
-             std::strerror(err));
+      XELOGE(
+          "MAP_JIT test failed size=0x{:X} err={} ({}). Falling back to "
+          "dual-mapping JIT path.",
+          test_size, err, std::strerror(err));
       return false;
     }
     munmap(test_mapping, test_size);
     return true;
   }();
   return supported;
+#endif  // XE_PLATFORM_IOS
 #else
   return true;
 #endif
@@ -185,8 +187,10 @@ void* AllocFixed(void* base_address, size_t length,
 #if XE_PLATFORM_APPLE
   if (access == PageAccess::kExecuteReadWrite ||
       access == PageAccess::kExecuteReadOnly) {
+#if !XE_PLATFORM_IOS
 #ifdef MAP_JIT
     flags |= MAP_JIT;
+#endif
 #endif
   }
 #endif
@@ -429,6 +433,47 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
       return kFileMappingHandleInvalid;
   }
   oflag |= O_CREAT;
+
+#if XE_PLATFORM_IOS
+  // iOS app sandboxing may reject POSIX shared memory namespaces (shm_open),
+  // so use a temporary file-backed shared mapping instead.
+  const char* tmpdir_env = std::getenv("TMPDIR");
+  if (!tmpdir_env || !tmpdir_env[0]) {
+    XELOGE("TMPDIR is unavailable for iOS file mapping fallback.");
+    return kFileMappingHandleInvalid;
+  }
+  std::string backing_path(tmpdir_env);
+  if (backing_path.back() != '/') {
+    backing_path.push_back('/');
+  }
+  backing_path += path.filename().string();
+  int open_flags = oflag;
+  if (open_flags & O_RDWR) {
+    open_flags |= O_TRUNC;
+  }
+  int temp_fd = open(backing_path.c_str(), open_flags, 0600);
+  if (temp_fd < 0) {
+    XELOGE("open failed for {}: {} ({})", backing_path, errno,
+           std::strerror(errno));
+    return kFileMappingHandleInvalid;
+  }
+  if (ftruncate(temp_fd, length) != 0) {
+    const int err = errno;
+    XELOGE("ftruncate failed for {} (len=0x{:X}): {} ({})", backing_path,
+           length, err, std::strerror(err));
+    close(temp_fd);
+    unlink(backing_path.c_str());
+    errno = err;
+    return kFileMappingHandleInvalid;
+  }
+  // Keep only the file descriptor alive - no filesystem entry required.
+  if (unlink(backing_path.c_str()) != 0) {
+    XELOGW("unlink failed for {}: {} ({})", backing_path, errno,
+           std::strerror(errno));
+  }
+  return temp_fd;
+#else  // XE_PLATFORM_IOS
+
   std::string shm_name = path.filename().string();
 #if XE_PLATFORM_APPLE
   constexpr size_t kMacShmNameLimit = 30;
@@ -449,6 +494,8 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
 #ifdef __APPLE__
   if (ftruncate(ret, length) != 0) {
     int err = errno;
+    XELOGE("ftruncate failed for {} (len=0x{:X}): {} ({})", full_path, length,
+           err, std::strerror(err));
     shm_unlink(full_path.c_str());
     close(ret);
     errno = err;
@@ -457,6 +504,8 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
 #else
   if (ftruncate64(ret, length) != 0) {
     int err = errno;
+    XELOGE("ftruncate64 failed for {} (len=0x{:X}): {} ({})", full_path, length,
+           err, std::strerror(err));
     shm_unlink(full_path.c_str());
     close(ret);
     errno = err;
@@ -472,6 +521,7 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   InstallCleanupHandlers();
 #endif
   return ret;
+#endif  // XE_PLATFORM_IOS
 #endif
 }
 
@@ -479,6 +529,11 @@ void CloseFileMappingHandle(FileMappingHandle handle,
                             const std::filesystem::path& path) {
   close(handle);
 #if !XE_PLATFORM_ANDROID
+#if XE_PLATFORM_IOS
+  // iOS uses unlinked temporary file-backed mappings.
+  return;
+#endif  // XE_PLATFORM_IOS
+
   std::string shm_name = path.filename().string();
 #if XE_PLATFORM_APPLE
   constexpr size_t kMacShmNameLimit = 30;
