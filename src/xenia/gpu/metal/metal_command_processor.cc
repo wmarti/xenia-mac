@@ -7821,6 +7821,14 @@ MetalCommandProcessor::GetCurrentSpirvPixelShaderModification(
          blend_control.alpha_comb_fcn == xenos::BlendOp::kMax) &&
         blend_control.alpha_srcblend == xenos::BlendFactor::kSrcAlpha &&
         blend_control.alpha_destblend == xenos::BlendFactor::kOne;
+    if (rt0_minmax_premult_rgb_expected) {
+      modification.pixel.rt0_blend_rgb_factor_for_premult =
+          xenos::BlendFactor::kSrcAlpha;
+    }
+    if (rt0_minmax_premult_a_expected) {
+      modification.pixel.rt0_blend_a_factor_for_premult =
+          xenos::BlendFactor::kSrcAlpha;
+    }
   }
   if (rt0_minmax_premult_rgb_expected || rt0_minmax_premult_a_expected) {
     XELOGD(
@@ -7830,13 +7838,6 @@ MetalCommandProcessor::GetCurrentSpirvPixelShaderModification(
         rt0_minmax_premult_a_expected ? 1 : 0,
         uint32_t(modification.pixel.rt0_blend_rgb_factor_for_premult),
         uint32_t(modification.pixel.rt0_blend_a_factor_for_premult));
-    static bool minmax_premult_gap_logged = false;
-    if (!minmax_premult_gap_logged) {
-      minmax_premult_gap_logged = true;
-      XELOGW(
-          "SPIRV-Cross: MIN/MAX RT0 blend requires premultiply in this draw "
-          "path, but factors are currently left at kOne");
-    }
   }
 
   // Extract 1 bit per RT from the 4-bits-per-RT normalized_color_mask.
