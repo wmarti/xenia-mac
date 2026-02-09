@@ -50,7 +50,6 @@
 [submodule "third_party/DirectXShaderCompiler"]
 	path = third_party/DirectXShaderCompiler
 	url = https://github.com/wmarti/DirectXShaderCompiler.git
-	branch = dxbc2dxil-perf
 [submodule "third_party/premake-cmake"]
 	path = third_party/premake-cmake
 	url = https://github.com/JoelLinn/premake-cmake.git
