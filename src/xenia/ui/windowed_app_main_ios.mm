@@ -19,18 +19,26 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/string.h"
 #include "xenia/config.h"
 #include "xenia/ui/surface_ios.h"
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context_ios.h"
+#include "xenia/vfs/devices/xcontent_container_device.h"
+#include "xenia/vfs/iso_metadata.h"
+#include "xenia/vfs/xex_metadata.h"
+#include "xenia/xbox.h"
 
 DECLARE_path(log_file);
 
@@ -103,15 +111,47 @@ static std::filesystem::path xe_get_ios_documents_path() {
   }
 }
 
-static void xe_request_landscape_orientation(UIViewController* view_controller) {
+static void xe_request_orientation(UIViewController* view_controller,
+                                   UIInterfaceOrientationMask mask,
+                                   UIInterfaceOrientation orientation) {
   if (!view_controller) {
     return;
   }
 #if !TARGET_OS_TV
   [view_controller setNeedsUpdateOfSupportedInterfaceOrientations];
-  [[UIDevice currentDevice] setValue:@(UIInterfaceOrientationLandscapeRight) forKey:@"orientation"];
+  if (@available(iOS 16.0, *)) {
+    UIWindowScene* scene = view_controller.view.window.windowScene;
+    if (!scene) {
+      for (UIScene* connected_scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([connected_scene isKindOfClass:[UIWindowScene class]]) {
+          scene = (UIWindowScene*)connected_scene;
+          break;
+        }
+      }
+    }
+    if (scene) {
+      UIWindowSceneGeometryPreferencesIOS* preferences =
+          [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:mask];
+      [scene requestGeometryUpdateWithPreferences:preferences
+                                     errorHandler:^(NSError* error) {
+                                       XELOGW("iOS: Orientation geometry update failed: {}",
+                                              [[error localizedDescription] UTF8String]);
+                                     }];
+    }
+  }
+  [[UIDevice currentDevice] setValue:@(orientation) forKey:@"orientation"];
   [UIViewController attemptRotationToDeviceOrientation];
 #endif
+}
+
+static void xe_request_landscape_orientation(UIViewController* view_controller) {
+  xe_request_orientation(view_controller, UIInterfaceOrientationMaskLandscape,
+                         UIInterfaceOrientationLandscapeRight);
+}
+
+static void xe_request_portrait_orientation(UIViewController* view_controller) {
+  xe_request_orientation(view_controller, UIInterfaceOrientationMaskPortrait,
+                         UIInterfaceOrientationPortrait);
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +403,136 @@ std::string ReadFileTail(const std::filesystem::path& path, size_t max_bytes) {
   return content;
 }
 
+struct IOSDiscoveredGame {
+  std::filesystem::path path;
+  std::string title;
+  uint32_t title_id = 0;
+  std::vector<uint8_t> icon_data;
+};
+
+std::string ToLowerAsciiCopy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return value;
+}
+
+bool IsISOPath(const std::filesystem::path& path) {
+  return ToLowerAsciiCopy(path.extension().string()) == ".iso";
+}
+
+bool IsDefaultXexPath(const std::filesystem::path& path) {
+  return ToLowerAsciiCopy(path.filename().string()) == "default.xex";
+}
+
+bool IsLikelyGodPath(const std::filesystem::path& path) {
+  if (!path.has_filename()) {
+    return false;
+  }
+  std::filesystem::path parent = path.parent_path();
+  while (!parent.empty()) {
+    std::string name_lower = ToLowerAsciiCopy(parent.filename().string());
+    if (name_lower == "00007000" || name_lower == "00004000") {
+      return true;
+    }
+    std::filesystem::path next = parent.parent_path();
+    if (next == parent) {
+      break;
+    }
+    parent = next;
+  }
+  return false;
+}
+
+std::string FormatTitleID(uint32_t title_id) {
+  if (!title_id) {
+    return std::string();
+  }
+  char buffer[9] = {};
+  std::snprintf(buffer, sizeof(buffer), "%08X", title_id);
+  return std::string(buffer);
+}
+
+std::string DisplayNameFromXexMetadata(const std::filesystem::path& path,
+                                       const std::optional<xe::vfs::XexMetadata>& metadata) {
+  if (!metadata.has_value()) {
+    return path.stem().string();
+  }
+  if (!metadata->module_name.empty()) {
+    return metadata->module_name;
+  }
+  std::string title_id = FormatTitleID(metadata->title_id);
+  if (!title_id.empty()) {
+    return "Title " + title_id;
+  }
+  return path.stem().string();
+}
+
+bool BuildDiscoveredGameFromPath(const std::filesystem::path& path, IOSDiscoveredGame* game_out) {
+  if (!game_out) {
+    return false;
+  }
+
+  IOSDiscoveredGame game;
+  game.path = path;
+  if (IsISOPath(path)) {
+    auto metadata = xe::vfs::ExtractIsoMetadata(path);
+    if (metadata.has_value()) {
+      game.title_id = metadata->title_id;
+    }
+    game.title = DisplayNameFromXexMetadata(path, metadata);
+    *game_out = std::move(game);
+    return true;
+  }
+
+  if (IsDefaultXexPath(path)) {
+    auto metadata = xe::vfs::ExtractXexMetadata(path);
+    if (metadata.has_value()) {
+      game.title_id = metadata->title_id;
+    }
+    game.title = DisplayNameFromXexMetadata(path, metadata);
+    *game_out = std::move(game);
+    return true;
+  }
+
+  if (!IsLikelyGodPath(path)) {
+    return false;
+  }
+
+  auto header = xe::vfs::XContentContainerDevice::ReadContainerHeader(path);
+  if (!header || !header->content_header.is_magic_valid()) {
+    return false;
+  }
+
+  xe::XContentType content_type =
+      static_cast<xe::XContentType>(header->content_metadata.content_type.get());
+  if (content_type != xe::XContentType::kXbox360Title &&
+      content_type != xe::XContentType::kInstalledGame) {
+    return false;
+  }
+
+  game.title_id = header->content_metadata.execution_info.title_id;
+  std::string display_name =
+      xe::to_utf8(header->content_metadata.display_name(xe::XLanguage::kEnglish));
+  if (display_name.empty()) {
+    display_name = xe::to_utf8(header->content_metadata.title_name());
+  }
+  if (display_name.empty()) {
+    std::string title_id = FormatTitleID(game.title_id);
+    game.title = title_id.empty() ? path.stem().string() : "Title " + title_id;
+  } else {
+    game.title = display_name;
+  }
+
+  uint32_t thumb_size = header->content_metadata.title_thumbnail_size;
+  if (thumb_size > 0 && thumb_size <= xe::vfs::XContentMetadata::kThumbLengthV1) {
+    game.icon_data.assign(header->content_metadata.title_thumbnail,
+                          header->content_metadata.title_thumbnail + thumb_size);
+  }
+
+  *game_out = std::move(game);
+  return true;
+}
+
 std::vector<IOSConfigSection> BuildIOSConfigSections() {
   std::vector<IOSConfigSection> sections;
 
@@ -480,6 +650,61 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 @interface XeniaLandscapeNavigationController : UINavigationController
 @end
 
+@interface XeniaGameTileCell : UICollectionViewCell
+@property(nonatomic, strong) UIImageView* iconView;
+@property(nonatomic, strong) UILabel* titleLabel;
+@end
+
+@implementation XeniaGameTileCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+  self = [super initWithFrame:frame];
+  if (!self) {
+    return nil;
+  }
+
+  self.contentView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
+  self.contentView.layer.cornerRadius = 14;
+  self.contentView.layer.borderWidth = 1.0;
+  self.contentView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.08].CGColor;
+
+  self.iconView = [[UIImageView alloc] init];
+  self.iconView.translatesAutoresizingMaskIntoConstraints = NO;
+  self.iconView.contentMode = UIViewContentModeScaleAspectFit;
+  self.iconView.layer.cornerRadius = 12;
+  self.iconView.clipsToBounds = YES;
+  self.iconView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+  [self.contentView addSubview:self.iconView];
+
+  self.titleLabel = [[UILabel alloc] init];
+  self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+  self.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+  self.titleLabel.textColor = [UIColor whiteColor];
+  self.titleLabel.textAlignment = NSTextAlignmentCenter;
+  self.titleLabel.numberOfLines = 2;
+  [self.contentView addSubview:self.titleLabel];
+
+  [NSLayoutConstraint activateConstraints:@[
+    [self.iconView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:10],
+    [self.iconView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor
+                                                constant:10],
+    [self.iconView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor
+                                                 constant:-10],
+    [self.iconView.heightAnchor constraintEqualToAnchor:self.iconView.widthAnchor],
+    [self.titleLabel.topAnchor constraintEqualToAnchor:self.iconView.bottomAnchor constant:6],
+    [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor
+                                                  constant:6],
+    [self.titleLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor
+                                                   constant:-6],
+    [self.titleLabel.bottomAnchor constraintLessThanOrEqualToAnchor:self.contentView.bottomAnchor
+                                                           constant:-8],
+  ]];
+
+  return self;
+}
+
+@end
+
 @implementation XeniaChoiceListViewController {
   std::vector<IOSConfigChoice> choices_;
   int64_t selected_value_;
@@ -529,7 +754,8 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   }
 }
 
-- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+- (NSInteger)tableView:(UITableView* __unused)tableView
+    numberOfRowsInSection:(NSInteger)__unused section {
   return static_cast<NSInteger>(choices_.size());
 }
 
@@ -567,11 +793,11 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-  return UIInterfaceOrientationMaskLandscape;
+  return UIInterfaceOrientationMaskAllButUpsideDown;
 }
 
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
-  return UIInterfaceOrientationLandscapeLeft;
+  return UIInterfaceOrientationPortrait;
 }
 
 @end
@@ -632,11 +858,11 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-  return UIInterfaceOrientationMaskLandscape;
+  return UIInterfaceOrientationMaskAllButUpsideDown;
 }
 
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
-  return UIInterfaceOrientationLandscapeLeft;
+  return UIInterfaceOrientationPortrait;
 }
 
 - (void)reloadLogTapped:(id)sender {
@@ -702,11 +928,11 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 @implementation XeniaLandscapeNavigationController
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-  return UIInterfaceOrientationMaskLandscape;
+  return UIInterfaceOrientationMaskAllButUpsideDown;
 }
 
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
-  return UIInterfaceOrientationLandscapeLeft;
+  return UIInterfaceOrientationPortrait;
 }
 
 - (BOOL)shouldAutorotate {
@@ -742,11 +968,11 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-  return UIInterfaceOrientationMaskLandscape;
+  return UIInterfaceOrientationMaskAllButUpsideDown;
 }
 
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
-  return UIInterfaceOrientationLandscapeLeft;
+  return UIInterfaceOrientationPortrait;
 }
 
 - (void)markPendingChanges {
@@ -945,32 +1171,57 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 // ---------------------------------------------------------------------------
 // XeniaViewController - manages the Metal view and game launcher UI.
 // ---------------------------------------------------------------------------
-@interface XeniaViewController
-    : UIViewController <UIDocumentPickerDelegate>
+@interface XeniaViewController : UIViewController <UIDocumentPickerDelegate,
+                                                   UICollectionViewDataSource,
+                                                   UICollectionViewDelegateFlowLayout>
 @property(nonatomic, strong) XeniaMetalView* metalView;
 @property(nonatomic, strong) UIView* launcherOverlay;
 @property(nonatomic, strong) UIButton* openGameButton;
 @property(nonatomic, strong) UIButton* settingsButton;
+@property(nonatomic, strong) UIButton* profileButton;
 @property(nonatomic, strong) UILabel* titleLabel;
 @property(nonatomic, strong) UILabel* statusLabel;
-@property(nonatomic, strong) NSURL* securityScopedURL;
+@property(nonatomic, strong) UILabel* signedInProfileLabel;
+@property(nonatomic, strong) UICollectionView* importedGamesCollectionView;
+@property(nonatomic, strong) UILabel* importedGamesEmptyLabel;
+@property(nonatomic, strong) UIView* inGameMenuOverlay;
+@property(nonatomic, assign) BOOL gameRunning;
 @property(nonatomic, assign) xe::ui::IOSWindowedAppContext* appContext;
 
-// JIT gate overlay.
-@property(nonatomic, strong) UIView* jitOverlay;
-@property(nonatomic, strong) UIView* jitPulseView;
+// JIT status widgets.
+@property(nonatomic, strong) UIView* jitWarningCard;
 @property(nonatomic, strong) UIView* jitStatusDot;
 @property(nonatomic, strong) UILabel* jitStatusLabel;
 @property(nonatomic, strong) NSTimer* jitPollTimer;
 @property(nonatomic, assign) BOOL jitAcquired;
+@property(nonatomic, assign) BOOL launcherLandscapeUnlocked;
+- (void)refreshSignedInProfileUI;
+- (void)presentSystemSigninPromptForUserIndex:(uint32_t)user_index
+                                   usersNeeded:(uint32_t)users_needed
+                                    completion:(void (^)(BOOL success))completion;
+- (void)presentSystemKeyboardPromptWithTitle:(NSString*)title
+                                 description:(NSString*)description
+                                 defaultText:(NSString*)default_text
+                                  completion:(void (^)(BOOL cancelled,
+                                                       NSString* text))completion;
+- (void)setupInGameMenuOverlay;
+- (void)toggleInGameMenuTapped:(UITapGestureRecognizer*)recognizer;
+- (void)resumeGameTapped:(UIButton*)sender;
+- (void)inGameSettingsTapped:(UIButton*)sender;
+- (void)exitGameTapped:(UIButton*)sender;
+- (void)hideInGameMenuOverlay;
 @end
 
-@implementation XeniaViewController
+@implementation XeniaViewController {
+  std::vector<IOSDiscoveredGame> discovered_games_;
+}
 
 - (void)viewDidLoad {
   [super viewDidLoad];
   self.view.backgroundColor = [UIColor blackColor];
   self.jitAcquired = NO;
+  self.launcherLandscapeUnlocked = NO;
+  self.gameRunning = NO;
 
   // Create the Metal-backed rendering view (full screen, behind everything).
   self.metalView = [[XeniaMetalView alloc] initWithFrame:self.view.bounds];
@@ -979,13 +1230,20 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   self.metalView.contentScaleFactor = [UIScreen mainScreen].scale;
   [self.view addSubview:self.metalView];
 
-  // Create the launcher overlay UI (starts hidden until JIT is acquired).
+  // Create the launcher overlay UI immediately. When JIT is missing, keep
+  // settings/navigation available but gate game launch with status.
   [self setupLauncherOverlay];
-  self.launcherOverlay.hidden = YES;
-  self.launcherOverlay.alpha = 0.0;
-
-  // Create the JIT gate overlay (blocks interaction until JIT is available).
-  [self setupJITOverlay];
+  [self setupInGameMenuOverlay];
+  UITapGestureRecognizer* tap = [[UITapGestureRecognizer alloc]
+      initWithTarget:self
+              action:@selector(toggleInGameMenuTapped:)];
+  tap.numberOfTapsRequired = 1;
+  tap.cancelsTouchesInView = NO;
+  [self.view addGestureRecognizer:tap];
+  [self updateJITStatusIndicator];
+  [self updateJITAvailabilityUI];
+  [self refreshSignedInProfileUI];
+  [self refreshImportedGames];
 
   // Start polling for JIT.
   [self startJITPoll];
@@ -993,175 +1251,11 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
 - (void)viewDidAppear:(BOOL)animated {
   [super viewDidAppear:animated];
-  xe_request_landscape_orientation(self);
-}
-
-// ---------------------------------------------------------------------------
-// JIT gate overlay -- shown until JIT is acquired.
-// ---------------------------------------------------------------------------
-- (void)setupJITOverlay {
-  self.jitOverlay = [[UIView alloc] initWithFrame:self.view.bounds];
-  self.jitOverlay.autoresizingMask =
-      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  self.jitOverlay.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.95];
-  [self.view addSubview:self.jitOverlay];
-
-  // Container for centered content.
-  UIView* container = [[UIView alloc] init];
-  container.translatesAutoresizingMaskIntoConstraints = NO;
-  [self.jitOverlay addSubview:container];
-
-  // Pulsing circle behind the icon.
-  self.jitPulseView = [[UIView alloc] init];
-  self.jitPulseView.translatesAutoresizingMaskIntoConstraints = NO;
-  self.jitPulseView.backgroundColor = [UIColor colorWithRed:0.0 green:0.478 blue:1.0 alpha:0.15];
-  self.jitPulseView.layer.cornerRadius = 50;
-  [container addSubview:self.jitPulseView];
-
-  // CPU icon.
-  UIImageView* iconView = [[UIImageView alloc]
-      initWithImage:
-          [UIImage systemImageNamed:@"cpu"
-                  withConfiguration:[UIImageSymbolConfiguration
-                                        configurationWithPointSize:50
-                                                            weight:UIImageSymbolWeightMedium]]];
-  iconView.tintColor = [UIColor systemBlueColor];
-  iconView.translatesAutoresizingMaskIntoConstraints = NO;
-  iconView.contentMode = UIViewContentModeCenter;
-  [container addSubview:iconView];
-
-  // "Waiting for JIT" title.
-  UILabel* jitTitle = [[UILabel alloc] init];
-  jitTitle.text = @"Waiting for JIT";
-  jitTitle.textColor = [UIColor whiteColor];
-  jitTitle.font = [UIFont systemFontOfSize:24 weight:UIFontWeightSemibold];
-  jitTitle.textAlignment = NSTextAlignmentCenter;
-  jitTitle.translatesAutoresizingMaskIntoConstraints = NO;
-  [container addSubview:jitTitle];
-
-  // Subtitle.
-  UILabel* jitSubtitle = [[UILabel alloc] init];
-  jitSubtitle.text = @"Waiting for Just-In-Time compilation...";
-  jitSubtitle.textColor = [UIColor secondaryLabelColor];
-  jitSubtitle.font = [UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
-  jitSubtitle.textAlignment = NSTextAlignmentCenter;
-  jitSubtitle.translatesAutoresizingMaskIntoConstraints = NO;
-  [container addSubview:jitSubtitle];
-
-  // Info card background.
-  UIView* infoCard = [[UIView alloc] init];
-  infoCard.translatesAutoresizingMaskIntoConstraints = NO;
-  infoCard.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
-  infoCard.layer.cornerRadius = 12;
-  [container addSubview:infoCard];
-
-  // Info row 1: blue info icon + description.
-  UIImageView* infoIcon =
-      [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"info.circle.fill"]];
-  infoIcon.tintColor = [UIColor systemBlueColor];
-  infoIcon.translatesAutoresizingMaskIntoConstraints = NO;
-  [infoCard addSubview:infoIcon];
-
-  UILabel* infoText = [[UILabel alloc] init];
-  infoText.text = @"JIT compilation is required for Xenia to run "
-                  @"Xbox 360 games. It dynamically translates and "
-                  @"executes code at full speed.";
-  infoText.textColor = [UIColor secondaryLabelColor];
-  infoText.font = [UIFont systemFontOfSize:13];
-  infoText.numberOfLines = 0;
-  infoText.translatesAutoresizingMaskIntoConstraints = NO;
-  [infoCard addSubview:infoText];
-
-  // Info row 2: green check icon + instructions.
-  UIImageView* checkIcon =
-      [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill"]];
-  checkIcon.tintColor = [UIColor systemGreenColor];
-  checkIcon.translatesAutoresizingMaskIntoConstraints = NO;
-  [infoCard addSubview:checkIcon];
-
-  UILabel* checkText = [[UILabel alloc] init];
-  checkText.text = @"Enable JIT using StikDebug, SideJITServer, "
-                   @"or AltJIT. If running from Xcode, attach the "
-                   @"debugger.";
-  checkText.textColor = [UIColor secondaryLabelColor];
-  checkText.font = [UIFont systemFontOfSize:13];
-  checkText.numberOfLines = 0;
-  checkText.translatesAutoresizingMaskIntoConstraints = NO;
-  [infoCard addSubview:checkText];
-
-  // Layout.
-  CGFloat maxCardWidth = 360;
-  [NSLayoutConstraint activateConstraints:@[
-    // Container centered in overlay.
-    [container.centerXAnchor constraintEqualToAnchor:self.jitOverlay.centerXAnchor],
-    [container.centerYAnchor constraintEqualToAnchor:self.jitOverlay.centerYAnchor],
-    [container.widthAnchor constraintLessThanOrEqualToConstant:maxCardWidth],
-    [container.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.jitOverlay.leadingAnchor
-                                                         constant:24],
-
-    // Pulse circle.
-    [self.jitPulseView.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
-    [self.jitPulseView.topAnchor constraintEqualToAnchor:container.topAnchor],
-    [self.jitPulseView.widthAnchor constraintEqualToConstant:100],
-    [self.jitPulseView.heightAnchor constraintEqualToConstant:100],
-
-    // Icon centered on pulse.
-    [iconView.centerXAnchor constraintEqualToAnchor:self.jitPulseView.centerXAnchor],
-    [iconView.centerYAnchor constraintEqualToAnchor:self.jitPulseView.centerYAnchor],
-
-    // Title below icon.
-    [jitTitle.topAnchor constraintEqualToAnchor:self.jitPulseView.bottomAnchor constant:20],
-    [jitTitle.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
-
-    // Subtitle below title.
-    [jitSubtitle.topAnchor constraintEqualToAnchor:jitTitle.bottomAnchor constant:8],
-    [jitSubtitle.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
-
-    // Info card below subtitle.
-    [infoCard.topAnchor constraintEqualToAnchor:jitSubtitle.bottomAnchor constant:24],
-    [infoCard.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-    [infoCard.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
-    [infoCard.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
-
-    // Info row 1.
-    [infoIcon.leadingAnchor constraintEqualToAnchor:infoCard.leadingAnchor constant:14],
-    [infoIcon.topAnchor constraintEqualToAnchor:infoCard.topAnchor constant:14],
-    [infoIcon.widthAnchor constraintEqualToConstant:18],
-    [infoIcon.heightAnchor constraintEqualToConstant:18],
-
-    [infoText.leadingAnchor constraintEqualToAnchor:infoIcon.trailingAnchor constant:10],
-    [infoText.trailingAnchor constraintEqualToAnchor:infoCard.trailingAnchor constant:-14],
-    [infoText.topAnchor constraintEqualToAnchor:infoIcon.topAnchor constant:-2],
-
-    // Info row 2.
-    [checkIcon.leadingAnchor constraintEqualToAnchor:infoCard.leadingAnchor constant:14],
-    [checkIcon.topAnchor constraintEqualToAnchor:infoText.bottomAnchor constant:14],
-    [checkIcon.widthAnchor constraintEqualToConstant:18],
-    [checkIcon.heightAnchor constraintEqualToConstant:18],
-
-    [checkText.leadingAnchor constraintEqualToAnchor:checkIcon.trailingAnchor constant:10],
-    [checkText.trailingAnchor constraintEqualToAnchor:infoCard.trailingAnchor constant:-14],
-    [checkText.topAnchor constraintEqualToAnchor:checkIcon.topAnchor constant:-2],
-    [checkText.bottomAnchor constraintEqualToAnchor:infoCard.bottomAnchor constant:-14],
-  ]];
-
-  // Start the pulsing animation.
-  [self startPulseAnimation];
-}
-
-- (void)startPulseAnimation {
-  self.jitPulseView.alpha = 1.0;
-  self.jitPulseView.transform = CGAffineTransformIdentity;
-
-  [UIView animateWithDuration:1.5
-                        delay:0.0
-                      options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionRepeat |
-                              UIViewAnimationOptionAllowUserInteraction
-                   animations:^{
-                     self.jitPulseView.transform = CGAffineTransformMakeScale(1.3, 1.3);
-                     self.jitPulseView.alpha = 0.0;
-                   }
-                   completion:nil];
+  xe_request_portrait_orientation(self);
+  if (!self.launcherLandscapeUnlocked) {
+    self.launcherLandscapeUnlocked = YES;
+    [self setNeedsUpdateOfSupportedInterfaceOrientations];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1193,36 +1287,20 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 - (void)onJITAcquired {
   self.jitAcquired = YES;
   XELOGI("iOS: JIT acquired!");
-
-  // Update the JIT status indicator on the launcher.
   [self updateJITStatusIndicator];
-
-  // Fade out JIT overlay, reveal launcher.
-  self.launcherOverlay.hidden = NO;
-  [UIView animateWithDuration:0.4
-      delay:0.0
-      options:UIViewAnimationOptionCurveEaseOut
-      animations:^{
-        self.jitOverlay.alpha = 0.0;
-        self.launcherOverlay.alpha = 1.0;
-      }
-      completion:^(BOOL finished) {
-        [self.jitOverlay removeFromSuperview];
-        self.jitOverlay = nil;
-      }];
+  [self updateJITAvailabilityUI];
 }
 
 // ---------------------------------------------------------------------------
 // Launcher overlay with Open Game button.
 // ---------------------------------------------------------------------------
 - (void)setupLauncherOverlay {
-  self.launcherOverlay =
-      [[UIView alloc] initWithFrame:self.view.bounds];
+  self.launcherOverlay = [[UIView alloc] initWithFrame:self.view.bounds];
   self.launcherOverlay.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  self.launcherOverlay.backgroundColor =
-      [UIColor colorWithWhite:0.0 alpha:0.85];
+  self.launcherOverlay.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.85];
   [self.view addSubview:self.launcherOverlay];
+  UILayoutGuide* safe_guide = self.launcherOverlay.safeAreaLayoutGuide;
 
   // JIT status indicator (green/red dot + label) at the top.
   UIView* statusContainer = [[UIView alloc] init];
@@ -1236,7 +1314,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   [statusContainer addSubview:self.jitStatusDot];
 
   self.jitStatusLabel = [[UILabel alloc] init];
-  self.jitStatusLabel.text = @"JIT Not Acquired";
+  self.jitStatusLabel.text = @"JIT Not Detected";
   self.jitStatusLabel.textColor = [UIColor systemRedColor];
   self.jitStatusLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
   self.jitStatusLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1244,7 +1322,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
   // Title label.
   self.titleLabel = [[UILabel alloc] init];
-  self.titleLabel.text = @"Xenia";
+  self.titleLabel.text = @"Xenia-Edge";
   self.titleLabel.textColor = [UIColor whiteColor];
   self.titleLabel.font = [UIFont systemFontOfSize:42 weight:UIFontWeightBold];
   self.titleLabel.textAlignment = NSTextAlignmentCenter;
@@ -1260,10 +1338,38 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
   [self.launcherOverlay addSubview:subtitleLabel];
 
-  // Open Game button.
-  UIButtonConfiguration* config =
-      [UIButtonConfiguration filledButtonConfiguration];
-  config.title = @"Open Game";
+  // Non-blocking JIT warning card shown until JIT becomes available.
+  self.jitWarningCard = [[UIView alloc] init];
+  self.jitWarningCard.translatesAutoresizingMaskIntoConstraints = NO;
+  self.jitWarningCard.backgroundColor = [UIColor colorWithRed:0.34 green:0.08 blue:0.03 alpha:0.92];
+  self.jitWarningCard.layer.cornerRadius = 12;
+  [self.launcherOverlay addSubview:self.jitWarningCard];
+
+  UIImageView* jitWarningIcon = [[UIImageView alloc]
+      initWithImage:[UIImage systemImageNamed:@"exclamationmark.triangle.fill"]];
+  jitWarningIcon.translatesAutoresizingMaskIntoConstraints = NO;
+  jitWarningIcon.tintColor = [UIColor systemOrangeColor];
+  [self.jitWarningCard addSubview:jitWarningIcon];
+
+  UILabel* jitWarningTitle = [[UILabel alloc] init];
+  jitWarningTitle.translatesAutoresizingMaskIntoConstraints = NO;
+  jitWarningTitle.text = @"JIT Not Detected";
+  jitWarningTitle.textColor = [UIColor colorWithRed:1.0 green:0.88 blue:0.72 alpha:1.0];
+  jitWarningTitle.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+  [self.jitWarningCard addSubview:jitWarningTitle];
+
+  UILabel* jitWarningBody = [[UILabel alloc] init];
+  jitWarningBody.translatesAutoresizingMaskIntoConstraints = NO;
+  jitWarningBody.numberOfLines = 0;
+  jitWarningBody.text = @"Enable JIT with StikDebug, SideJITServer, or AltJIT. "
+                        @"Settings and menu navigation stay available.";
+  jitWarningBody.textColor = [UIColor colorWithRed:0.95 green:0.83 blue:0.76 alpha:1.0];
+  jitWarningBody.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+  [self.jitWarningCard addSubview:jitWarningBody];
+
+  // Import button.
+  UIButtonConfiguration* config = [UIButtonConfiguration filledButtonConfiguration];
+  config.title = @"Import Game";
   config.image = [UIImage systemImageNamed:@"folder"];
   config.imagePadding = 8;
   config.baseBackgroundColor = [UIColor systemGreenColor];
@@ -1295,6 +1401,22 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
                 forControlEvents:UIControlEventTouchUpInside];
   [self.launcherOverlay addSubview:self.settingsButton];
 
+  UIButtonConfiguration* profile_config = [UIButtonConfiguration tintedButtonConfiguration];
+  profile_config.title = @"Profile";
+  profile_config.image = [UIImage systemImageNamed:@"person.circle"];
+  profile_config.imagePadding = 6;
+  profile_config.baseForegroundColor = [UIColor whiteColor];
+  profile_config.baseBackgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
+  profile_config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+  profile_config.contentInsets = NSDirectionalEdgeInsetsMake(8, 12, 8, 12);
+
+  self.profileButton = [UIButton buttonWithConfiguration:profile_config primaryAction:nil];
+  self.profileButton.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.profileButton addTarget:self
+                         action:@selector(openProfileTapped:)
+               forControlEvents:UIControlEventTouchUpInside];
+  [self.launcherOverlay addSubview:self.profileButton];
+
   // Status label (for showing loading state).
   self.statusLabel = [[UILabel alloc] init];
   self.statusLabel.text = @"";
@@ -1305,13 +1427,66 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
   [self.launcherOverlay addSubview:self.statusLabel];
 
+  self.signedInProfileLabel = [[UILabel alloc] init];
+  self.signedInProfileLabel.text = @"";
+  self.signedInProfileLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.88];
+  self.signedInProfileLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+  self.signedInProfileLabel.textAlignment = NSTextAlignmentCenter;
+  self.signedInProfileLabel.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.launcherOverlay addSubview:self.signedInProfileLabel];
+
+  UILabel* importedGamesTitleLabel = [[UILabel alloc] init];
+  importedGamesTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+  importedGamesTitleLabel.text = @"Imported Games";
+  importedGamesTitleLabel.textColor = [UIColor whiteColor];
+  importedGamesTitleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+  [self.launcherOverlay addSubview:importedGamesTitleLabel];
+
+  UICollectionViewFlowLayout* layout = [[UICollectionViewFlowLayout alloc] init];
+  layout.minimumInteritemSpacing = 12;
+  layout.minimumLineSpacing = 12;
+  layout.sectionInset = UIEdgeInsetsMake(0, 0, 0, 0);
+  self.importedGamesCollectionView = [[UICollectionView alloc] initWithFrame:CGRectZero
+                                                        collectionViewLayout:layout];
+  self.importedGamesCollectionView.translatesAutoresizingMaskIntoConstraints = NO;
+  self.importedGamesCollectionView.dataSource = self;
+  self.importedGamesCollectionView.delegate = self;
+  self.importedGamesCollectionView.backgroundColor = [UIColor clearColor];
+  self.importedGamesCollectionView.alwaysBounceVertical = YES;
+  self.importedGamesCollectionView.showsHorizontalScrollIndicator = NO;
+  self.importedGamesCollectionView.layer.cornerRadius = 12;
+  [self.importedGamesCollectionView registerClass:[XeniaGameTileCell class]
+                       forCellWithReuseIdentifier:@"ImportedGameCell"];
+  [self.launcherOverlay addSubview:self.importedGamesCollectionView];
+
+  UIView* emptyBackgroundView = [[UIView alloc] initWithFrame:CGRectZero];
+  self.importedGamesEmptyLabel = [[UILabel alloc] init];
+  self.importedGamesEmptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+  self.importedGamesEmptyLabel.text = @"No imported games found in Documents.";
+  self.importedGamesEmptyLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.65];
+  self.importedGamesEmptyLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+  self.importedGamesEmptyLabel.textAlignment = NSTextAlignmentCenter;
+  self.importedGamesEmptyLabel.numberOfLines = 0;
+  [emptyBackgroundView addSubview:self.importedGamesEmptyLabel];
+  [NSLayoutConstraint activateConstraints:@[
+    [self.importedGamesEmptyLabel.centerXAnchor
+        constraintEqualToAnchor:emptyBackgroundView.centerXAnchor],
+    [self.importedGamesEmptyLabel.centerYAnchor
+        constraintEqualToAnchor:emptyBackgroundView.centerYAnchor],
+    [self.importedGamesEmptyLabel.leadingAnchor
+        constraintGreaterThanOrEqualToAnchor:emptyBackgroundView.leadingAnchor
+                                    constant:20],
+    [self.importedGamesEmptyLabel.trailingAnchor
+        constraintLessThanOrEqualToAnchor:emptyBackgroundView.trailingAnchor
+                                 constant:-20],
+  ]];
+  self.importedGamesCollectionView.backgroundView = emptyBackgroundView;
+
   // Layout constraints.
   [NSLayoutConstraint activateConstraints:@[
     // JIT status indicator at top center.
     [statusContainer.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
-    [statusContainer.topAnchor
-        constraintEqualToAnchor:self.launcherOverlay.safeAreaLayoutGuide.topAnchor
-                       constant:16],
+    [statusContainer.topAnchor constraintEqualToAnchor:safe_guide.topAnchor constant:16],
 
     [self.jitStatusDot.leadingAnchor constraintEqualToAnchor:statusContainer.leadingAnchor],
     [self.jitStatusDot.centerYAnchor constraintEqualToAnchor:statusContainer.centerYAnchor],
@@ -1323,28 +1498,552 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
     [self.jitStatusLabel.trailingAnchor constraintEqualToAnchor:statusContainer.trailingAnchor],
     [self.jitStatusLabel.centerYAnchor constraintEqualToAnchor:statusContainer.centerYAnchor],
 
-    [self.settingsButton.trailingAnchor
-        constraintEqualToAnchor:self.launcherOverlay.safeAreaLayoutGuide.trailingAnchor
-                       constant:-16],
-    [self.settingsButton.topAnchor
-        constraintEqualToAnchor:self.launcherOverlay.safeAreaLayoutGuide.topAnchor
-                       constant:12],
+    [self.settingsButton.trailingAnchor constraintEqualToAnchor:safe_guide.trailingAnchor
+                                                       constant:-16],
+    [self.settingsButton.topAnchor constraintEqualToAnchor:safe_guide.topAnchor constant:12],
+    [self.profileButton.leadingAnchor constraintEqualToAnchor:safe_guide.leadingAnchor constant:16],
+    [self.profileButton.topAnchor constraintEqualToAnchor:safe_guide.topAnchor constant:12],
 
-    // Title and subtitle.
+    // Title, subtitle, and warning card.
     [self.titleLabel.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
-    [self.titleLabel.bottomAnchor constraintEqualToAnchor:subtitleLabel.topAnchor constant:-4],
-
+    [self.titleLabel.topAnchor constraintEqualToAnchor:safe_guide.topAnchor constant:56],
     [subtitleLabel.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
-    [subtitleLabel.bottomAnchor constraintEqualToAnchor:self.openGameButton.topAnchor constant:-32],
+    [subtitleLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:6],
+
+    [self.jitWarningCard.topAnchor constraintEqualToAnchor:subtitleLabel.bottomAnchor constant:18],
+    [self.jitWarningCard.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
+    [self.jitWarningCard.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe_guide.leadingAnchor
+                                                                   constant:20],
+    [self.jitWarningCard.trailingAnchor constraintLessThanOrEqualToAnchor:safe_guide.trailingAnchor
+                                                                 constant:-20],
+    [self.jitWarningCard.widthAnchor constraintLessThanOrEqualToConstant:640],
+
+    [jitWarningIcon.leadingAnchor constraintEqualToAnchor:self.jitWarningCard.leadingAnchor
+                                                 constant:14],
+    [jitWarningIcon.topAnchor constraintEqualToAnchor:self.jitWarningCard.topAnchor constant:14],
+    [jitWarningIcon.widthAnchor constraintEqualToConstant:18],
+    [jitWarningIcon.heightAnchor constraintEqualToConstant:18],
+
+    [jitWarningTitle.leadingAnchor constraintEqualToAnchor:jitWarningIcon.trailingAnchor
+                                                  constant:10],
+    [jitWarningTitle.trailingAnchor constraintEqualToAnchor:self.jitWarningCard.trailingAnchor
+                                                   constant:-14],
+    [jitWarningTitle.topAnchor constraintEqualToAnchor:self.jitWarningCard.topAnchor constant:12],
+
+    [jitWarningBody.leadingAnchor constraintEqualToAnchor:jitWarningTitle.leadingAnchor],
+    [jitWarningBody.trailingAnchor constraintEqualToAnchor:jitWarningTitle.trailingAnchor],
+    [jitWarningBody.topAnchor constraintEqualToAnchor:jitWarningTitle.bottomAnchor constant:6],
+    [jitWarningBody.bottomAnchor constraintEqualToAnchor:self.jitWarningCard.bottomAnchor
+                                                constant:-12],
 
     [self.openGameButton.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
-    [self.openGameButton.centerYAnchor constraintEqualToAnchor:self.launcherOverlay.centerYAnchor
-                                                      constant:20],
+    [self.openGameButton.topAnchor constraintEqualToAnchor:self.jitWarningCard.bottomAnchor
+                                                  constant:20],
 
     [self.statusLabel.centerXAnchor constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
     [self.statusLabel.topAnchor constraintEqualToAnchor:self.openGameButton.bottomAnchor
-                                               constant:20],
+                                               constant:12],
+    [self.statusLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe_guide.leadingAnchor
+                                                                constant:20],
+    [self.statusLabel.trailingAnchor constraintLessThanOrEqualToAnchor:safe_guide.trailingAnchor
+                                                              constant:-20],
+
+    [self.signedInProfileLabel.centerXAnchor
+        constraintEqualToAnchor:self.launcherOverlay.centerXAnchor],
+    [self.signedInProfileLabel.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor
+                                                        constant:8],
+    [self.signedInProfileLabel.leadingAnchor
+        constraintGreaterThanOrEqualToAnchor:safe_guide.leadingAnchor
+                                    constant:20],
+    [self.signedInProfileLabel.trailingAnchor
+        constraintLessThanOrEqualToAnchor:safe_guide.trailingAnchor
+                                 constant:-20],
+
+    [importedGamesTitleLabel.leadingAnchor constraintEqualToAnchor:safe_guide.leadingAnchor
+                                                          constant:18],
+    [importedGamesTitleLabel.topAnchor
+        constraintEqualToAnchor:self.signedInProfileLabel.bottomAnchor
+                       constant:14],
+
+    [self.importedGamesCollectionView.leadingAnchor constraintEqualToAnchor:safe_guide.leadingAnchor
+                                                                   constant:14],
+    [self.importedGamesCollectionView.trailingAnchor
+        constraintEqualToAnchor:safe_guide.trailingAnchor
+                       constant:-14],
+    [self.importedGamesCollectionView.topAnchor
+        constraintEqualToAnchor:importedGamesTitleLabel.bottomAnchor
+                       constant:8],
+    [self.importedGamesCollectionView.bottomAnchor constraintEqualToAnchor:safe_guide.bottomAnchor
+                                                                  constant:-12],
   ]];
+}
+
+- (void)setupInGameMenuOverlay {
+  self.inGameMenuOverlay = [[UIView alloc] initWithFrame:self.view.bounds];
+  self.inGameMenuOverlay.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  self.inGameMenuOverlay.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.58];
+  self.inGameMenuOverlay.hidden = YES;
+  [self.view addSubview:self.inGameMenuOverlay];
+
+  UIView* panel = [[UIView alloc] init];
+  panel.translatesAutoresizingMaskIntoConstraints = NO;
+  panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
+  panel.layer.cornerRadius = 16.0;
+  panel.layer.borderWidth = 1.0;
+  panel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.08].CGColor;
+  [self.inGameMenuOverlay addSubview:panel];
+
+  UILabel* title = [[UILabel alloc] init];
+  title.translatesAutoresizingMaskIntoConstraints = NO;
+  title.text = @"In-Game Menu";
+  title.textColor = [UIColor whiteColor];
+  title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
+  title.textAlignment = NSTextAlignmentCenter;
+  [panel addSubview:title];
+
+  UILabel* subtitle = [[UILabel alloc] init];
+  subtitle.translatesAutoresizingMaskIntoConstraints = NO;
+  subtitle.text = @"Tap anywhere to close";
+  subtitle.textColor = [UIColor colorWithWhite:1.0 alpha:0.68];
+  subtitle.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+  subtitle.textAlignment = NSTextAlignmentCenter;
+  [panel addSubview:subtitle];
+
+  UIButtonConfiguration* resume_config = [UIButtonConfiguration filledButtonConfiguration];
+  resume_config.title = @"Resume";
+  resume_config.baseBackgroundColor = [UIColor systemGreenColor];
+  resume_config.baseForegroundColor = [UIColor whiteColor];
+  resume_config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+  resume_config.contentInsets = NSDirectionalEdgeInsetsMake(12, 18, 12, 18);
+  UIButton* resume = [UIButton buttonWithConfiguration:resume_config primaryAction:nil];
+  resume.translatesAutoresizingMaskIntoConstraints = NO;
+  [resume addTarget:self action:@selector(resumeGameTapped:) forControlEvents:UIControlEventTouchUpInside];
+  [panel addSubview:resume];
+
+  UIButtonConfiguration* settings_config = [UIButtonConfiguration tintedButtonConfiguration];
+  settings_config.title = @"Settings";
+  settings_config.image = [UIImage systemImageNamed:@"slider.horizontal.3"];
+  settings_config.imagePadding = 6;
+  settings_config.baseForegroundColor = [UIColor whiteColor];
+  settings_config.baseBackgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
+  settings_config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+  settings_config.contentInsets = NSDirectionalEdgeInsetsMake(10, 16, 10, 16);
+  UIButton* settings = [UIButton buttonWithConfiguration:settings_config primaryAction:nil];
+  settings.translatesAutoresizingMaskIntoConstraints = NO;
+  [settings addTarget:self
+               action:@selector(inGameSettingsTapped:)
+     forControlEvents:UIControlEventTouchUpInside];
+  [panel addSubview:settings];
+
+  UIButtonConfiguration* exit_config = [UIButtonConfiguration tintedButtonConfiguration];
+  exit_config.title = @"Exit To Library";
+  exit_config.image = [UIImage systemImageNamed:@"rectangle.portrait.and.arrow.right"];
+  exit_config.imagePadding = 6;
+  exit_config.baseForegroundColor = [UIColor whiteColor];
+  exit_config.baseBackgroundColor = [UIColor colorWithRed:0.63 green:0.18 blue:0.18 alpha:0.92];
+  exit_config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+  exit_config.contentInsets = NSDirectionalEdgeInsetsMake(10, 16, 10, 16);
+  UIButton* exit_button = [UIButton buttonWithConfiguration:exit_config primaryAction:nil];
+  exit_button.translatesAutoresizingMaskIntoConstraints = NO;
+  [exit_button addTarget:self action:@selector(exitGameTapped:) forControlEvents:UIControlEventTouchUpInside];
+  [panel addSubview:exit_button];
+
+  [NSLayoutConstraint activateConstraints:@[
+    [panel.centerXAnchor constraintEqualToAnchor:self.inGameMenuOverlay.centerXAnchor],
+    [panel.centerYAnchor constraintEqualToAnchor:self.inGameMenuOverlay.centerYAnchor],
+    [panel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.inGameMenuOverlay.safeAreaLayoutGuide.leadingAnchor
+                                                     constant:24],
+    [panel.trailingAnchor constraintLessThanOrEqualToAnchor:self.inGameMenuOverlay.safeAreaLayoutGuide.trailingAnchor
+                                                   constant:-24],
+    [panel.widthAnchor constraintLessThanOrEqualToConstant:420],
+
+    [title.topAnchor constraintEqualToAnchor:panel.topAnchor constant:18],
+    [title.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:20],
+    [title.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-20],
+
+    [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:4],
+    [subtitle.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
+    [subtitle.trailingAnchor constraintEqualToAnchor:title.trailingAnchor],
+
+    [resume.topAnchor constraintEqualToAnchor:subtitle.bottomAnchor constant:16],
+    [resume.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:14],
+    [resume.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-14],
+
+    [settings.topAnchor constraintEqualToAnchor:resume.bottomAnchor constant:10],
+    [settings.leadingAnchor constraintEqualToAnchor:resume.leadingAnchor],
+    [settings.trailingAnchor constraintEqualToAnchor:resume.trailingAnchor],
+
+    [exit_button.topAnchor constraintEqualToAnchor:settings.bottomAnchor constant:10],
+    [exit_button.leadingAnchor constraintEqualToAnchor:resume.leadingAnchor],
+    [exit_button.trailingAnchor constraintEqualToAnchor:resume.trailingAnchor],
+    [exit_button.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor constant:-14],
+  ]];
+}
+
+- (void)toggleInGameMenuTapped:(UITapGestureRecognizer*)recognizer {
+  if (recognizer.state != UIGestureRecognizerStateRecognized) {
+    return;
+  }
+  if (self.launcherOverlay.hidden == NO || !self.gameRunning || self.presentedViewController) {
+    return;
+  }
+
+  BOOL should_show = self.inGameMenuOverlay.hidden;
+  if (should_show) {
+    self.inGameMenuOverlay.alpha = 0.0;
+    self.inGameMenuOverlay.hidden = NO;
+    [UIView animateWithDuration:0.18
+                     animations:^{
+                       self.inGameMenuOverlay.alpha = 1.0;
+                     }];
+  } else {
+    [self hideInGameMenuOverlay];
+  }
+}
+
+- (void)hideInGameMenuOverlay {
+  if (self.inGameMenuOverlay.hidden) {
+    return;
+  }
+  [UIView animateWithDuration:0.15
+      animations:^{
+        self.inGameMenuOverlay.alpha = 0.0;
+      }
+      completion:^(__unused BOOL finished) {
+        self.inGameMenuOverlay.hidden = YES;
+        self.inGameMenuOverlay.alpha = 1.0;
+      }];
+}
+
+- (void)resumeGameTapped:(UIButton*)sender {
+  [self hideInGameMenuOverlay];
+}
+
+- (void)inGameSettingsTapped:(UIButton*)sender {
+  [self hideInGameMenuOverlay];
+  [self openSettingsTapped:nil];
+}
+
+- (void)exitGameTapped:(UIButton*)sender {
+  [self hideInGameMenuOverlay];
+  BOOL requested_stop = self.appContext ? self.appContext->TerminateCurrentGame() : NO;
+  if (requested_stop) {
+    [self showLauncherOverlay];
+    self.statusLabel.text = @"Stopping game...";
+  } else {
+    self.statusLabel.text = @"No active game to stop.";
+  }
+}
+
+- (void)refreshSignedInProfileUI {
+  if (!self.appContext) {
+    self.profileButton.enabled = NO;
+    self.profileButton.alpha = 0.5;
+    self.signedInProfileLabel.text = @"Profile system unavailable";
+    return;
+  }
+
+  self.profileButton.enabled = YES;
+  self.profileButton.alpha = 1.0;
+
+  const auto profiles = self.appContext->ListProfiles();
+  const xe::ui::IOSProfileSummary* signed_in_profile = nullptr;
+  for (const auto& profile : profiles) {
+    if (profile.signed_in) {
+      signed_in_profile = &profile;
+      break;
+    }
+  }
+
+  if (signed_in_profile) {
+    self.signedInProfileLabel.text =
+        [NSString stringWithFormat:@"Signed in: %@", ToNSString(signed_in_profile->gamertag)];
+  } else if (profiles.empty()) {
+    self.signedInProfileLabel.text = @"No local profile yet";
+  } else {
+    self.signedInProfileLabel.text = @"No profile signed in";
+  }
+}
+
+- (void)presentProfileCreateAlert {
+  UIAlertController* create_alert =
+      [UIAlertController alertControllerWithTitle:@"Create Profile"
+                                          message:@"Enter a gamertag (1-15 characters)."
+                                   preferredStyle:UIAlertControllerStyleAlert];
+  [create_alert addTextFieldWithConfigurationHandler:^(UITextField* text_field) {
+    text_field.placeholder = @"Gamertag";
+    text_field.autocapitalizationType = UITextAutocapitalizationTypeWords;
+    text_field.autocorrectionType = UITextAutocorrectionTypeNo;
+    text_field.clearButtonMode = UITextFieldViewModeWhileEditing;
+  }];
+  [create_alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                                   style:UIAlertActionStyleCancel
+                                                 handler:nil]];
+  [create_alert
+      addAction:
+          [UIAlertAction
+              actionWithTitle:@"Create"
+                        style:UIAlertActionStyleDefault
+                      handler:^(__unused UIAlertAction* action) {
+                        UITextField* text_field = create_alert.textFields.firstObject;
+                        NSString* raw_text = text_field.text ?: @"";
+                        NSString* trimmed = [raw_text
+                            stringByTrimmingCharactersInSet:[NSCharacterSet
+                                                                whitespaceAndNewlineCharacterSet]];
+                        if (trimmed.length == 0 || !self.appContext) {
+                          return;
+                        }
+                        uint64_t xuid =
+                            self.appContext->CreateProfile(std::string([trimmed UTF8String]));
+                        if (!xuid) {
+                          UIAlertController* failure = [UIAlertController
+                              alertControllerWithTitle:@"Profile Not Created"
+                                               message:
+                                                   @"Gamertag is invalid or could not be created."
+                                        preferredStyle:UIAlertControllerStyleAlert];
+                          [failure addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                                      style:UIAlertActionStyleCancel
+                                                                    handler:nil]];
+                          [self presentViewController:failure animated:YES completion:nil];
+                          return;
+                        }
+                        self.appContext->SignInProfile(xuid);
+                        [self refreshSignedInProfileUI];
+                        self.statusLabel.text =
+                            [NSString stringWithFormat:@"Signed in as %@.", trimmed];
+                      }]];
+  [self presentViewController:create_alert animated:YES completion:nil];
+}
+
+- (void)openProfileTapped:(UIButton*)sender {
+  if (!self.appContext) {
+    return;
+  }
+
+  auto profiles = self.appContext->ListProfiles();
+  UIAlertController* sheet =
+      [UIAlertController alertControllerWithTitle:@"Profiles"
+                                          message:@"Create a profile or sign in."
+                                   preferredStyle:UIAlertControllerStyleActionSheet];
+
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Create Profile"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(__unused UIAlertAction* action) {
+                                            [self presentProfileCreateAlert];
+                                          }]];
+
+  for (const auto& profile : profiles) {
+    NSString* gamertag = ToNSString(profile.gamertag);
+    NSString* title = gamertag;
+    if (profile.signed_in) {
+      title = [title stringByAppendingString:@" (Signed In)"];
+    }
+    uint64_t xuid = profile.xuid;
+    [sheet addAction:[UIAlertAction actionWithTitle:title
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction* action) {
+                                              if (!self.appContext) {
+                                                return;
+                                              }
+                                              if (self.appContext->SignInProfile(xuid)) {
+                                                [self refreshSignedInProfileUI];
+                                                self.statusLabel.text = [NSString
+                                                    stringWithFormat:@"Signed in as %@.", gamertag];
+                                              }
+                                            }]];
+  }
+
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                            style:UIAlertActionStyleCancel
+                                          handler:nil]];
+
+  UIPopoverPresentationController* popover = sheet.popoverPresentationController;
+  if (popover) {
+    popover.sourceView = sender ?: self.profileButton;
+    popover.sourceRect = (sender ?: self.profileButton).bounds;
+  }
+
+  [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)presentSystemSigninPromptForUserIndex:(uint32_t)user_index
+                                   usersNeeded:(uint32_t)users_needed
+                                    completion:(void (^)(BOOL success))completion {
+  if (!self.appContext) {
+    if (completion) {
+      completion(NO);
+    }
+    return;
+  }
+
+  __block BOOL finished = NO;
+  void (^finish)(BOOL) = ^(BOOL success) {
+    if (finished) {
+      return;
+    }
+    finished = YES;
+    [self refreshSignedInProfileUI];
+    if (completion) {
+      completion(success);
+    }
+  };
+
+  auto profiles = self.appContext->ListProfiles();
+  __unsafe_unretained XeniaViewController* weak_self = self;
+  void (^present_create_alert)(void) = ^{
+    XeniaViewController* strong_self = weak_self;
+    if (!strong_self || !strong_self.appContext) {
+      finish(NO);
+      return;
+    }
+
+    UIAlertController* create_alert =
+        [UIAlertController alertControllerWithTitle:@"Create Profile"
+                                            message:@"Enter a gamertag (1-15 characters)."
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [create_alert addTextFieldWithConfigurationHandler:^(UITextField* text_field) {
+      text_field.placeholder = @"Gamertag";
+      text_field.autocapitalizationType = UITextAutocapitalizationTypeWords;
+      text_field.autocorrectionType = UITextAutocorrectionTypeNo;
+      text_field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    }];
+    [create_alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                                     style:UIAlertActionStyleCancel
+                                                   handler:^(__unused UIAlertAction* action) {
+                                                     finish(NO);
+                                                   }]];
+    [create_alert
+        addAction:[UIAlertAction
+                      actionWithTitle:@"Create"
+                                style:UIAlertActionStyleDefault
+                              handler:^(__unused UIAlertAction* action) {
+                                UITextField* text_field = create_alert.textFields.firstObject;
+                                NSString* raw_text = text_field.text ?: @"";
+                                NSString* trimmed = [raw_text stringByTrimmingCharactersInSet:
+                                                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                                if (trimmed.length == 0 || !strong_self.appContext) {
+                                  finish(NO);
+                                  return;
+                                }
+                                uint64_t xuid = strong_self.appContext->CreateProfile(
+                                    std::string([trimmed UTF8String]));
+                                if (!xuid) {
+                                  finish(NO);
+                                  return;
+                                }
+                                BOOL signed_in = strong_self.appContext->SignInProfile(xuid);
+                                if (signed_in) {
+                                  strong_self.statusLabel.text =
+                                      [NSString stringWithFormat:@"Signed in as %@.", trimmed];
+                                }
+                                finish(signed_in);
+                              }]];
+
+    UIViewController* presenter = strong_self;
+    while (presenter.presentedViewController) {
+      presenter = presenter.presentedViewController;
+    }
+    [presenter presentViewController:create_alert animated:YES completion:nil];
+  };
+
+  if (profiles.empty()) {
+    present_create_alert();
+    return;
+  }
+
+  NSString* message = [NSString stringWithFormat:@"Select profile (needs %u user%@).",
+                                                 users_needed, users_needed == 1 ? @"" : @"s"];
+  UIAlertController* sheet =
+      [UIAlertController alertControllerWithTitle:@"Select Profile"
+                                          message:message
+                                   preferredStyle:UIAlertControllerStyleActionSheet];
+
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Create Profile"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(__unused UIAlertAction* action) {
+                                            present_create_alert();
+                                          }]];
+
+  for (const auto& profile : profiles) {
+    NSString* gamertag = ToNSString(profile.gamertag);
+    NSString* title = gamertag;
+    if (profile.signed_in) {
+      title = [title stringByAppendingString:@" (Signed In)"];
+    }
+    uint64_t xuid = profile.xuid;
+    [sheet addAction:[UIAlertAction actionWithTitle:title
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction* action) {
+                                              if (!self.appContext) {
+                                                finish(NO);
+                                                return;
+                                              }
+                                              BOOL signed_in = self.appContext->SignInProfile(xuid);
+                                              finish(signed_in);
+                                            }]];
+  }
+
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                            style:UIAlertActionStyleCancel
+                                          handler:^(__unused UIAlertAction* action) {
+                                            finish(NO);
+                                          }]];
+
+  UIPopoverPresentationController* popover = sheet.popoverPresentationController;
+  if (popover) {
+    popover.sourceView = self.view;
+    popover.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds),
+                                    1.0, 1.0);
+    popover.permittedArrowDirections = 0;
+  }
+
+  UIViewController* presenter = self;
+  while (presenter.presentedViewController) {
+    presenter = presenter.presentedViewController;
+  }
+  [presenter presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)presentSystemKeyboardPromptWithTitle:(NSString*)title
+                                 description:(NSString*)description
+                                 defaultText:(NSString*)default_text
+                                  completion:(void (^)(BOOL cancelled,
+                                                       NSString* text))completion {
+  UIAlertController* alert = [UIAlertController alertControllerWithTitle:title.length
+                                                                       ? title
+                                                                       : @"Input Required"
+                                                                  message:description
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+  [alert addTextFieldWithConfigurationHandler:^(UITextField* text_field) {
+    text_field.text = default_text ?: @"";
+    text_field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    text_field.autocorrectionType = UITextAutocorrectionTypeNo;
+    text_field.clearButtonMode = UITextFieldViewModeWhileEditing;
+  }];
+
+  [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                            style:UIAlertActionStyleCancel
+                                          handler:^(__unused UIAlertAction* action) {
+                                            if (completion) {
+                                              completion(YES, @"");
+                                            }
+                                          }]];
+  [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(__unused UIAlertAction* action) {
+                                            UITextField* text_field = alert.textFields.firstObject;
+                                            NSString* text = text_field.text ?: @"";
+                                            if (completion) {
+                                              completion(NO, text);
+                                            }
+                                          }]];
+
+  UIViewController* presenter = self;
+  while (presenter.presentedViewController) {
+    presenter = presenter.presentedViewController;
+  }
+  [presenter presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)updateJITStatusIndicator {
@@ -1354,9 +2053,258 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
     self.jitStatusLabel.textColor = [UIColor systemGreenColor];
   } else {
     self.jitStatusDot.backgroundColor = [UIColor systemRedColor];
-    self.jitStatusLabel.text = @"JIT Not Acquired";
+    self.jitStatusLabel.text = @"JIT Not Detected";
     self.jitStatusLabel.textColor = [UIColor systemRedColor];
   }
+}
+
+- (void)updateJITAvailabilityUI {
+  BOOL jit_ready = self.jitAcquired;
+  self.jitWarningCard.hidden = jit_ready;
+  self.openGameButton.enabled = YES;
+  self.openGameButton.alpha = 1.0;
+  if (!jit_ready && self.statusLabel.text.length == 0) {
+    self.statusLabel.text = @"JIT not detected yet. Import games or open Settings while waiting.";
+  } else if (jit_ready && [self.statusLabel.text hasPrefix:@"JIT not detected yet."]) {
+    self.statusLabel.text = @"";
+  }
+}
+
+- (std::filesystem::path)importedGamesDirectory {
+  return xe_get_ios_documents_path() / "games";
+}
+
+- (std::filesystem::path)importGameIntoLibrary:(NSURL*)source_url error:(NSError**)error {
+  std::filesystem::path source_path([source_url.path UTF8String]);
+  std::filesystem::path library_path = [self importedGamesDirectory];
+
+  std::error_code ec;
+  std::filesystem::create_directories(library_path, ec);
+  if (ec) {
+    if (error) {
+      *error = [NSError
+          errorWithDomain:@"XeniaIOSImport"
+                     code:1001
+                 userInfo:@{
+                   NSLocalizedDescriptionKey : [NSString
+                       stringWithFormat:@"Failed creating library folder: %s", ec.message().c_str()]
+                 }];
+    }
+    return {};
+  }
+
+  auto weak_source = std::filesystem::weakly_canonical(source_path, ec);
+  auto weak_library = std::filesystem::weakly_canonical(library_path, ec);
+  if (!ec && weak_source.native().rfind(weak_library.native(), 0) == 0) {
+    return weak_source;
+  }
+
+  std::filesystem::path destination = library_path / source_path.filename();
+  std::filesystem::path stem = destination.stem();
+  std::filesystem::path extension = destination.extension();
+  for (int attempt = 2; std::filesystem::exists(destination); ++attempt) {
+    destination =
+        library_path / std::filesystem::path(stem.string() + " (" + std::to_string(attempt) + ")" +
+                                             extension.string());
+  }
+
+  NSString* source_ns = source_url.path;
+  NSString* destination_ns = ToNSString(destination.string());
+  if (![[NSFileManager defaultManager] copyItemAtPath:source_ns
+                                               toPath:destination_ns
+                                                error:error]) {
+    return {};
+  }
+  return destination;
+}
+
+- (void)refreshImportedGames {
+  discovered_games_.clear();
+
+  std::vector<std::filesystem::path> scan_roots;
+  const std::filesystem::path documents_root = xe_get_ios_documents_path();
+  const std::filesystem::path library_root = [self importedGamesDirectory];
+  scan_roots.push_back(library_root);
+  if (documents_root != library_root) {
+    scan_roots.push_back(documents_root);
+  }
+
+  std::set<std::filesystem::path> seen_paths;
+  std::set<uint32_t> seen_god_title_ids;
+  for (const auto& root : scan_roots) {
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec)) {
+      continue;
+    }
+
+    std::filesystem::recursive_directory_iterator it(
+        root, std::filesystem::directory_options::skip_permission_denied, ec);
+    std::filesystem::recursive_directory_iterator end;
+    while (!ec && it != end) {
+      const auto& entry = *it;
+      const auto filename = entry.path().filename().string();
+      const auto filename_lower = ToLowerAsciiCopy(filename);
+      if (entry.is_directory(ec)) {
+        if (filename_lower == "cache" || filename_lower == "cache_host") {
+          it.disable_recursion_pending();
+        }
+      } else if (entry.is_regular_file(ec) &&
+                 (IsISOPath(entry.path()) || IsDefaultXexPath(entry.path()) ||
+                  IsLikelyGodPath(entry.path()))) {
+        const std::filesystem::path canonical_path =
+            std::filesystem::weakly_canonical(entry.path(), ec);
+        const std::filesystem::path unique_path =
+            ec ? std::filesystem::absolute(entry.path(), ec) : canonical_path;
+        ec.clear();
+
+        if (seen_paths.insert(unique_path).second) {
+          IOSDiscoveredGame game;
+          if (!BuildDiscoveredGameFromPath(unique_path, &game)) {
+            ++it;
+            continue;
+          }
+          if (IsLikelyGodPath(unique_path) && game.title_id &&
+              !seen_god_title_ids.insert(game.title_id).second) {
+            ++it;
+            continue;
+          }
+          discovered_games_.push_back(std::move(game));
+        }
+      }
+
+      ++it;
+    }
+  }
+
+  std::sort(discovered_games_.begin(), discovered_games_.end(),
+            [](const IOSDiscoveredGame& a, const IOSDiscoveredGame& b) {
+              if (a.title == b.title) {
+                return a.path.filename().string() < b.path.filename().string();
+              }
+              return a.title < b.title;
+            });
+
+  [self.importedGamesCollectionView reloadData];
+  self.importedGamesEmptyLabel.hidden = !discovered_games_.empty();
+}
+
+- (void)presentJITRequiredAlert {
+  UIAlertController* alert = [UIAlertController
+      alertControllerWithTitle:@"JIT Not Detected"
+                       message:@"Enable JIT first (StikDebug, SideJITServer, or AltJIT). "
+                               @"You can open Settings while waiting."
+                preferredStyle:UIAlertControllerStyleAlert];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Open Settings"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(__unused UIAlertAction* action) {
+                                            [self openSettingsTapped:nil];
+                                          }]];
+  [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                            style:UIAlertActionStyleCancel
+                                          handler:nil]];
+  [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)launchGameAtPath:(const std::filesystem::path&)game_path
+             displayName:(NSString*)display_name {
+  if (!self.jitAcquired) {
+    [self presentJITRequiredAlert];
+    return;
+  }
+
+  NSString* path_ns = ToNSString(game_path.string());
+  NSString* fallback_name = ToNSString(game_path.filename().string());
+  NSString* game_label = display_name.length ? display_name : fallback_name;
+  self.statusLabel.text = [NSString stringWithFormat:@"Loading: %@", game_label];
+  self.gameRunning = YES;
+
+  xe_request_landscape_orientation(self);
+  [UIView animateWithDuration:0.3
+      animations:^{
+        self.launcherOverlay.alpha = 0.0;
+      }
+      completion:^(__unused BOOL finished) {
+        self.launcherOverlay.hidden = YES;
+      }];
+
+  if (self.appContext) {
+    self.appContext->LaunchGame(std::string([path_ns UTF8String]));
+  } else {
+    self.statusLabel.text = @"Unable to launch game (app context unavailable).";
+    self.launcherOverlay.hidden = NO;
+    self.launcherOverlay.alpha = 1.0;
+  }
+}
+
+#pragma mark - UICollectionViewDataSource
+
+- (NSInteger)collectionView:(UICollectionView* __unused)collectionView
+     numberOfItemsInSection:(NSInteger)__unused section {
+  return static_cast<NSInteger>(discovered_games_.size());
+}
+
+- (UICollectionViewCell*)collectionView:(UICollectionView*)collectionView
+                 cellForItemAtIndexPath:(NSIndexPath*)indexPath {
+  XeniaGameTileCell* cell =
+      [collectionView dequeueReusableCellWithReuseIdentifier:@"ImportedGameCell"
+                                                forIndexPath:indexPath];
+  if (indexPath.item < 0 || static_cast<size_t>(indexPath.item) >= discovered_games_.size()) {
+    cell.titleLabel.text = @"";
+    cell.iconView.image = nil;
+    return cell;
+  }
+
+  const IOSDiscoveredGame& game = discovered_games_[static_cast<size_t>(indexPath.item)];
+  NSString* title =
+      game.title.empty() ? ToNSString(game.path.stem().string()) : ToNSString(game.title);
+  cell.titleLabel.text = title;
+
+  UIImage* icon = nil;
+  if (!game.icon_data.empty()) {
+    NSData* data = [NSData dataWithBytes:game.icon_data.data() length:game.icon_data.size()];
+    icon = [UIImage imageWithData:data];
+  }
+  if (!icon) {
+    icon = [UIImage imageNamed:@"128"];
+  }
+  if (!icon) {
+    icon = [UIImage systemImageNamed:@"gamecontroller.fill"];
+  }
+  cell.iconView.image = icon;
+  return cell;
+}
+
+#pragma mark - UICollectionViewDelegate
+
+- (void)collectionView:(UICollectionView*)collectionView
+    didSelectItemAtIndexPath:(NSIndexPath*)indexPath {
+  [collectionView deselectItemAtIndexPath:indexPath animated:YES];
+  if (indexPath.item < 0 || static_cast<size_t>(indexPath.item) >= discovered_games_.size()) {
+    return;
+  }
+  const IOSDiscoveredGame& game = discovered_games_[static_cast<size_t>(indexPath.item)];
+  [self launchGameAtPath:game.path displayName:ToNSString(game.title)];
+}
+
+#pragma mark - UICollectionViewDelegateFlowLayout
+
+- (CGSize)collectionView:(UICollectionView*)collectionView
+                    layout:(UICollectionViewLayout* __unused)collectionViewLayout
+    sizeForItemAtIndexPath:(NSIndexPath* __unused)indexPath {
+  CGFloat content_width = collectionView.bounds.size.width;
+  NSInteger columns = 3;
+  if (content_width >= 1100) {
+    columns = 6;
+  } else if (content_width >= 900) {
+    columns = 5;
+  } else if (content_width >= 680) {
+    columns = 4;
+  }
+  CGFloat spacing = 12.0;
+  CGFloat total_spacing = spacing * (columns - 1);
+  CGFloat tile_width = floor((content_width - total_spacing) / columns);
+  tile_width = MAX(tile_width, 96.0);
+  return CGSizeMake(tile_width, tile_width + 40.0);
 }
 
 - (void)viewDidLayoutSubviews {
@@ -1372,7 +2320,6 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   NSArray<UTType*>* contentTypes = @[
     [UTType typeWithFilenameExtension:@"iso"],
     [UTType typeWithFilenameExtension:@"xex"],
-    [UTType typeWithFilenameExtension:@"zar"],
     UTTypeData,
   ];
 
@@ -1403,67 +2350,50 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   } else {
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
   }
-  xe_request_landscape_orientation(self);
   [self presentViewController:nav animated:YES completion:nil];
 }
 
 #pragma mark - UIDocumentPickerDelegate
 
-- (void)documentPicker:(UIDocumentPickerViewController*)controller
+- (void)documentPicker:(UIDocumentPickerViewController* __unused)controller
     didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
   if (urls.count == 0) return;
 
   NSURL* url = urls[0];
+  BOOL access_granted = [url startAccessingSecurityScopedResource];
+  XELOGI("iOS: User selected game file: {} (security-scoped: {})", [url.path UTF8String],
+         access_granted ? "yes" : "no");
 
-  // Stop any previous security-scoped access before starting a new one.
-  if (self.securityScopedURL) {
-    [self.securityScopedURL stopAccessingSecurityScopedResource];
-    self.securityScopedURL = nil;
+  NSError* import_error = nil;
+  std::filesystem::path imported_path = [self importGameIntoLibrary:url error:&import_error];
+  if (access_granted) {
+    [url stopAccessingSecurityScopedResource];
   }
 
-  // Start security-scoped access for files outside the sandbox.
-  BOOL accessGranted = [url startAccessingSecurityScopedResource];
-  if (accessGranted) {
-    self.securityScopedURL = url;
+  if (imported_path.empty()) {
+    NSString* message = import_error.localizedDescription ?: @"Failed to import selected game.";
+    UIAlertController* alert =
+        [UIAlertController alertControllerWithTitle:@"Import Failed"
+                                            message:message
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+    return;
   }
 
-  NSString* path = url.path;
-  XELOGI("iOS: User selected game file: {} (security-scoped: {})", [path UTF8String],
-         accessGranted ? "yes" : "no");
-
-  // Save a bookmark for potential future relaunch.
-  NSError* bookmarkError = nil;
-  NSData* bookmark = [url bookmarkDataWithOptions:0
-                   includingResourceValuesForKeys:nil
-                                    relativeToURL:nil
-                                            error:&bookmarkError];
-  if (bookmark) {
-    [[NSUserDefaults standardUserDefaults] setObject:bookmark forKey:@"lastGameBookmark"];
-  }
-
-  // Update UI to show loading state.
-  self.statusLabel.text =
-      [NSString stringWithFormat:@"Loading: %@", url.lastPathComponent];
-  self.openGameButton.enabled = NO;
-
-  // Hide the launcher overlay with animation.
-  [UIView animateWithDuration:0.3
-      animations:^{
-        self.launcherOverlay.alpha = 0.0;
-      }
-      completion:^(BOOL finished) {
-        self.launcherOverlay.hidden = YES;
-      }];
-
-  // Launch the game through the app context callback.
-  if (self.appContext) {
-    std::string game_path = std::string([path UTF8String]);
-    self.appContext->LaunchGame(game_path);
+  [self refreshImportedGames];
+  NSString* imported_name = ToNSString(imported_path.filename().string());
+  if (self.jitAcquired) {
+    [self launchGameAtPath:imported_path displayName:imported_name];
+  } else {
+    self.statusLabel.text =
+        [NSString stringWithFormat:@"Imported %@. Waiting for JIT.", imported_name];
   }
 }
 
-- (void)documentPickerWasCancelled:
-    (UIDocumentPickerViewController*)controller {
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController* __unused)controller {
   XELOGI("iOS: Document picker cancelled");
 }
 
@@ -1474,11 +2404,17 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-  return UIInterfaceOrientationMaskLandscape;
+  if (self.launcherOverlay.hidden) {
+    return UIInterfaceOrientationMaskLandscape;
+  }
+  if (!self.launcherLandscapeUnlocked) {
+    return UIInterfaceOrientationMaskPortrait;
+  }
+  return UIInterfaceOrientationMaskAllButUpsideDown;
 }
 
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
-  return UIInterfaceOrientationLandscapeLeft;
+  return UIInterfaceOrientationPortrait;
 }
 
 - (BOOL)shouldAutorotate {
@@ -1496,10 +2432,15 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 #pragma mark - Public API
 
 - (void)showLauncherOverlay {
+  self.gameRunning = NO;
+  [self hideInGameMenuOverlay];
   self.launcherOverlay.hidden = NO;
-  self.openGameButton.enabled = YES;
   self.statusLabel.text = @"";
+  [self refreshImportedGames];
+  [self refreshSignedInProfileUI];
   [self updateJITStatusIndicator];
+  [self updateJITAvailabilityUI];
+  xe_request_portrait_orientation(self);
   [UIView animateWithDuration:0.3
                    animations:^{
                      self.launcherOverlay.alpha = 1.0;
@@ -1543,7 +2484,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   XeniaViewController* vc = [[XeniaViewController alloc] init];
   self.window.rootViewController = vc;
   [self.window makeKeyAndVisible];
-  xe_request_landscape_orientation(vc);
+  xe_request_portrait_orientation(vc);
 
   // Force layout so the Metal view is created.
   [vc.view layoutIfNeeded];
@@ -1553,6 +2494,58 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   app_context_->set_metal_view(vc.metalView);
   app_context_->set_view_controller(vc);
   vc.appContext = app_context_.get();
+  app_context_->set_signin_ui_prompt_callback(
+      [vc](uint32_t user_index, uint32_t users_needed) {
+        if ([NSThread isMainThread]) {
+          return false;
+        }
+        __block BOOL success = NO;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+          [vc presentSystemSigninPromptForUserIndex:user_index
+                                        usersNeeded:users_needed
+                                         completion:^(BOOL prompt_success) {
+                                           success = prompt_success;
+                                           dispatch_semaphore_signal(sem);
+                                         }];
+        });
+        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        return success ? true : false;
+      });
+  app_context_->set_keyboard_prompt_callback(
+      [vc](const std::string& title, const std::string& description,
+           const std::string& default_text, std::string* text_out,
+           bool* cancelled_out) {
+        if ([NSThread isMainThread]) {
+          if (cancelled_out) {
+            *cancelled_out = true;
+          }
+          return false;
+        }
+        __block BOOL cancelled = YES;
+        __block NSString* typed_text = @"";
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+          [vc presentSystemKeyboardPromptWithTitle:ToNSString(title)
+                                       description:ToNSString(description)
+                                       defaultText:ToNSString(default_text)
+                                        completion:^(BOOL prompt_cancelled,
+                                                     NSString* prompt_text) {
+                                          cancelled = prompt_cancelled;
+                                          typed_text = prompt_text ?: @"";
+                                          dispatch_semaphore_signal(sem);
+                                        }];
+        });
+        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        if (text_out) {
+          *text_out = std::string([typed_text UTF8String]);
+        }
+        if (cancelled_out) {
+          *cancelled_out = cancelled ? true : false;
+        }
+        return true;
+      });
+  app_context_->set_game_exited_callback([vc]() { [vc showLauncherOverlay]; });
 
   XELOGI("iOS: Metal view ready ({}x{})",
          static_cast<uint32_t>(vc.metalView.bounds.size.width *
@@ -1572,24 +2565,23 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
     return NO;
   }
 
+  [vc refreshSignedInProfileUI];
+
   XELOGI("iOS: Application launched successfully");
   return YES;
 }
 
 - (UIInterfaceOrientationMask)application:(UIApplication*)application
     supportedInterfaceOrientationsForWindow:(UIWindow*)window {
-  return UIInterfaceOrientationMaskLandscape;
+  UIViewController* root = window.rootViewController;
+  if (root) {
+    return [root supportedInterfaceOrientations];
+  }
+  return UIInterfaceOrientationMaskPortrait;
 }
 
 - (void)applicationWillTerminate:(UIApplication*)application {
   XELOGI("iOS lifecycle: applicationWillTerminate");
-  // Release security-scoped file access.
-  XeniaViewController* vc = (XeniaViewController*)self.window.rootViewController;
-  if (vc.securityScopedURL) {
-    [vc.securityScopedURL stopAccessingSecurityScopedResource];
-    vc.securityScopedURL = nil;
-  }
-
   if (app_) {
     app_->InvokeOnDestroy();
     app_.reset();
