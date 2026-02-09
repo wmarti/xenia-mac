@@ -238,6 +238,21 @@ void EmulatorAppIOS::EmulatorThread(
     return;
   }
 
+  auto* graphics_system = emulator_->graphics_system();
+  auto* presenter = graphics_system ? graphics_system->presenter() : nullptr;
+  if (!presenter) {
+    XELOGE("iOS: Graphics presenter is not available after setup");
+    return;
+  }
+  if (!app_context().CallInUIThreadSynchronous([this, presenter]() {
+        if (window_) {
+          window_->SetPresenter(presenter);
+        }
+      })) {
+    XELOGE("iOS: Failed to attach presenter to display window");
+    return;
+  }
+
   emulator_initialized_ = true;
   XELOGI("iOS: Emulator setup complete");
 
