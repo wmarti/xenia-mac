@@ -62,7 +62,6 @@
 [submodule "third_party/FFmpeg"]
 	path = third_party/FFmpeg
 	url = https://github.com/wmarti/FFmpeg.git
-	branch = macos-unified
 [submodule "third_party/premake-androidndk"]
 	path = third_party/premake-androidndk
 	url = https://github.com/Triang3l/premake-androidndk.git
