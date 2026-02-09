@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/metal/msl_shader.h"
 
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
@@ -190,14 +191,56 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
   //         This handles the case where SPIR-V sampler bindings exceed 15
   //         (which would violate Metal's 16-sampler-per-stage limit).
   auto resources = compiler.get_shader_resources();
-  uint32_t sampler_msl_index = 0;
-  std::ostringstream sampler_remap_log;
-  uint32_t sampler_remap_count = 0;
+  struct SamplerSpvBinding {
+    uint32_t set;
+    uint32_t binding;
+  };
+  std::vector<SamplerSpvBinding> sampler_spv_bindings;
+  sampler_spv_bindings.reserve(resources.separate_samplers.size());
   for (const auto& samp : resources.separate_samplers) {
     uint32_t set =
         compiler.get_decoration(samp.id, spv::DecorationDescriptorSet);
     uint32_t spv_binding =
         compiler.get_decoration(samp.id, spv::DecorationBinding);
+    sampler_spv_bindings.push_back({set, spv_binding});
+  }
+  bool sampler_order_was_unsorted = false;
+  for (size_t i = 1; i < sampler_spv_bindings.size(); ++i) {
+    const auto& prev = sampler_spv_bindings[i - 1];
+    const auto& curr = sampler_spv_bindings[i];
+    if (curr.set < prev.set ||
+        (curr.set == prev.set && curr.binding < prev.binding)) {
+      sampler_order_was_unsorted = true;
+      break;
+    }
+  }
+  std::sort(sampler_spv_bindings.begin(), sampler_spv_bindings.end(),
+            [](const SamplerSpvBinding& a, const SamplerSpvBinding& b) {
+              if (a.set != b.set) {
+                return a.set < b.set;
+              }
+              return a.binding < b.binding;
+            });
+  if (sampler_order_was_unsorted) {
+    XELOGD(
+        "MslShader: Reordered sampler SPIR-V bindings by set/binding for "
+        "stable Metal remap shader={:016X} stage={}",
+        shader_hash, GetExecutionModelName(stage));
+  }
+  uint32_t sampler_msl_index = 0;
+  std::ostringstream sampler_remap_log;
+  uint32_t sampler_remap_count = 0;
+  for (size_t i = 0; i < sampler_spv_bindings.size(); ++i) {
+    uint32_t set = sampler_spv_bindings[i].set;
+    uint32_t spv_binding = sampler_spv_bindings[i].binding;
+    if (i > 0 && set == sampler_spv_bindings[i - 1].set &&
+        spv_binding == sampler_spv_bindings[i - 1].binding) {
+      XELOGW(
+          "MslShader: Duplicate sampler SPIR-V binding at set={} binding={} "
+          "shader={:016X}",
+          set, spv_binding, shader_hash);
+      continue;
+    }
     if (sampler_msl_index >= 16) {
       XELOGW(
           "MslShader: Too many samplers ({} >= 16), sampler at set={} "
