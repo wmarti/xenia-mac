@@ -63,6 +63,7 @@ bool SDLAudioDriver::Initialize() {
     return false;
   }
   if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
+    XELOGE("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}", SDL_GetError());
     return false;
   }
   sdl_initialized_ = true;
@@ -83,7 +84,11 @@ bool SDLAudioDriver::Initialize() {
     sdl_device_id_ = SDL_OpenAudioDevice(nullptr, 0, &desired_spec,
                                          &obtained_spec, allowed_change);
     if (sdl_device_id_ <= 0) {
-      XELOGE("SDL_OpenAudioDevice() failed.");
+      XELOGE(
+          "SDL_OpenAudioDevice failed: {} (requested freq={}, channels={}, "
+          "samples={}, allowed_change=0x{:X})",
+          SDL_GetError(), desired_spec.freq, desired_spec.channels,
+          desired_spec.samples, static_cast<uint32_t>(allowed_change));
       return false;
     }
     if (obtained_spec.channels == 2 || obtained_spec.channels == 6) {
@@ -95,7 +100,8 @@ bool SDLAudioDriver::Initialize() {
     sdl_device_id_ = -1;
   }
   if (sdl_device_id_ <= 0) {
-    XELOGE("Failed to get a compatible SDL Audio Device.");
+    XELOGE("Failed to get a compatible SDL Audio Device. Last error: {}",
+           SDL_GetError());
     return false;
   }
   sdl_device_channels_ = obtained_spec.channels;

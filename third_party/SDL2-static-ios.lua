@@ -20,7 +20,9 @@ project("SDL2")
   })
   buildoptions({
     "-fobjc-arc",
-    "-include", "SDL_config_iphoneos.h",
+    -- Keep SDL on the dummy-only path for Xenia by undefining
+    -- backends enabled by SDL_config_iphoneos.h.
+    "-include", "SDL_config_xenia_ios.h",
   })
   includedirs({
     "SDL2/include",
@@ -211,6 +213,14 @@ project("SDL2")
   files({
     "SDL2/src/timer/SDL_timer.c",
     "SDL2/src/timer/unix/SDL_systimer.c",
+  })
+
+  -- Video (dummy only - Xenia has its own UIKit/Metal window management).
+  -- Keep SDL render core available because SDL_video.c references
+  -- SDL_GetRenderer/SDL_DestroyRendererWithoutFreeing even with rendering
+  -- disabled.
+  files({
+    "SDL2/src/render/SDL_render.c",
   })
 
   -- Video (dummy only - Xenia has its own UIKit/Metal window management).
