@@ -9,6 +9,7 @@
 
 #include "xenia/cpu/thread_state.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
@@ -22,9 +23,11 @@ namespace xe {
 namespace cpu {
 
 thread_local ThreadState* thread_state_ = nullptr;
+std::atomic<bool> g_logged_context_fallback{false};
 
 static void* AllocateContext() {
   size_t granularity = xe::memory::allocation_granularity();
+  size_t allocation_size = granularity + sizeof(ppc::PPCContext);
   for (unsigned pos32 = 0x40; pos32 < 8192; ++pos32) {
     /*
         we want our register which points to the context to have 0xE0000000 in
@@ -41,9 +44,9 @@ static void* AllocateContext() {
     uintptr_t context_pre =
         ((static_cast<uint64_t>(pos32) << 32) | 0xE0000000) - granularity;
 
-    void* p = memory::AllocFixed(
-        (void*)context_pre, granularity + sizeof(ppc::PPCContext),
-        memory::AllocationType::kReserveCommit, memory::PageAccess::kReadWrite);
+    void* p = memory::AllocFixed((void*)context_pre, allocation_size,
+                                 memory::AllocationType::kReserveCommit,
+                                 memory::PageAccess::kReadWrite);
     if (p) {
       return reinterpret_cast<char*>(p) +
              granularity;  // now we have a ctx ptr with the e0 constant in low,
@@ -51,14 +54,27 @@ static void* AllocateContext() {
     }
   }
 
+  void* p = memory::AllocFixed(nullptr, allocation_size,
+                               memory::AllocationType::kReserveCommit,
+                               memory::PageAccess::kReadWrite);
+  if (p) {
+    bool expected = false;
+    if (g_logged_context_fallback.compare_exchange_strong(
+            expected, true, std::memory_order_relaxed)) {
+      XELOGW("AllocateContext: using fallback PPC context mapping");
+    }
+    return reinterpret_cast<char*>(p) + granularity;
+  }
+
   assert_always("giving up on allocating context, likely leaking contexts");
   return nullptr;
 }
 
 static void FreeContext(void* ctx) {
-  char* true_start_of_ctx = &reinterpret_cast<char*>(
-      ctx)[-static_cast<ptrdiff_t>(xe::memory::allocation_granularity())];
-  memory::DeallocFixed(true_start_of_ctx, 0,
+  size_t granularity = xe::memory::allocation_granularity();
+  char* true_start_of_ctx =
+      &reinterpret_cast<char*>(ctx)[-static_cast<ptrdiff_t>(granularity)];
+  memory::DeallocFixed(true_start_of_ctx, granularity + sizeof(ppc::PPCContext),
                        memory::DeallocationType::kRelease);
 }
 
