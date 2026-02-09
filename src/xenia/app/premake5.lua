@@ -238,3 +238,25 @@ project("xenia-app")
       '{MKDIR} ' .. assets_font_dst,
       '{COPY} ' .. assets_font_src .. '/* ' .. assets_font_dst
     }
+
+  -- macOS app bundle resources and code signing metadata.
+  filter("system:macosx")
+    files({
+      "Info.plist",
+      project_root.."/xenia.entitlements",
+      project_root.."/assets/icon/xenia.icns",
+    })
+    xcodebuildsettings({
+      ["INFOPLIST_FILE"] = path.getabsolute("Info.plist"),
+      ["CODE_SIGN_ENTITLEMENTS"] =
+          path.getabsolute(path.join(project_root, "xenia.entitlements")),
+      ["MACOSX_DEPLOYMENT_TARGET"] = "15.0",
+      ["PRODUCT_NAME"] = "Xenia-Edge",
+      ["EXECUTABLE_NAME"] = "xenia_edge",
+      ["PRODUCT_BUNDLE_IDENTIFIER"] = "com.xenia.xenia-edge",
+      ["CODE_SIGN_STYLE"] = "Automatic",
+      ["CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION"] = "YES",
+    })
+  filter({"system:macosx", "files:**.icns"})
+    buildaction("Resources")
+  filter({})
