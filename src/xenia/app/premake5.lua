@@ -239,8 +239,21 @@ project("xenia-app")
       ["IPHONEOS_DEPLOYMENT_TARGET"] = "17.0",
       ["SDKROOT"] = "iphoneos",
       ["TARGETED_DEVICE_FAMILY"] = "1,2",
+      ["PRODUCT_NAME"] = "Xenia-Edge",
+      ["EXECUTABLE_NAME"] = "xenia_edge",
       ["PRODUCT_BUNDLE_IDENTIFIER"] = "com.xenia.xenia-edge-ios",
       ["CODE_SIGN_STYLE"] = "Automatic",
+    })
+    local ios_app_bundle = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}"
+    local ios_icon_src =
+        path.getabsolute(path.join(project_root, "assets", "icon"))
+    local ios_icon_extra_src =
+        path.getabsolute(path.join(project_root, "assets", "icon", "extra"))
+    postbuildcommands({
+      -- Copy iOS icon PNGs from the same icon source folder used by macOS.
+      'find "' .. ios_icon_src .. '" "' .. ios_icon_extra_src
+          .. '" -maxdepth 1 -type f -name "*.png" -exec cp -f {} "'
+          .. ios_app_bundle .. '/" \\;',
     })
   filter({})
 
