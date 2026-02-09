@@ -10,6 +10,7 @@
 #include "xenia/gpu/metal/msl_shader.h"
 
 #include <cstring>
+#include <sstream>
 #include <stdexcept>
 
 #include "spirv_msl.hpp"
@@ -84,8 +85,26 @@ constexpr uint32_t kTextureBase = 0;
 constexpr uint32_t kSamplerBase = 0;
 }  // namespace MslBindings
 
+static const char* GetExecutionModelName(spv::ExecutionModel stage) {
+  switch (stage) {
+    case spv::ExecutionModelVertex:
+      return "vertex";
+    case spv::ExecutionModelFragment:
+      return "fragment";
+    case spv::ExecutionModelTessellationControl:
+      return "tess_control";
+    case spv::ExecutionModelTessellationEvaluation:
+      return "tess_evaluation";
+    case spv::ExecutionModelGLCompute:
+      return "compute";
+    default:
+      return "other";
+  }
+}
+
 static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
-                                spv::ExecutionModel stage) {
+                                spv::ExecutionModel stage,
+                                uint64_t shader_hash) {
   using MSLBinding = spirv_cross::MSLResourceBinding;
 
   // Set 0: Shared memory (storage buffer at binding 0).
@@ -172,6 +191,8 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
   //         (which would violate Metal's 16-sampler-per-stage limit).
   auto resources = compiler.get_shader_resources();
   uint32_t sampler_msl_index = 0;
+  std::ostringstream sampler_remap_log;
+  uint32_t sampler_remap_count = 0;
   for (const auto& samp : resources.separate_samplers) {
     uint32_t set =
         compiler.get_decoration(samp.id, spv::DecorationDescriptorSet);
@@ -196,7 +217,19 @@ static void AddResourceBindings(spirv_cross::CompilerMSL& compiler,
     binding.msl_texture = MslTextureIndex::kBase;
     binding.msl_sampler = MslBindings::kSamplerBase + sampler_msl_index;
     compiler.add_msl_resource_binding(binding);
+    sampler_remap_log << "[set=" << set << ",binding=" << spv_binding
+                      << "->msl_sampler=" << sampler_msl_index << "] ";
     sampler_msl_index++;
+    sampler_remap_count++;
+  }
+  if (sampler_remap_count) {
+    XELOGD(
+        "MslShader: Sampler remap table shader={:016X} stage={} count={} {}",
+        shader_hash, GetExecutionModelName(stage), sampler_remap_count,
+        sampler_remap_log.str());
+  } else {
+    XELOGD("MslShader: Sampler remap table shader={:016X} stage={} count=0",
+           shader_hash, GetExecutionModelName(stage));
   }
 }
 
@@ -269,14 +302,39 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
                             : spv::ExecutionModelFragment;
     }
   }
-  AddResourceBindings(compiler, execution_model);
+  AddResourceBindings(compiler, execution_model, shader().ucode_data_hash());
 
   // Validate resource counts against Metal limits before compilation.
   {
     auto resources = compiler.get_shader_resources();
+    bool expects_tessellation_constants = false;
+    for (const auto& uniform_buffer : resources.uniform_buffers) {
+      uint32_t set = compiler.get_decoration(
+          uniform_buffer.id, spv::DecorationDescriptorSet);
+      uint32_t binding =
+          compiler.get_decoration(uniform_buffer.id, spv::DecorationBinding);
+      if (set == SpirvSets::kConstants && binding == SpirvCbv::kTessellation) {
+        expects_tessellation_constants = true;
+        break;
+      }
+    }
     size_t texture_count =
         resources.sampled_images.size() + resources.separate_images.size();
     size_t sampler_count = resources.separate_samplers.size();
+    XELOGD(
+        "MslShader: Resource summary shader={:016X} stage={} textures={} "
+        "samplers={} uniform_buffers={} tessellation_cbv_expected={}",
+        shader().ucode_data_hash(), GetExecutionModelName(execution_model),
+        texture_count, sampler_count, resources.uniform_buffers.size(),
+        expects_tessellation_constants ? 1 : 0);
+    if (expects_tessellation_constants) {
+      XELOGW(
+          "MslShader: Shader {:016X} stage={} declares set={},binding={} "
+          "tessellation constants (msl_buffer={})",
+          shader().ucode_data_hash(), GetExecutionModelName(execution_model),
+          SpirvSets::kConstants, SpirvCbv::kTessellation,
+          MslBindings::kTessellationConstants);
+    }
     if (texture_count > MslTextureIndex::kMaxPerStage) {
       XELOGE(
           "MslShader: Shader uses {} textures, exceeding Metal's {}-per-stage "

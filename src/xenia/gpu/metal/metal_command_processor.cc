@@ -7789,6 +7789,39 @@ MetalCommandProcessor::GetCurrentSpirvPixelShaderModification(
       xenos::BlendFactor::kOne;
   modification.pixel.rt0_blend_a_factor_for_premult = xenos::BlendFactor::kOne;
 
+  bool rt0_minmax_premult_rgb_expected = false;
+  bool rt0_minmax_premult_a_expected = false;
+  if (shader.writes_color_target(0)) {
+    auto blend_control = regs.Get<reg::RB_BLENDCONTROL>(
+        reg::RB_BLENDCONTROL::rt_register_indices[0]);
+    rt0_minmax_premult_rgb_expected =
+        (blend_control.color_comb_fcn == xenos::BlendOp::kMin ||
+         blend_control.color_comb_fcn == xenos::BlendOp::kMax) &&
+        blend_control.color_srcblend == xenos::BlendFactor::kSrcAlpha &&
+        blend_control.color_destblend == xenos::BlendFactor::kOne;
+    rt0_minmax_premult_a_expected =
+        (blend_control.alpha_comb_fcn == xenos::BlendOp::kMin ||
+         blend_control.alpha_comb_fcn == xenos::BlendOp::kMax) &&
+        blend_control.alpha_srcblend == xenos::BlendFactor::kSrcAlpha &&
+        blend_control.alpha_destblend == xenos::BlendFactor::kOne;
+  }
+  if (rt0_minmax_premult_rgb_expected || rt0_minmax_premult_a_expected) {
+    XELOGD(
+        "SPIRV-Cross PS mod diagnostic: shader={:016X} expected_premult(rgb={},"
+        "a={}) selected(rgb={},a={})",
+        shader.ucode_data_hash(), rt0_minmax_premult_rgb_expected ? 1 : 0,
+        rt0_minmax_premult_a_expected ? 1 : 0,
+        uint32_t(modification.pixel.rt0_blend_rgb_factor_for_premult),
+        uint32_t(modification.pixel.rt0_blend_a_factor_for_premult));
+    static bool minmax_premult_gap_logged = false;
+    if (!minmax_premult_gap_logged) {
+      minmax_premult_gap_logged = true;
+      XELOGW(
+          "SPIRV-Cross: MIN/MAX RT0 blend requires premultiply in this draw "
+          "path, but factors are currently left at kOne");
+    }
+  }
+
   // Extract 1 bit per RT from the 4-bits-per-RT normalized_color_mask.
   // Without this, color_targets_used defaults to 0 and the SPIR-V translator
   // declares NO fragment color outputs, producing black/transparent rendering.
