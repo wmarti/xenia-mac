@@ -69,6 +69,11 @@ struct ExportTag {
 typedef void (*xe_kernel_export_shim_fn)(void*, void*);
 
 typedef void (*ExportTrampoline)(ppc::PPCContext* ppc_context);
+#if XE_ARCH_AMD64
+// Preserve legacy packed layout on x64, but avoid forced unaligned pointer
+// fields on ARM64 where this can fault.
+#pragma pack(push, 1)
+#endif
 class Export {
  public:
   enum class Type {
@@ -112,6 +117,9 @@ class Export {
                                                  : Type::kFunction;
   }
 };
+#if XE_ARCH_AMD64
+#pragma pack(pop)
+#endif
 class ExportResolver {
  public:
   class Table {

@@ -133,6 +133,11 @@ enum class PPCOpcodeField : uint32_t {
   kTO,
   kLEV,
 };
+#if XE_ARCH_AMD64
+// Preserve legacy packed layout on x64, but avoid forced unaligned function
+// pointers on ARM64.
+#pragma pack(push, 1)
+#endif
 struct PPCOpcodeDisasmInfo {
   PPCOpcodeGroup group;
   PPCOpcodeFormat format;
@@ -143,6 +148,9 @@ struct PPCOpcodeDisasmInfo {
   // std::vector<PPCOpcodeField> writes;
   InstrDisasmFn disasm;
 };
+#if XE_ARCH_AMD64
+#pragma pack(pop)
+#endif
 PPCOpcode LookupOpcode(uint32_t code);
 
 const PPCOpcodeInfo& GetOpcodeInfo(PPCOpcode opcode);
