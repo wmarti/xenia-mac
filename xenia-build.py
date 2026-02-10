@@ -13,7 +13,7 @@ from argparse import ArgumentParser
 from glob import glob
 from json import loads as jsonloads
 import os
-from shutil import rmtree
+from shutil import rmtree, which
 import subprocess
 import sys
 import stat
@@ -229,6 +229,18 @@ def setup_qt():
             print_warning(f"QT_DIR is set to {existing_qt_dir} but directory does not exist")
         return False
 
+    # Prefer common system package-manager Qt roots before /opt/Qt tree probing.
+    if sys.platform == "darwin":
+        brew_qt_candidates = [
+            "/opt/homebrew/opt/qt",
+            "/usr/local/opt/qt",
+        ]
+        for qt_dir in brew_qt_candidates:
+            if os.path.exists(qt_dir):
+                os.environ["QT_DIR"] = qt_dir
+                print(f"Found Qt at {qt_dir}")
+                return True
+
     # Determine Qt base directory based on platform
     if sys.platform == "win32":
         qt_base = "C:\\Qt"
@@ -352,16 +364,29 @@ def generate_moc_files():
     if not qt_dir:
         return True  # Qt not available, skip MOC generation
 
-    # Find moc executable
+    # Find moc executable.
     if sys.platform == "win32":
-        moc_path = os.path.join(qt_dir, "bin", "moc.exe")
+        moc_path_candidates = [
+            os.path.join(qt_dir, "bin", "moc.exe"),
+        ]
     else:
-        moc_path = os.path.join(qt_dir, "libexec", "moc")
-        if not os.path.exists(moc_path):
-            moc_path = os.path.join(qt_dir, "bin", "moc")
+        moc_path_candidates = [
+            os.path.join(qt_dir, "libexec", "moc"),
+            os.path.join(qt_dir, "bin", "moc"),
+            os.path.join(qt_dir, "share", "qt", "libexec", "moc"),
+        ]
+        # Homebrew often ships moc in qtbase rather than qt.
+        if qt_dir.startswith("/opt/homebrew/opt/qt"):
+            moc_path_candidates.append("/opt/homebrew/opt/qtbase/share/qt/libexec/moc")
+        for bin_name in ["moc", "moc-qt6", "moc6"]:
+            moc_bin = which(bin_name)
+            if moc_bin:
+                moc_path_candidates.append(moc_bin)
 
-    if not os.path.exists(moc_path):
-        print_warning(f"moc not found at {moc_path}")
+    moc_path = next((path for path in moc_path_candidates if os.path.exists(path)), None)
+
+    if not moc_path:
+        print_warning(f"moc not found (searched: {', '.join(moc_path_candidates)})")
         return False
 
     # Find all Qt headers with Q_OBJECT
@@ -960,12 +985,18 @@ def get_build_bin_path(args):
       A full path for the bin folder.
     """
     if sys.platform == "darwin":
-        platform = "macosx"
+        machine = os.uname().machine.lower()
+        platform = "Mac-ARM64" if machine in ("arm64", "aarch64") else "Mac-x86_64"
     elif sys.platform == "win32":
-        platform = "windows"
+        machine = (os.environ.get("PROCESSOR_ARCHITEW6432")
+                   or os.environ.get("PROCESSOR_ARCHITECTURE")
+                   or "").upper()
+        platform = "Windows-ARM64" if "ARM64" in machine else "Windows-x86_64"
     else:
-        platform = "linux"
-    return os.path.join(self_path, "build", "bin", platform.capitalize(), args["config"].capitalize())
+        machine = os.uname().machine.lower()
+        platform = "Linux-ARM64" if machine in ("arm64", "aarch64") else "Linux-x86_64"
+    return os.path.join(self_path, "build", "bin", platform,
+                        args["config"].capitalize())
 
 
 def run_windeployqt(bin_path, config):
@@ -1313,14 +1344,24 @@ class BaseBuildCommand(Command):
                 print_error("Visual Studio is not installed.")
                 result = 1
             else:
+                machine = (os.environ.get("PROCESSOR_ARCHITEW6432")
+                           or os.environ.get("PROCESSOR_ARCHITECTURE")
+                           or "").upper()
+                if "ARM64" in machine:
+                    premake_platform = "Windows-ARM64"
+                    msbuild_platform = "ARM64"
+                else:
+                    premake_platform = "Windows-x86_64"
+                    msbuild_platform = "x64"
+
                 targets = None
                 if args["target"]:
                     # Build each project file directly to avoid MSBuild trying to
                     # run the target on every project in the solution
                     result = 0
                     # Convert config name to match project configuration names
-                    # e.g., "debug" -> "Debug Windows"
-                    config_name = f"{args['config'].capitalize()} Windows"
+                    # e.g., "debug" -> "Debug Windows-x86_64"
+                    config_name = f"{args['config'].capitalize()} {premake_platform}"
                     for target in args["target"]:
                         project_file = f"build/{target}.vcxproj"
                         if not os.path.exists(project_file):
@@ -1337,7 +1378,7 @@ class BaseBuildCommand(Command):
                             "/v:m",
                             target_arg,
                             f"/p:Configuration={config_name}",
-                            "/p:Platform=x64",
+                            f"/p:Platform={msbuild_platform}",
                             ] + pass_args)
                         if result != 0:
                             break
@@ -1439,48 +1480,34 @@ class BuildShadersCommand(Command):
             """,
             *args, **kwargs)
         self.parser.add_argument(
-            "--target", action="append", choices=["dxbc", "spirv"], default=[],
+            "--target", action="append",
+            choices=["dxbc", "spirv", "metal"], default=[],
             help="Builds only the given target(s).")
+        self.parser.add_argument(
+            "--config", choices=["debug", "release"], default="release",
+            type=str.lower,
+            help="Build configuration. Release mode omits shader debug info.")
 
     def execute(self, args, pass_args, cwd):
-        return build_shaders(args["target"])
+        return build_shaders(args["target"], args["config"])
 
 
-def build_shaders(targets=None):
+def build_shaders(targets=None, config="release"):
     """Builds shader bytecode. Called by BuildShadersCommand and BuildCommand.
 
     Args:
-        targets: List of targets ("dxbc", "spirv"), or None/empty for all.
+        targets: List of targets ("dxbc", "spirv", "metal"), or None/empty for all.
+        config: Build configuration ("debug" or "release").
 
     Returns:
         0 on success, non-zero on error.
     """
-    # Check if shaders need rebuilding by comparing source vs generated timestamps
+    # Check if shaders need rebuilding by comparing source vs generated timestamps.
     gpu_shaders = "src/xenia/gpu/shaders"
     ui_shaders = "src/xenia/ui/shaders"
-    # DXBC directories only on Windows, SPIR-V everywhere
-    bytecode_dirs = [
-        "src/xenia/gpu/shaders/bytecode/vulkan_spirv",
-        "src/xenia/ui/shaders/bytecode/vulkan_spirv",
-    ]
-    if sys.platform == "win32":
-        bytecode_dirs.extend([
-            "src/xenia/gpu/shaders/bytecode/d3d12_5_1",
-            "src/xenia/ui/shaders/bytecode/d3d12_5_1",
-        ])
-
-    newest_source = max(get_dir_newest_mtime(gpu_shaders),
-                       get_dir_newest_mtime(ui_shaders))
-    oldest_generated = min((get_dir_oldest_mtime(d) for d in bytecode_dirs),
-                          default=0)
-
-    # If oldest_generated is inf, bytecode doesn't exist - need to generate
-    if oldest_generated != float('inf') and newest_source <= oldest_generated:
-        print("Shaders are up-to-date, skipping generation.")
-        return 0
-
-    # Clean old bytecode before regenerating to remove stale files from deleted sources
-    clean_shader_bytecode()
+    if targets is None:
+        targets = []
+    all_targets = len(targets) == 0
 
     src_paths = [os.path.join(root, name)
                  for root, dirs, files in os.walk("src")
@@ -1488,9 +1515,68 @@ def build_shaders(targets=None):
                  if (name.endswith(".glsl") or
                      name.endswith(".hlsl") or
                      name.endswith(".xesl"))]
-    if targets is None:
-        targets = []
-    all_targets = len(targets) == 0
+
+    def has_generated_files(directory):
+        if not os.path.isdir(directory):
+            return False
+        for root, _, files in os.walk(directory):
+            if any(name.endswith(".h") for name in files):
+                return True
+        return False
+
+    def expected_metal_headers(paths):
+        headers = []
+        for src_path in paths:
+            src_name = os.path.basename(src_path)
+            if (not src_name.endswith(".xesl") or len(src_name) <= 8 or
+                    src_name[-8] != "."):
+                continue
+            if "fxaa" in src_name or "ffx_" in src_name:
+                continue
+            identifier = src_name[:-5].replace(".", "_")
+            stage = identifier[-2:]
+            if stage not in ["cs", "ps", "vs"]:
+                continue
+            metal_dir_path = os.path.join(os.path.dirname(src_path),
+                                          "bytecode/metal")
+            headers.append(os.path.join(metal_dir_path, f"{identifier}.h"))
+        return headers
+
+    bytecode_dirs = []
+    if (all_targets or "spirv" in targets) and sys.platform != "darwin":
+        bytecode_dirs.extend([
+            "src/xenia/gpu/shaders/bytecode/vulkan_spirv",
+            "src/xenia/ui/shaders/bytecode/vulkan_spirv",
+        ])
+    if (all_targets or "dxbc" in targets) and sys.platform == "win32":
+        bytecode_dirs.extend([
+            "src/xenia/gpu/shaders/bytecode/d3d12_5_1",
+            "src/xenia/ui/shaders/bytecode/d3d12_5_1",
+        ])
+    if (all_targets or "metal" in targets) and sys.platform == "darwin":
+        bytecode_dirs.extend([
+            "src/xenia/gpu/shaders/bytecode/metal",
+            "src/xenia/ui/shaders/bytecode/metal",
+        ])
+
+    newest_source = max(get_dir_newest_mtime(gpu_shaders),
+                        get_dir_newest_mtime(ui_shaders))
+    oldest_generated = min((get_dir_oldest_mtime(d) for d in bytecode_dirs),
+                           default=0)
+
+    missing_output = any(not has_generated_files(d) for d in bytecode_dirs)
+    if (all_targets or "metal" in targets) and sys.platform == "darwin":
+        metal_headers = expected_metal_headers(src_paths)
+        if metal_headers:
+            missing_output = missing_output or any(
+                not os.path.exists(path) for path in metal_headers)
+
+    if not missing_output and oldest_generated != float("inf") and newest_source <= oldest_generated:
+        print("Shaders are up-to-date, skipping generation.")
+        return 0
+
+    # Clean old bytecode before regenerating to remove stale files from deleted sources.
+    clean_shader_bytecode()
 
     # XeSL ("Xenia Shading Language") means shader files that can be
     # compiled as multiple languages from a single file. Whenever possible,
@@ -1591,124 +1677,223 @@ def build_shaders(targets=None):
                 print_error(f"failed to compile DXBC shader: {src_path}")
                 return 1
 
+    # Metal MSL.
+    if all_targets or "metal" in targets:
+        if sys.platform == "darwin":
+            print("Building Metal MSL shaders...")
+
+            use_xcrun = False
+            if not has_bin("metal") or not has_bin("metallib"):
+                if has_bin("xcrun"):
+                    use_xcrun = True
+                else:
+                    print_error("could not find Metal compiler tools")
+                    return 1
+
+            def metal_tool(tool, args):
+                if use_xcrun:
+                    return ["xcrun", "-sdk", "macosx", tool] + args
+                return [tool] + args
+
+            is_release = config.lower() == "release"
+            module_cache = os.path.join(self_path, "build", "metal_module_cache")
+            os.makedirs(module_cache, exist_ok=True)
+
+            for src_path in src_paths:
+                src_name = os.path.basename(src_path)
+                if (not src_name.endswith(".xesl") or len(src_name) <= 8 or
+                        src_name[-8] != "."):
+                    continue
+                if "fxaa" in src_name or "ffx_" in src_name:
+                    continue
+                identifier = src_name[:-5].replace(".", "_")
+                stage = identifier[-2:]
+                if stage not in ["cs", "ps", "vs"]:
+                    continue
+
+                print(f"- {src_path} > metal")
+                src_dir = os.path.dirname(src_path)
+                out_dir = os.path.join(src_dir, "bytecode/metal")
+                os.makedirs(out_dir, exist_ok=True)
+
+                base_path = os.path.join(out_dir, identifier)
+                air_path = f"{base_path}.air"
+                metallib_path = f"{base_path}.metallib"
+
+                compile_args = [
+                    "-x", "metal",
+                    "-D", "SHADING_LANGUAGE_MSL_XE=1",
+                    "-I", src_dir,
+                    f"-fmodules-cache-path={module_cache}",
+                ]
+
+                if is_release:
+                    cmd = metal_tool("metal", compile_args + [
+                        "-c", src_path, "-o", air_path])
+                    if subprocess.call(cmd) != 0:
+                        print_error("failed to compile Metal shader")
+                        return 1
+                    cmd = metal_tool("metallib", [air_path, "-o", metallib_path])
+                    if subprocess.call(cmd) != 0:
+                        print_error("failed to link Metal library")
+                        return 1
+                else:
+                    cmd = metal_tool("metal", compile_args + [
+                        "-gline-tables-only", "-frecord-sources=flat",
+                        "-o", metallib_path, src_path])
+                    if subprocess.call(cmd) != 0:
+                        print_error("failed to compile Metal shader")
+                        return 1
+
+                with open(f"{base_path}.h", "w") as out_file:
+                    out_file.write("// Generated with `xb buildshaders`.\n")
+                    out_file.write(f"const uint8_t {identifier}_metallib[] = {{")
+                    with open(metallib_path, "rb") as mlib:
+                        for i, byte in enumerate(mlib.read()):
+                            out_file.write("\n    " if i % 16 == 0 else " ")
+                            out_file.write(f"0x{byte:02X},")
+                    out_file.write("\n};\n")
+
+                for path in [air_path, metallib_path]:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+        else:
+            if all_targets:
+                print_warning("Metal shader building is supported only on macOS")
+            else:
+                print_error("Metal shader building is supported only on macOS")
+                return 1
+
     # Vulkan SPIR-V.
     if all_targets or "spirv" in targets:
-        print("Building Vulkan SPIR-V shaders...")
+        if sys.platform == "darwin":
+            print("Skipping Vulkan SPIR-V shader generation on macOS.")
+        else:
+            print("Building Vulkan SPIR-V shaders...")
 
-        # Get the SPIR-V tool paths.
-        vulkan_sdk_path = os.environ.get("VULKAN_SDK")
-        if not vulkan_sdk_path:
-            print_error("VULKAN_SDK environment variable is not set")
-            if sys.platform == "win32":
-                print("Please install Vulkan SDK from:")
-                print("https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe")
-            else:
-                print("Please install Vulkan SDK and set VULKAN_SDK environment variable")
-            return 1
-        if not os.path.exists(vulkan_sdk_path):
-            print_error(f"could not find the Vulkan SDK at {vulkan_sdk_path}")
-            return 1
-        vulkan_bin_path = os.path.join(vulkan_sdk_path, "bin")
-        if not os.path.exists(vulkan_bin_path):
-            print_error("could not find the Vulkan SDK binaries")
-            return 1
-        glslang = os.path.join(vulkan_bin_path, "glslangValidator")
-        if not has_bin(glslang):
-            print_error("could not find glslangValidator")
-            return 1
-        spirv_opt = os.path.join(vulkan_bin_path, "spirv-opt")
-        if not has_bin(spirv_opt):
-            print_error("could not find spirv-opt")
-            return 1
-        spirv_dis = os.path.join(vulkan_bin_path, "spirv-dis")
-        if not has_bin(spirv_dis):
-            print_error("could not find spirv-dis")
-            return 1
-
-        # Build SPIR-V.
-        spirv_stages = {
-            "vs": "vert", "hs": "tesc", "ds": "tese",
-            "gs": "geom", "ps": "frag", "cs": "comp",
-        }
-        spirv_xesl_wrapper = (
-            "#version 460\n"
-            "#extension GL_EXT_control_flow_attributes : require\n"
-            "#extension GL_EXT_samplerless_texture_functions : require\n"
-            "#extension GL_GOOGLE_include_directive : require\n"
-            "#include \"%s\"\n"
-        )
-        for src_path in src_paths:
-            src_name = os.path.basename(src_path)
-            src_is_xesl = src_name.endswith(".xesl")
-            if ((not src_is_xesl and not src_name.endswith(".glsl")) or
-                len(src_name) <= 8 or src_name[-8] != "."):
-                continue
-            spirv_identifier = src_name[:-5].replace(".", "_")
-            spirv_stage = spirv_stages.get(spirv_identifier[-2:], None)
-            if spirv_stage is None:
-                continue
-            print(f"- {src_path} > vulkan_spirv")
-            src_dir = os.path.dirname(src_path)
-            spirv_dir_path = os.path.join(src_dir, "bytecode/vulkan_spirv")
-            os.makedirs(spirv_dir_path, exist_ok=True)
-            spirv_file_path_base = os.path.join(spirv_dir_path, spirv_identifier)
-            spirv_glslang_file_path = f"{spirv_file_path_base}.glslang.spv"
-
-            glslang_arguments = [glslang,
-                                 "--stdin" if src_is_xesl else src_path,
-                                 "-DSHADING_LANGUAGE_GLSL_XE=1",
-                                 "-S", spirv_stage,
-                                 "-o", spirv_glslang_file_path,
-                                 "-V"]
-            if src_is_xesl:
-                glslang_arguments.append(f"-I{src_dir}")
-            if subprocess.run(
-                   glslang_arguments,
-                   input=(spirv_xesl_wrapper % src_name) if src_is_xesl else None,
-                   text=True).returncode != 0:
-                print_error("failed to build a SPIR-V shader")
+            # Get the SPIR-V tool paths.
+            vulkan_sdk_path = os.environ.get("VULKAN_SDK")
+            if not vulkan_sdk_path:
+                print_error("VULKAN_SDK environment variable is not set")
+                if sys.platform == "win32":
+                    print("Please install Vulkan SDK from:")
+                    print("https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe")
+                else:
+                    print("Please install Vulkan SDK and set VULKAN_SDK environment variable")
+                return 1
+            if not os.path.exists(vulkan_sdk_path):
+                print_error(f"could not find the Vulkan SDK at {vulkan_sdk_path}")
+                return 1
+            vulkan_bin_path = os.path.join(vulkan_sdk_path, "bin")
+            if not os.path.exists(vulkan_bin_path):
+                print_error("could not find the Vulkan SDK binaries")
+                return 1
+            glslang = os.path.join(vulkan_bin_path, "glslangValidator")
+            if not has_bin(glslang):
+                print_error("could not find glslangValidator")
+                return 1
+            spirv_opt = os.path.join(vulkan_bin_path, "spirv-opt")
+            if not has_bin(spirv_opt):
+                print_error("could not find spirv-opt")
+                return 1
+            spirv_dis = os.path.join(vulkan_bin_path, "spirv-dis")
+            if not has_bin(spirv_dis):
+                print_error("could not find spirv-dis")
                 return 1
 
-            spirv_file_path = f"{spirv_file_path_base}.spv"
-            if subprocess.call([spirv_opt, "-O", "-O", "--canonicalize-ids",
-                               spirv_glslang_file_path, "-o", spirv_file_path]) != 0:
-                print_error("failed to optimize a SPIR-V shader")
-                return 1
-            os.remove(spirv_glslang_file_path)
+            # Build SPIR-V.
+            spirv_stages = {
+                "vs": "vert", "hs": "tesc", "ds": "tese",
+                "gs": "geom", "ps": "frag", "cs": "comp",
+            }
+            spirv_xesl_wrapper = (
+                "#version 460\n"
+                "#extension GL_EXT_control_flow_attributes : require\n"
+                "#extension GL_EXT_samplerless_texture_functions : require\n"
+                "#extension GL_GOOGLE_include_directive : require\n"
+                "#include \"%s\"\n"
+            )
+            for src_path in src_paths:
+                src_name = os.path.basename(src_path)
+                src_is_xesl = src_name.endswith(".xesl")
+                if ((not src_is_xesl and not src_name.endswith(".glsl")) or
+                    len(src_name) <= 8 or src_name[-8] != "."):
+                    continue
+                spirv_identifier = src_name[:-5].replace(".", "_")
+                spirv_stage = spirv_stages.get(spirv_identifier[-2:], None)
+                if spirv_stage is None:
+                    continue
+                print(f"- {src_path} > vulkan_spirv")
+                src_dir = os.path.dirname(src_path)
+                spirv_dir_path = os.path.join(src_dir, "bytecode/vulkan_spirv")
+                os.makedirs(spirv_dir_path, exist_ok=True)
+                spirv_file_path_base = os.path.join(spirv_dir_path, spirv_identifier)
+                spirv_glslang_file_path = f"{spirv_file_path_base}.glslang.spv"
 
-            spirv_dis_file_path = f"{spirv_file_path_base}.txt"
-            if subprocess.call([spirv_dis, "-o", spirv_dis_file_path,
-                               spirv_file_path]) != 0:
-                print_error("failed to disassemble a SPIR-V shader")
-                return 1
+                glslang_arguments = [glslang,
+                                     "--stdin" if src_is_xesl else src_path,
+                                     "-DSHADING_LANGUAGE_GLSL_XE=1",
+                                     "-S", spirv_stage,
+                                     "-o", spirv_glslang_file_path,
+                                     "-V"]
+                if src_is_xesl:
+                    glslang_arguments.append(f"-I{src_dir}")
+                if subprocess.run(
+                       glslang_arguments,
+                       input=(spirv_xesl_wrapper % src_name) if src_is_xesl else None,
+                       text=True).returncode != 0:
+                    print_error("failed to build a SPIR-V shader")
+                    return 1
 
-            # Generate the header from the disassembly and the binary.
-            with open(f"{spirv_file_path_base}.h", "w") as out_file:
-                out_file.write("// Generated with `xb buildshaders`.\n#if 0\n")
-                with open(spirv_dis_file_path, "r") as spirv_dis_file:
-                    spirv_dis_data = spirv_dis_file.read()
-                    if len(spirv_dis_data) > 0:
-                        out_file.write(spirv_dis_data)
-                        if spirv_dis_data[-1] != "\n":
-                            out_file.write("\n")
-                out_file.write("#endif\n\nconst uint32_t %s[] = {" % spirv_identifier)
-                with open(spirv_file_path, "rb") as spirv_file:
-                    index = 0
-                    c = spirv_file.read(4)
-                    while len(c) != 0:
-                        if len(c) != 4:
-                            print_error("a SPIR-V shader is misaligned")
-                            return 1
-                        if index % 6 == 0:
-                            out_file.write("\n    ")
-                        else:
-                            out_file.write(" ")
-                        index += 1
-                        out_file.write("0x%08X," % int.from_bytes(c, sys.byteorder))
+                spirv_file_path = f"{spirv_file_path_base}.spv"
+                spirv_opt_result = subprocess.call(
+                    [spirv_opt, "-O", "-O", "--canonicalize-ids",
+                     spirv_glslang_file_path, "-o", spirv_file_path],
+                    stdout=subprocess.DEVNULL)
+                if spirv_opt_result != 0:
+                    spirv_opt_result = subprocess.call(
+                        [spirv_opt, "-O", "-O",
+                         spirv_glslang_file_path, "-o", spirv_file_path])
+                    if spirv_opt_result != 0:
+                        print_error("failed to optimize a SPIR-V shader")
+                        return 1
+                os.remove(spirv_glslang_file_path)
+
+                spirv_dis_file_path = f"{spirv_file_path_base}.txt"
+                if subprocess.call([spirv_dis, "-o", spirv_dis_file_path,
+                                   spirv_file_path]) != 0:
+                    print_error("failed to disassemble a SPIR-V shader")
+                    return 1
+
+                # Generate the header from the disassembly and the binary.
+                with open(f"{spirv_file_path_base}.h", "w") as out_file:
+                    out_file.write("// Generated with `xb buildshaders`.\n#if 0\n")
+                    with open(spirv_dis_file_path, "r") as spirv_dis_file:
+                        spirv_dis_data = spirv_dis_file.read()
+                        if len(spirv_dis_data) > 0:
+                            out_file.write(spirv_dis_data)
+                            if spirv_dis_data[-1] != "\n":
+                                out_file.write("\n")
+                    out_file.write("#endif\n\nconst uint32_t %s[] = {" % spirv_identifier)
+                    with open(spirv_file_path, "rb") as spirv_file:
+                        index = 0
                         c = spirv_file.read(4)
-                out_file.write("\n};\n")
-            os.remove(spirv_dis_file_path)
-            os.remove(spirv_file_path)
+                        while len(c) != 0:
+                            if len(c) != 4:
+                                print_error("a SPIR-V shader is misaligned")
+                                return 1
+                            if index % 6 == 0:
+                                out_file.write("\n    ")
+                            else:
+                                out_file.write(" ")
+                            index += 1
+                            out_file.write("0x%08X," % int.from_bytes(c, sys.byteorder))
+                            c = spirv_file.read(4)
+                    out_file.write("\n};\n")
+                os.remove(spirv_dis_file_path)
+                os.remove(spirv_file_path)
 
     return 0
 
@@ -2081,8 +2266,10 @@ def clean_shader_bytecode():
     bytecode_dirs = [
         "src/xenia/gpu/shaders/bytecode/d3d12_5_1",
         "src/xenia/gpu/shaders/bytecode/vulkan_spirv",
+        "src/xenia/gpu/shaders/bytecode/metal",
         "src/xenia/ui/shaders/bytecode/d3d12_5_1",
         "src/xenia/ui/shaders/bytecode/vulkan_spirv",
+        "src/xenia/ui/shaders/bytecode/metal",
     ]
     for bytecode_dir in bytecode_dirs:
         if os.path.isdir(bytecode_dir):
