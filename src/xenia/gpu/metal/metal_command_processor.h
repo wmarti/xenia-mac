@@ -195,6 +195,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // SPIRV-Cross path only: uniforms buffer is command-buffer scoped to avoid
   // CPU writes racing ahead of in-flight GPU reads.
   bool EnsureSpirvUniformBuffer();
+  bool EnsureSpirvUniformBufferCapacity();
   void ScheduleSpirvUniformBufferRelease(MTL::CommandBuffer* command_buffer);
 #endif  // !METAL_SHADER_CONVERTER_AVAILABLE
 
@@ -442,8 +443,8 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unordered_map<uint64_t, std::unique_ptr<MslShader>> msl_shader_cache_;
   SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};
   SpirvShaderTranslator::ClipPlaneConstants spirv_clip_plane_constants_ = {};
-  SpirvShaderTranslator::TessellationConstants
-      spirv_tessellation_constants_ = {};
+  SpirvShaderTranslator::TessellationConstants spirv_tessellation_constants_ =
+      {};
   std::unordered_map<uint64_t, MTL::RenderPipelineState*> msl_pipeline_cache_;
 
   // SPIRV-Cross tessellation support.
@@ -530,6 +531,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // Uniforms buffer and draw ring count (shared between MSC and SPIRV-Cross)
   MTL::Buffer* uniforms_buffer_ = nullptr;
   size_t draw_ring_count_ = 0;
+#if !METAL_SHADER_CONVERTER_AVAILABLE
+  // Exhausted SPIRV-Cross uniforms buffers kept alive until command buffer
+  // completion to avoid in-flight draw constant overwrites.
+  std::vector<MTL::Buffer*> command_buffer_spirv_uniforms_;
+#endif  // !METAL_SHADER_CONVERTER_AVAILABLE
 
 #if METAL_SHADER_CONVERTER_AVAILABLE
   // IR Converter runtime buffers for shader resource binding (MSC path)
@@ -554,6 +560,13 @@ class MetalCommandProcessor : public CommandProcessor {
   bool system_constants_dirty_ = true;
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
   bool logged_missing_texture_warning_ = false;
+  // SPIRV-Cross path: highest texture/sampler slot counts bound on the current
+  // render encoder. Used to clear trailing slots when a later draw uses fewer
+  // resources, preventing stale state leakage between draws.
+  uint32_t msl_bound_vertex_texture_count_ = 0;
+  uint32_t msl_bound_pixel_texture_count_ = 0;
+  uint32_t msl_bound_vertex_sampler_count_ = 0;
+  uint32_t msl_bound_pixel_sampler_count_ = 0;
 
   // Fixed-function dynamic state cached per render encoder.
   float ff_blend_factor_[4] = {0.0f, 0.0f, 0.0f, 0.0f};

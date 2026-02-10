@@ -39,6 +39,9 @@ class MetalPrimitiveProcessor : public PrimitiveProcessor {
   void EndFrame();
 
   MTL::Buffer* GetBuiltinIndexBuffer() const { return builtin_index_buffer_; }
+  MTL::Buffer* GetExpansionTriangleListIndexBuffer() const {
+    return expansion_triangle_list_index_buffer_;
+  }
   MTL::Buffer* GetConvertedIndexBuffer(size_t handle,
                                        uint64_t& offset_bytes_out) const;
 
@@ -66,6 +69,9 @@ class MetalPrimitiveProcessor : public PrimitiveProcessor {
   MTL::Buffer* builtin_index_buffer_ = nullptr;
   uint64_t builtin_index_buffer_gpu_address_ = 0;
   size_t builtin_index_buffer_size_ = 0;
+  // Fallback index buffer for SPIRV-Cross point/rectangle VS expansion.
+  // Uses triangle-list topology to avoid relying on primitive restart.
+  MTL::Buffer* expansion_triangle_list_index_buffer_ = nullptr;
 
   // Per-frame index buffer for primitive conversion
   struct FrameIndexBuffer {

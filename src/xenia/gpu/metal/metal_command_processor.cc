@@ -520,6 +520,12 @@ MetalCommandProcessor::~MetalCommandProcessor() {
     uniforms_buffer_->release();
     uniforms_buffer_ = nullptr;
   }
+  for (MTL::Buffer* submitted_uniforms : command_buffer_spirv_uniforms_) {
+    if (submitted_uniforms) {
+      submitted_uniforms->release();
+    }
+  }
+  command_buffer_spirv_uniforms_.clear();
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 }
 
@@ -2187,8 +2193,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
   // Begin command buffer if needed (will use cache-provided render targets).
   BeginCommandBuffer();
+  if (!current_command_buffer_ || !current_render_encoder_) {
+    static bool spirv_no_command_buffer_logged = false;
+    if (!spirv_no_command_buffer_logged) {
+      spirv_no_command_buffer_logged = true;
+      XELOGE(
+          "IssueDraw: failed to begin Metal command buffer/render encoder; "
+          "skipping draws until uniforms buffer allocation recovers");
+    }
+    return cvars::metal_use_spirvcross;
+  }
 #if METAL_SHADER_CONVERTER_AVAILABLE
   EnsureDrawRingCapacity();
+#else
+  if (cvars::metal_use_spirvcross && !EnsureSpirvUniformBufferCapacity()) {
+    XELOGE(
+        "IssueDraw: failed to prepare SPIRV-Cross uniforms ring; skipping "
+        "draw");
+    return true;
+  }
 #endif
 
   // =========================================================================
@@ -3480,7 +3503,8 @@ bool MetalCommandProcessor::IssueDrawMsl(
         msl_vertex_shader->constant_register_map();
     for (uint32_t i = 0;
          i < xe::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
-      uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
+      uint32_t vfetch_bits_remaining =
+          constant_map_vertex.vertex_fetch_bitmap[i];
       uint32_t j;
       while (xe::bit_scan_forward(vfetch_bits_remaining, &j)) {
         vfetch_bits_remaining &= ~(uint32_t(1) << j);
@@ -3528,7 +3552,8 @@ bool MetalCommandProcessor::IssueDrawMsl(
 
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
       uint32_t base_bytes = memexport_range.base_address_dwords << 2;
-      if (!shared_memory_->RequestRange(base_bytes, memexport_range.size_bytes)) {
+      if (!shared_memory_->RequestRange(base_bytes,
+                                        memexport_range.size_bytes)) {
         XELOGE(
             "SPIRV-Cross: Failed to request memexport stream at 0x{:08X} "
             "(size {}) in shared memory",
@@ -3789,80 +3814,132 @@ bool MetalCommandProcessor::IssueDrawMsl(
   UseRenderEncoderResource(uniforms_buffer_, MTL::ResourceUsageRead);
 
   // Bind textures and samplers directly.
-  auto bind_msl_textures = [&](MslShader* shader, bool is_pixel_stage) {
-    if (!shader || !texture_cache_) {
+  auto bind_msl_textures = [&](MslShader* shader,
+                               MslShader::MslTranslation* translation,
+                               bool is_pixel_stage) {
+    auto bind_texture_slot = [&](uint32_t slot, MTL::Texture* texture) {
+      if (is_pixel_stage) {
+        current_render_encoder_->setFragmentTexture(texture, slot);
+      } else {
+        current_render_encoder_->setVertexTexture(texture, slot);
+      }
+    };
+    auto clear_slots_from = [&](uint32_t start, uint32_t end_exclusive) {
+      for (uint32_t slot = start; slot < end_exclusive; ++slot) {
+        bind_texture_slot(slot, nullptr);
+      }
+    };
+
+    uint32_t* previous_bound_count = is_pixel_stage
+                                         ? &msl_bound_pixel_texture_count_
+                                         : &msl_bound_vertex_texture_count_;
+
+    if (!shader || !translation || !texture_cache_) {
+      clear_slots_from(0, *previous_bound_count);
+      *previous_bound_count = 0;
       return;
     }
+
     const auto& texture_bindings = shader->GetTextureBindingsAfterTranslation();
+    const auto& texture_binding_indices =
+        translation->texture_binding_indices_for_msl_slots();
+    uint32_t bound_count = std::min(uint32_t(texture_binding_indices.size()),
+                                    MslTextureIndex::kMaxPerStage);
+    if (*previous_bound_count > bound_count) {
+      clear_slots_from(bound_count, *previous_bound_count);
+    }
+    *previous_bound_count = bound_count;
+
     MetalTextureCache* metal_texture_cache = texture_cache_.get();
-    for (size_t i = 0; i < texture_bindings.size(); ++i) {
-      uint32_t tex_index = MslTextureIndex::kBase + static_cast<uint32_t>(i);
-      if (tex_index >= MslTextureIndex::kMaxPerStage) {
-        break;
-      }
-      const auto& binding = texture_bindings[i];
-      MTL::Texture* texture = texture_cache_->GetTextureForBinding(
-          binding.fetch_constant, binding.dimension, binding.is_signed);
-      if (!texture) {
-        switch (binding.dimension) {
-          case xenos::FetchOpDimension::k3DOrStacked:
-            texture = metal_texture_cache->GetNullTexture3D();
-            break;
-          case xenos::FetchOpDimension::kCube:
-            texture = metal_texture_cache->GetNullTextureCube();
-            break;
-          default:
-            texture = metal_texture_cache->GetNullTexture2D();
-            break;
+    for (uint32_t slot = 0; slot < bound_count; ++slot) {
+      uint32_t tex_index = MslTextureIndex::kBase + slot;
+      MTL::Texture* texture = nullptr;
+      int32_t texture_binding_index = texture_binding_indices[slot];
+      if (texture_binding_index >= 0 &&
+          size_t(texture_binding_index) < texture_bindings.size()) {
+        const auto& binding = texture_bindings[size_t(texture_binding_index)];
+        texture = texture_cache_->GetTextureForBinding(
+            binding.fetch_constant, binding.dimension, binding.is_signed);
+        if (!texture) {
+          switch (binding.dimension) {
+            case xenos::FetchOpDimension::k3DOrStacked:
+              texture = metal_texture_cache->GetNullTexture3D();
+              break;
+            case xenos::FetchOpDimension::kCube:
+              texture = metal_texture_cache->GetNullTextureCube();
+              break;
+            default:
+              texture = metal_texture_cache->GetNullTexture2D();
+              break;
+          }
         }
+      } else {
+        texture = metal_texture_cache->GetNullTexture2D();
       }
+      bind_texture_slot(tex_index, texture);
       if (texture) {
-        if (is_pixel_stage) {
-          current_render_encoder_->setFragmentTexture(texture, tex_index);
-        } else {
-          current_render_encoder_->setVertexTexture(texture, tex_index);
-        }
         UseRenderEncoderResource(texture, MTL::ResourceUsageRead);
       }
     }
   };
 
-  auto bind_msl_samplers = [&](MslShader* shader, bool is_pixel_stage) {
-    if (!shader || !texture_cache_) {
+  auto bind_msl_samplers = [&](MslShader* shader,
+                               MslShader::MslTranslation* translation,
+                               bool is_pixel_stage) {
+    auto bind_sampler_slot = [&](uint32_t slot, MTL::SamplerState* sampler) {
+      if (is_pixel_stage) {
+        current_render_encoder_->setFragmentSamplerState(sampler, slot);
+      } else {
+        current_render_encoder_->setVertexSamplerState(sampler, slot);
+      }
+    };
+
+    uint32_t* previous_bound_count = is_pixel_stage
+                                         ? &msl_bound_pixel_sampler_count_
+                                         : &msl_bound_vertex_sampler_count_;
+
+    if (!shader || !translation || !texture_cache_) {
+      for (uint32_t slot = 0; slot < *previous_bound_count; ++slot) {
+        bind_sampler_slot(slot, null_sampler_);
+      }
+      *previous_bound_count = 0;
       return;
     }
-    // Samplers are remapped to compact Metal indices 0..M-1 in the
-    // SPIRV-Cross resource binding setup (AddResourceBindings), so we
-    // bind them at index i (not texture_count + i).
+    // Samplers are remapped to compact Metal indices 0..M-1 in
+    // MslShader::AddResourceBindings. Use the reflected SPIR-V remap order
+    // captured in the translation, not the raw translator array order, because
+    // SPIRV-Cross may drop/reorder separate samplers.
     const auto& sampler_bindings = shader->GetSamplerBindingsAfterTranslation();
-    for (size_t i = 0; i < sampler_bindings.size(); ++i) {
-      uint32_t smp_index = static_cast<uint32_t>(i);
-      if (smp_index >= MslSamplerIndex::kMaxPerStage) {
-        break;
+    const auto& sampler_binding_indices =
+        translation->sampler_binding_indices_for_msl_slots();
+    uint32_t bound_count = std::min(uint32_t(sampler_binding_indices.size()),
+                                    MslSamplerIndex::kMaxPerStage);
+    if (*previous_bound_count > bound_count) {
+      for (uint32_t slot = bound_count; slot < *previous_bound_count; ++slot) {
+        bind_sampler_slot(slot, null_sampler_);
       }
-      auto parameters =
-          texture_cache_->GetSamplerParameters(sampler_bindings[i]);
-      MTL::SamplerState* sampler_state =
-          texture_cache_->GetOrCreateSampler(parameters);
-      if (!sampler_state) {
-        sampler_state = null_sampler_;
-      }
-      if (sampler_state) {
-        if (is_pixel_stage) {
-          current_render_encoder_->setFragmentSamplerState(sampler_state,
-                                                           smp_index);
-        } else {
-          current_render_encoder_->setVertexSamplerState(sampler_state,
-                                                         smp_index);
+    }
+    *previous_bound_count = bound_count;
+
+    for (uint32_t smp_index = 0; smp_index < bound_count; ++smp_index) {
+      MTL::SamplerState* sampler_state = null_sampler_;
+      uint32_t sampler_binding_index = sampler_binding_indices[smp_index];
+      if (sampler_binding_index < sampler_bindings.size()) {
+        auto parameters = texture_cache_->GetSamplerParameters(
+            sampler_bindings[sampler_binding_index]);
+        sampler_state = texture_cache_->GetOrCreateSampler(parameters);
+        if (!sampler_state) {
+          sampler_state = null_sampler_;
         }
       }
+      bind_sampler_slot(smp_index, sampler_state);
     }
   };
 
-  bind_msl_textures(msl_vertex_shader, false);
-  bind_msl_textures(msl_pixel_shader, true);
-  bind_msl_samplers(msl_vertex_shader, false);
-  bind_msl_samplers(msl_pixel_shader, true);
+  bind_msl_textures(msl_vertex_shader, vertex_translation, false);
+  bind_msl_textures(msl_pixel_shader, pixel_translation, true);
+  bind_msl_samplers(msl_vertex_shader, vertex_translation, false);
+  bind_msl_samplers(msl_pixel_shader, pixel_translation, true);
 
   // =====================================================================
   // Draw dispatch — native Metal encoder calls (no IRRuntime).
@@ -4140,6 +4217,37 @@ bool MetalCommandProcessor::IssueDrawMsl(
                                           static_cast<uint32_t>(index_length));
     };
 
+    bool use_expansion_triangle_list_fallback = false;
+    uint32_t draw_index_count =
+        primitive_processing_result.host_draw_vertex_count;
+    if ((host_vertex_shader_type ==
+             Shader::HostVertexShaderType::kPointListAsTriangleStrip ||
+         host_vertex_shader_type ==
+             Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) &&
+        (primitive_processing_result.index_buffer_type ==
+             PrimitiveProcessor::ProcessedIndexBufferType::
+                 kHostBuiltinForAuto ||
+         primitive_processing_result.index_buffer_type ==
+             PrimitiveProcessor::ProcessedIndexBufferType::
+                 kHostBuiltinForDMA)) {
+      // Expansion strips normally rely on primitive restart separators.
+      // Keep a Metal-local triangle-list fallback to avoid dependence on strip
+      // restart behavior in this SPIRV-Cross path.
+      uint32_t strip_index_count = draw_index_count;
+      uint32_t expanded_primitive_count =
+          strip_index_count ? (strip_index_count + 1u) / 5u : 0u;
+      draw_index_count = expanded_primitive_count * 6u;
+      mtl_primitive = MTL::PrimitiveTypeTriangle;
+      use_expansion_triangle_list_fallback = true;
+      static bool logged_expansion_triangle_list_fallback = false;
+      if (!logged_expansion_triangle_list_fallback) {
+        logged_expansion_triangle_list_fallback = true;
+        XELOGW(
+            "SPIRV-Cross: Using triangle-list fallback for VS primitive "
+            "expansion draws to avoid strip-restart dependency");
+      }
+    }
+
     if (primitive_processing_result.index_buffer_type ==
         PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
       // Non-indexed draw.
@@ -4159,10 +4267,8 @@ bool MetalCommandProcessor::IssueDrawMsl(
         case PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA:
           index_buffer = shared_memory_ ? shared_memory_->GetBuffer() : nullptr;
           index_offset = primitive_processing_result.guest_index_base;
-          if (!request_guest_index_range(
-                  index_offset,
-                  primitive_processing_result.host_draw_vertex_count,
-                  index_type)) {
+          if (!request_guest_index_range(index_offset, draw_index_count,
+                                         index_type)) {
             XELOGE("SPIRV-Cross: Failed to validate guest index buffer range");
             return false;
           }
@@ -4177,8 +4283,16 @@ bool MetalCommandProcessor::IssueDrawMsl(
         case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto:
         case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA:
           if (primitive_processor_) {
-            index_buffer = primitive_processor_->GetBuiltinIndexBuffer();
-            index_offset = primitive_processing_result.host_index_buffer_handle;
+            if (use_expansion_triangle_list_fallback) {
+              index_buffer =
+                  primitive_processor_->GetExpansionTriangleListIndexBuffer();
+              index_offset = 0;
+              index_type = MTL::IndexTypeUInt32;
+            } else {
+              index_buffer = primitive_processor_->GetBuiltinIndexBuffer();
+              index_offset =
+                  primitive_processing_result.host_index_buffer_handle;
+            }
           }
           break;
         default:
@@ -4192,9 +4306,8 @@ bool MetalCommandProcessor::IssueDrawMsl(
       }
       UseRenderEncoderResource(index_buffer, MTL::ResourceUsageRead);
       current_render_encoder_->drawIndexedPrimitives(
-          mtl_primitive,
-          NS::UInteger(primitive_processing_result.host_draw_vertex_count),
-          index_type, index_buffer, NS::UInteger(index_offset));
+          mtl_primitive, NS::UInteger(draw_index_count), index_type,
+          index_buffer, NS::UInteger(index_offset));
     }
   }
 
@@ -4670,7 +4783,8 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
 
 #if !METAL_SHADER_CONVERTER_AVAILABLE
   if (cvars::metal_use_spirvcross && !EnsureSpirvUniformBuffer()) {
-    XELOGE("EnsureCommandBuffer: failed to prepare SPIRV-Cross uniforms buffer");
+    XELOGE(
+        "EnsureCommandBuffer: failed to prepare SPIRV-Cross uniforms buffer");
     current_command_buffer_->release();
     current_command_buffer_ = nullptr;
     return nullptr;
@@ -4841,6 +4955,10 @@ void MetalCommandProcessor::EndRenderEncoder() {
   current_render_encoder_->release();
   current_render_encoder_ = nullptr;
   current_render_pass_descriptor_ = nullptr;
+  msl_bound_vertex_texture_count_ = 0;
+  msl_bound_pixel_texture_count_ = 0;
+  msl_bound_vertex_sampler_count_ = 0;
+  msl_bound_pixel_sampler_count_ = 0;
   ResetRenderEncoderResourceUsage();
 }
 
@@ -5051,31 +5169,186 @@ bool MetalCommandProcessor::EnsureSpirvUniformBuffer() {
     XELOGE("EnsureSpirvUniformBuffer: Metal device is null");
     return false;
   }
-  const size_t kDescriptorTableCount = kStageCount * draw_ring_count_;
-  const size_t kUniformsBufferSize =
-      kUniformsBytesPerTable * kDescriptorTableCount;
-  uniforms_buffer_ =
-      device_->newBuffer(kUniformsBufferSize, MTL::ResourceStorageModeShared);
-  if (!uniforms_buffer_) {
-    XELOGE("Failed to create uniforms buffer for SPIRV-Cross path");
-    return false;
+  if (!draw_ring_count_) {
+    XELOGW("SPIRV-Cross: draw ring count was zero, forcing to 1");
+    draw_ring_count_ = 1;
   }
-  uniforms_buffer_->setLabel(
-      NS::String::string("MslUniformsBuffer", NS::UTF8StringEncoding));
-  std::memset(uniforms_buffer_->contents(), 0, kUniformsBufferSize);
+
+  auto try_allocate_with_ring_fallback = [this](size_t initial_ring_count) {
+    size_t requested_ring_count = std::max<size_t>(1, initial_ring_count);
+    while (requested_ring_count >= 1) {
+      const size_t descriptor_table_count = kStageCount * requested_ring_count;
+      const size_t uniforms_buffer_size =
+          kUniformsBytesPerTable * descriptor_table_count;
+
+      uniforms_buffer_ = device_->newBuffer(uniforms_buffer_size,
+                                            MTL::ResourceStorageModeShared);
+      if (uniforms_buffer_) {
+        if (requested_ring_count != draw_ring_count_) {
+          XELOGW(
+              "SPIRV-Cross: Reduced uniforms ring from {} to {} pages after "
+              "allocation pressure",
+              draw_ring_count_, requested_ring_count);
+          draw_ring_count_ = requested_ring_count;
+        }
+        uniforms_buffer_->setLabel(
+            NS::String::string("MslUniformsBuffer", NS::UTF8StringEncoding));
+        std::memset(uniforms_buffer_->contents(), 0, uniforms_buffer_size);
+        return true;
+      }
+
+      if (requested_ring_count == 1) {
+        break;
+      }
+      const size_t fallback_ring_count =
+          std::max<size_t>(1, requested_ring_count / 2);
+      XELOGW(
+          "SPIRV-Cross: Failed to allocate uniforms buffer with {} ring pages, "
+          "retrying with {}",
+          requested_ring_count, fallback_ring_count);
+      requested_ring_count = fallback_ring_count;
+    }
+    return false;
+  };
+
+  if (try_allocate_with_ring_fallback(draw_ring_count_)) {
+    return true;
+  }
+
+  // If the queue is holding many in-flight command buffers, wait for completion
+  // once, then retry a minimal uniforms ring allocation.
+  if (command_queue_) {
+    XELOGW(
+        "SPIRV-Cross: uniforms allocation failed; draining Metal queue and "
+        "retrying");
+    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+    MTL::CommandBuffer* sync_cmd = command_queue_->commandBuffer();
+    if (sync_cmd) {
+      uint64_t wait_value = 0;
+      if (wait_shared_event_) {
+        wait_value = ++wait_shared_event_value_;
+        sync_cmd->encodeSignalEvent(wait_shared_event_, wait_value);
+      }
+      sync_cmd->commit();
+      if (wait_shared_event_) {
+        wait_shared_event_->waitUntilSignaledValue(
+            wait_value, std::numeric_limits<uint64_t>::max());
+      } else {
+        sync_cmd->waitUntilCompleted();
+      }
+    }
+    pool->release();
+    ProcessCompletedSubmissions();
+  }
+
+  draw_ring_count_ = std::max<size_t>(
+      size_t(1), std::min<size_t>(draw_ring_count_, size_t(4)));
+  if (try_allocate_with_ring_fallback(draw_ring_count_)) {
+    return true;
+  }
+
+  XELOGE(
+      "Failed to create uniforms buffer for SPIRV-Cross path (ring pages={}, "
+      "bytes per table={})",
+      draw_ring_count_, kUniformsBytesPerTable);
+  return false;
+}
+
+bool MetalCommandProcessor::EnsureSpirvUniformBufferCapacity() {
+  if (current_draw_index_ < draw_ring_count_) {
+    return true;
+  }
+  if (!uniforms_buffer_) {
+    return EnsureSpirvUniformBuffer();
+  }
+
+  MTL::Buffer* exhausted_uniforms = uniforms_buffer_;
+  uniforms_buffer_ = nullptr;
+  if (!EnsureSpirvUniformBuffer()) {
+    static bool rollover_logged = false;
+    if (!rollover_logged) {
+      rollover_logged = true;
+      XELOGW(
+          "SPIRV-Cross: uniforms ring expansion failed; forcing command "
+          "buffer rollover/wait and reusing current uniforms buffer");
+    }
+    uniforms_buffer_ = exhausted_uniforms;
+    if (current_command_buffer_) {
+      EndRenderEncoder();
+      uint64_t wait_value = 0;
+      if (wait_shared_event_) {
+        wait_value = ++wait_shared_event_value_;
+        current_command_buffer_->encodeSignalEvent(wait_shared_event_,
+                                                   wait_value);
+      }
+      current_command_buffer_->commit();
+      if (wait_shared_event_) {
+        wait_shared_event_->waitUntilSignaledValue(
+            wait_value, std::numeric_limits<uint64_t>::max());
+      } else {
+        current_command_buffer_->waitUntilCompleted();
+      }
+      current_command_buffer_->release();
+      current_command_buffer_ = nullptr;
+      ProcessCompletedSubmissions();
+    }
+    for (MTL::Buffer* retired_uniforms : command_buffer_spirv_uniforms_) {
+      if (retired_uniforms) {
+        retired_uniforms->release();
+      }
+    }
+    command_buffer_spirv_uniforms_.clear();
+    current_draw_index_ = 0;
+    BeginCommandBuffer();
+    if (!current_command_buffer_ || !current_render_encoder_) {
+      XELOGE(
+          "SPIRV-Cross: failed to restart command buffer after uniforms "
+          "rollover");
+      return false;
+    }
+    return true;
+  }
+
+  command_buffer_spirv_uniforms_.push_back(exhausted_uniforms);
+  current_draw_index_ = 0;
   return true;
 }
 
 void MetalCommandProcessor::ScheduleSpirvUniformBufferRelease(
     MTL::CommandBuffer* command_buffer) {
-  if (!command_buffer || !uniforms_buffer_) {
+  if (!command_buffer) {
     return;
   }
-  MTL::Buffer* submitted_uniforms = uniforms_buffer_;
-  uniforms_buffer_ = nullptr;
-  command_buffer->addCompletedHandler([submitted_uniforms](MTL::CommandBuffer*) {
-    submitted_uniforms->release();
-  });
+  if (command_buffer_spirv_uniforms_.empty() && !uniforms_buffer_) {
+    return;
+  }
+
+  std::vector<MTL::Buffer*> submitted_uniforms;
+  submitted_uniforms.reserve(command_buffer_spirv_uniforms_.size() +
+                             (uniforms_buffer_ ? 1 : 0));
+  for (MTL::Buffer* retired_uniforms : command_buffer_spirv_uniforms_) {
+    if (retired_uniforms) {
+      submitted_uniforms.push_back(retired_uniforms);
+    }
+  }
+  command_buffer_spirv_uniforms_.clear();
+
+  if (uniforms_buffer_) {
+    submitted_uniforms.push_back(uniforms_buffer_);
+    uniforms_buffer_ = nullptr;
+  }
+
+  if (submitted_uniforms.empty()) {
+    return;
+  }
+
+  command_buffer->addCompletedHandler(
+      [submitted_uniforms =
+           std::move(submitted_uniforms)](MTL::CommandBuffer*) mutable {
+        for (MTL::Buffer* uniforms : submitted_uniforms) {
+          uniforms->release();
+        }
+      });
 }
 #endif  // !METAL_SHADER_CONVERTER_AVAILABLE
 
@@ -8253,10 +8526,10 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
   // Mirror Vulkan constant buffer population to keep shader inputs identical.
   std::memset(&spirv_tessellation_constants_, 0,
               sizeof(spirv_tessellation_constants_));
-  float tess_factor_min = regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) +
-                          1.0f;
-  float tess_factor_max = regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) +
-                          1.0f;
+  float tess_factor_min =
+      regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f;
+  float tess_factor_max =
+      regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
   spirv_tessellation_constants_.tessellation_factor_range[0] = tess_factor_min;
   spirv_tessellation_constants_.tessellation_factor_range[1] = tess_factor_max;
   auto vgt_dma_size = regs.Get<reg::VGT_DMA_SIZE>();

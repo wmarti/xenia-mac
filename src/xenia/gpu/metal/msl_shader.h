@@ -45,12 +45,20 @@ class MslShader : public SpirvShader {
     const std::string& msl_source() const { return msl_source_; }
     const std::string& entry_point_name() const { return entry_point_name_; }
     bool is_valid() const { return metal_function_ != nullptr; }
+    const std::vector<int32_t>& texture_binding_indices_for_msl_slots() const {
+      return texture_binding_indices_for_msl_slots_;
+    }
+    const std::vector<uint32_t>& sampler_binding_indices_for_msl_slots() const {
+      return sampler_binding_indices_for_msl_slots_;
+    }
 
    private:
     MTL::Library* metal_library_ = nullptr;
     MTL::Function* metal_function_ = nullptr;
     std::string msl_source_;
     std::string entry_point_name_;
+    std::vector<int32_t> texture_binding_indices_for_msl_slots_;
+    std::vector<uint32_t> sampler_binding_indices_for_msl_slots_;
   };
 
  protected:
