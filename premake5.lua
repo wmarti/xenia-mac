@@ -795,7 +795,7 @@ workspace("xenia")
 
       -- Keep FFmpeg premake files from commit 4cbc8f4f6ef9 compatible with
       -- unsplit Windows platform naming on current edge.
-      filter("platforms:Windows")
+      filter({"platforms:Windows", "architecture:x86_64"})
         buildoptions({
           "/FIconfig_windows_x86_64.h",
         })
