@@ -792,6 +792,47 @@ workspace("xenia")
           "stdatomic.h",
         })
       filter({})
+
+      -- Keep FFmpeg premake files from commit 4cbc8f4f6ef9 compatible with
+      -- unsplit Windows platform naming on current edge.
+      filter("platforms:Windows")
+        buildoptions({
+          "/FIconfig_windows_x86_64.h",
+        })
+      filter({})
+
+      if prj.name == "libavcodec" then
+        filter({"system:windows", "architecture:x86_64"})
+          files({
+            "third_party/FFmpeg/libavcodec/x86/constants.c",
+            "third_party/FFmpeg/libavcodec/x86/fdctdsp_init.c",
+            "third_party/FFmpeg/libavcodec/x86/fft_init.c",
+            "third_party/FFmpeg/libavcodec/x86/idctdsp_init.c",
+            "third_party/FFmpeg/libavcodec/x86/fdct.c",
+            "third_party/FFmpeg/libavcodec/file_open.c",
+          })
+        filter({})
+      end
+
+      if prj.name == "libavutil" then
+        filter({"system:windows", "architecture:x86_64"})
+          files({
+            "third_party/FFmpeg/libavutil/x86/cpu.c",
+            "third_party/FFmpeg/libavutil/x86/fixed_dsp_init.c",
+            "third_party/FFmpeg/libavutil/x86/float_dsp_init.c",
+            "third_party/FFmpeg/libavutil/x86/imgutils_init.c",
+            "third_party/FFmpeg/libavutil/x86/lls_init.c",
+          })
+        filter({})
+      end
+
+      if prj.name == "libavformat" then
+        filter("system:windows")
+          files({
+            "third_party/FFmpeg/libavformat/file_open.c",
+          })
+        filter({})
+      end
     end
 
     if prj.name == "libavcodec" then
