@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Copyright 2025 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -62,6 +62,9 @@ class MetalTextureCache : public TextureCache {
   MTL::PixelFormat ConvertXenosFormat(
       xenos::TextureFormat format,
       xenos::Endian endian = xenos::Endian::k8in32);
+
+  // Debug texture creation
+  MTL::Texture* CreateDebugTexture(uint32_t width = 256, uint32_t height = 256);
 
   // Null texture accessors for invalid bindings (following D3D12/Vulkan
   // pattern)
@@ -123,12 +126,6 @@ class MetalTextureCache : public TextureCache {
   bool GetCurrentScaledResolveBuffer(MTL::Buffer*& buffer_out,
                                      size_t& buffer_offset_out,
                                      size_t& buffer_length_out) const;
-  uint64_t GetCurrentScaledResolveRangeStartScaled() const {
-    return scaled_resolve_current_range_start_scaled_;
-  }
-  uint64_t GetCurrentScaledResolveRangeLengthScaled() const {
-    return scaled_resolve_current_range_length_scaled_;
-  }
   uint32_t GetHostFormatSwizzle(TextureKey key) const override;
   uint32_t GetMaxHostTextureWidthHeight(
       xenos::DataDimension dimension) const override;
@@ -220,6 +217,11 @@ class MetalTextureCache : public TextureCache {
   bool EnsureScaledResolveBufferRange(uint64_t start_scaled,
                                       uint64_t length_scaled);
   void ClearScaledResolveBuffers();
+
+  // Format conversion helpers
+  bool ConvertTextureData(const void* src_data, void* dst_data, uint32_t width,
+                          uint32_t height, xenos::TextureFormat src_format,
+                          MTL::PixelFormat dst_format);
 
   // Null texture factory methods (following existing CreateTexture pattern)
   MTL::Texture* CreateNullTexture2D();
