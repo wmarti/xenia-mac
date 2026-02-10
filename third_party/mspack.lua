@@ -11,6 +11,10 @@ project("mspack")
   })
   includedirs({
       "mspack",
+      -- Keep libmspack angle-bracket local includes (<config.h>, <system.h>, etc.)
+      -- resolvable across generators that resolve include paths from workspace
+      -- location rather than script location.
+      "%{wks.location}/../third_party/mspack",
   })
   files({
       "mspack/logging.cc",
