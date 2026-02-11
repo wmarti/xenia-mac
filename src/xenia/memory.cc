@@ -182,10 +182,13 @@ bool Memory::Initialize() {
 
   // Create main page file-backed mapping. This is all reserved but
   // uncommitted (so it shouldn't expand page file).
+  // Entire 4gb space + 512mb physical, plus alignment slack for 4K offset
+  // mappings on platforms with 4K pages.
+  const size_t mapping_size =
+      xe::round_up(0x120000000ull + system_allocation_granularity_,
+                   system_allocation_granularity_);
   mapping_ = xe::memory::CreateFileMappingHandle(
-      file_name_,
-      // entire 4gb space + 512mb physical:
-      0x11FFFFFFF, xe::memory::PageAccess::kReadWrite, false);
+      file_name_, mapping_size, xe::memory::PageAccess::kReadWrite, false);
   if (mapping_ == xe::memory::kFileMappingHandleInvalid) {
     XELOGE("Unable to reserve the 4gb guest address space.");
     assert_always();
