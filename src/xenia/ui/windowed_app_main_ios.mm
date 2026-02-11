@@ -403,6 +403,39 @@ std::string ReadFileTail(const std::filesystem::path& path, size_t max_bytes) {
   return content;
 }
 
+NSString* DecodeLogBytesToNSString(const std::string& content) {
+  if (content.empty()) {
+    return @"";
+  }
+
+  NSData* log_data = [NSData dataWithBytes:content.data() length:content.size()];
+  NSString* decoded = [[NSString alloc] initWithData:log_data encoding:NSUTF8StringEncoding];
+  if (!decoded) {
+    decoded = [[NSString alloc] initWithData:log_data
+                                    encoding:CFStringConvertEncodingToNSStringEncoding(
+                                                 kCFStringEncodingWindowsLatin1)];
+  }
+  if (!decoded) {
+    decoded = [[NSString alloc] initWithData:log_data encoding:NSISOLatin1StringEncoding];
+  }
+  if (decoded) {
+    return decoded;
+  }
+
+  // Last-resort byte-preserving fallback so the UI never shows a hard decode
+  // failure marker.
+  NSMutableString* fallback = [NSMutableString stringWithCapacity:content.size()];
+  for (unsigned char byte : content) {
+    if (byte == '\n' || byte == '\r' || byte == '\t' ||
+        (byte >= 0x20 && byte <= 0x7E)) {
+      [fallback appendFormat:@"%c", byte];
+    } else {
+      [fallback appendFormat:@"\\x%02X", byte];
+    }
+  }
+  return fallback;
+}
+
 struct IOSDiscoveredGame {
   std::filesystem::path path;
   std::string title;
@@ -565,7 +598,8 @@ std::vector<IOSConfigSection> BuildIOSConfigSections() {
   AddBoolSetting(performance.items, "guest_display_refresh_cap", "Cap Guest Display Refresh",
                  "Runs guest vblank at PAL/NTSC rate instead of unlimited.", true);
   AddBoolSetting(performance.items, "async_shader_compilation", "Async Shader Compilation",
-                 "Reduces stutter while pipelines compile in background.", true);
+                 "Backend-dependent. Helps where supported; Metal support is currently limited.",
+                 true);
   AddBoolSetting(performance.items, "half_pixel_offset", "Half-Pixel Offset",
                  "Compatibility adjustment for D3D9-style sampling.", true);
   AddBoolSetting(performance.items, "occlusion_query_enable", "Hardware Occlusion Queries",
@@ -597,8 +631,8 @@ std::vector<IOSConfigSection> BuildIOSConfigSections() {
   AddChoiceSetting(diagnostics.items, IOSConfigControlType::kChoiceInt32, "log_level",
                    "Log Verbosity", "Lower values reduce log noise and file size.", 2,
                    {{"Errors Only", 0}, {"Warnings", 1}, {"Info", 2}, {"Debug", 3}});
-  AddActionSetting(diagnostics.items, IOSConfigAction::kViewRecentLog, "View Recent Log",
-                   "Open the most recent xenia.log output.");
+  AddActionSetting(diagnostics.items, IOSConfigAction::kViewRecentLog, "View Live Log",
+                   "Open a live-updating xenia.log viewer.");
   if (!diagnostics.items.empty()) {
     sections.push_back(std::move(diagnostics));
   }
@@ -805,11 +839,12 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 @implementation XeniaLogViewController {
   UITextView* textView_;
   UILabel* footerLabel_;
+  NSTimer* autoRefreshTimer_;
 }
 
 - (void)viewDidLoad {
   [super viewDidLoad];
-  self.title = @"Recent Log";
+  self.title = @"Live Log";
   self.view.backgroundColor = [UIColor systemBackgroundColor];
 
   UIBarButtonItem* refresh_button =
@@ -854,7 +889,22 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
 - (void)viewWillAppear:(BOOL)animated {
   [super viewWillAppear:animated];
+  [self updateCloseButton];
   [self reloadLog];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+  [super viewDidAppear:animated];
+  [self startAutoRefresh];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+  [super viewWillDisappear:animated];
+  [self stopAutoRefresh];
+}
+
+- (void)dealloc {
+  [self stopAutoRefresh];
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
@@ -867,6 +917,63 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
 - (void)reloadLogTapped:(id)sender {
   [self reloadLog];
+}
+
+- (void)closeTapped:(id)sender {
+  [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (BOOL)shouldShowCloseButton {
+  UINavigationController* nav = self.navigationController;
+  if (!nav || nav.presentingViewController == nil) {
+    return NO;
+  }
+  return nav.viewControllers.count > 0 && nav.viewControllers.firstObject == self;
+}
+
+- (void)updateCloseButton {
+  if ([self shouldShowCloseButton]) {
+    self.navigationItem.leftBarButtonItem =
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                      target:self
+                                                      action:@selector(closeTapped:)];
+  } else {
+    self.navigationItem.leftBarButtonItem = nil;
+  }
+}
+
+- (void)startAutoRefresh {
+  if (autoRefreshTimer_) {
+    return;
+  }
+  autoRefreshTimer_ = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                        target:self
+                                                      selector:@selector(autoRefreshTick:)
+                                                      userInfo:nil
+                                                       repeats:YES];
+  autoRefreshTimer_.tolerance = 0.15;
+}
+
+- (void)stopAutoRefresh {
+  if (!autoRefreshTimer_) {
+    return;
+  }
+  [autoRefreshTimer_ invalidate];
+  autoRefreshTimer_ = nil;
+}
+
+- (void)autoRefreshTick:(NSTimer* __unused)timer {
+  [self reloadLog];
+}
+
+- (BOOL)isNearBottom {
+  CGFloat content_height = textView_.contentSize.height;
+  CGFloat visible_height = CGRectGetHeight(textView_.bounds);
+  if (content_height <= visible_height + 1.0) {
+    return YES;
+  }
+  CGFloat bottom = textView_.contentOffset.y + visible_height;
+  return bottom >= content_height - 36.0;
 }
 
 - (void)shareLogTapped:(id)sender {
@@ -897,30 +1004,35 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
 - (void)reloadLog {
   static constexpr size_t kMaxLogBytes = 256 * 1024;
+  BOOL should_follow_tail = [self isNearBottom];
   std::filesystem::path log_path = GetLogFilePath();
   std::string content = ReadFileTail(log_path, kMaxLogBytes);
   NSString* log_path_ns = ToNSString(log_path.string());
 
+  NSString* display_text = nil;
   if (content.empty()) {
-    textView_.text =
+    display_text =
         [NSString stringWithFormat:@"No recent log data found.\n\nExpected file:\n%@\n\n"
-                                   @"Launch a game, then refresh this screen.",
+                                   @"Launch a game and keep this open. This view updates "
+                                   @"automatically.",
                                    log_path_ns];
   } else {
-    NSData* log_data = [NSData dataWithBytes:content.data() length:content.size()];
-    NSString* decoded = [[NSString alloc] initWithData:log_data encoding:NSUTF8StringEncoding];
-    if (!decoded) {
-      decoded = [[NSString alloc] initWithData:log_data encoding:NSISOLatin1StringEncoding];
-    }
-    if (!decoded) {
-      decoded = @"<Unable to decode log data>";
-    }
-    textView_.text = decoded;
+    display_text = DecodeLogBytesToNSString(content);
+  }
+
+  if (!display_text) {
+    display_text = @"";
+  }
+  if (![textView_.text isEqualToString:display_text]) {
+    textView_.text = display_text;
+  }
+  if (should_follow_tail) {
     [textView_ scrollRangeToVisible:NSMakeRange(textView_.text.length, 0)];
   }
 
   footerLabel_.text =
-      [NSString stringWithFormat:@"Showing last %zu KB from %@", kMaxLogBytes / 1024, log_path_ns];
+      [NSString stringWithFormat:@"Live tail (0.5s). Showing last %zu KB from %@",
+                                 kMaxLogBytes / 1024, log_path_ns];
 }
 
 @end
@@ -1208,6 +1320,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 - (void)toggleInGameMenuTapped:(UITapGestureRecognizer*)recognizer;
 - (void)resumeGameTapped:(UIButton*)sender;
 - (void)inGameSettingsTapped:(UIButton*)sender;
+- (void)inGameLiveLogTapped:(UIButton*)sender;
 - (void)exitGameTapped:(UIButton*)sender;
 - (void)hideInGameMenuOverlay;
 @end
@@ -1636,6 +1749,21 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
      forControlEvents:UIControlEventTouchUpInside];
   [panel addSubview:settings];
 
+  UIButtonConfiguration* live_log_config = [UIButtonConfiguration tintedButtonConfiguration];
+  live_log_config.title = @"Live Log";
+  live_log_config.image = [UIImage systemImageNamed:@"doc.text"];
+  live_log_config.imagePadding = 6;
+  live_log_config.baseForegroundColor = [UIColor whiteColor];
+  live_log_config.baseBackgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
+  live_log_config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+  live_log_config.contentInsets = NSDirectionalEdgeInsetsMake(10, 16, 10, 16);
+  UIButton* live_log = [UIButton buttonWithConfiguration:live_log_config primaryAction:nil];
+  live_log.translatesAutoresizingMaskIntoConstraints = NO;
+  [live_log addTarget:self
+               action:@selector(inGameLiveLogTapped:)
+     forControlEvents:UIControlEventTouchUpInside];
+  [panel addSubview:live_log];
+
   UIButtonConfiguration* exit_config = [UIButtonConfiguration tintedButtonConfiguration];
   exit_config.title = @"Exit To Library";
   exit_config.image = [UIImage systemImageNamed:@"rectangle.portrait.and.arrow.right"];
@@ -1674,7 +1802,11 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
     [settings.leadingAnchor constraintEqualToAnchor:resume.leadingAnchor],
     [settings.trailingAnchor constraintEqualToAnchor:resume.trailingAnchor],
 
-    [exit_button.topAnchor constraintEqualToAnchor:settings.bottomAnchor constant:10],
+    [live_log.topAnchor constraintEqualToAnchor:settings.bottomAnchor constant:10],
+    [live_log.leadingAnchor constraintEqualToAnchor:resume.leadingAnchor],
+    [live_log.trailingAnchor constraintEqualToAnchor:resume.trailingAnchor],
+
+    [exit_button.topAnchor constraintEqualToAnchor:live_log.bottomAnchor constant:10],
     [exit_button.leadingAnchor constraintEqualToAnchor:resume.leadingAnchor],
     [exit_button.trailingAnchor constraintEqualToAnchor:resume.trailingAnchor],
     [exit_button.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor constant:-14],
@@ -1723,6 +1855,25 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 - (void)inGameSettingsTapped:(UIButton*)sender {
   [self hideInGameMenuOverlay];
   [self openSettingsTapped:nil];
+}
+
+- (void)inGameLiveLogTapped:(UIButton*)sender {
+  [self hideInGameMenuOverlay];
+  XeniaLogViewController* log_vc = [[XeniaLogViewController alloc] init];
+  XeniaLandscapeNavigationController* nav =
+      [[XeniaLandscapeNavigationController alloc] initWithRootViewController:log_vc];
+  if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    if (@available(iOS 15.0, *)) {
+      UISheetPresentationController* sheet = nav.sheetPresentationController;
+      sheet.detents = @[ [UISheetPresentationControllerDetent mediumDetent],
+                         [UISheetPresentationControllerDetent largeDetent] ];
+      sheet.prefersGrabberVisible = YES;
+    }
+  } else {
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+  }
+  [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)exitGameTapped:(UIButton*)sender {
