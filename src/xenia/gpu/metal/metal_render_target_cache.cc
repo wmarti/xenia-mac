@@ -2989,11 +2989,10 @@ void MetalRenderTargetCache::BeginFrame() {
   if (::cvars::metal_memory_log_rate > 0 &&
       (frame_id_ % uint64_t(::cvars::metal_memory_log_rate)) == 0) {
     XELOGI(
-        "Metal mem: frame={} rt={} map={} dummy={} pipelines={} "
+        "Metal mem: frame={} map={} dummy={} pipelines={} "
         "tile_pipelines={} inst_buf_sizes=[{}, {}, {}]",
-        frame_id_, render_targets().size(), render_target_map_.size(),
-        dummy_color_targets_.size(), transfer_pipelines_.size(),
-        transfer_tile_pipelines_.size(),
+        frame_id_, render_target_map_.size(), dummy_color_targets_.size(),
+        transfer_pipelines_.size(), transfer_tile_pipelines_.size(),
         transfer_tile_instance_buffer_sizes_[0],
         transfer_tile_instance_buffer_sizes_[1],
         transfer_tile_instance_buffer_sizes_[2]);
@@ -3016,11 +3015,10 @@ bool MetalRenderTargetCache::Update(
     if ((++memory_log_counter % uint64_t(::cvars::metal_memory_log_rate)) ==
         0) {
       XELOGI(
-          "Metal mem: frame={} rt={} map={} dummy={} pipelines={} "
+          "Metal mem: frame={} map={} dummy={} pipelines={} "
           "tile_pipelines={} inst_buf_sizes=[{}, {}, {}]",
-          frame_id_, render_targets().size(), render_target_map_.size(),
-          dummy_color_targets_.size(), transfer_pipelines_.size(),
-          transfer_tile_pipelines_.size(),
+          frame_id_, render_target_map_.size(), dummy_color_targets_.size(),
+          transfer_pipelines_.size(), transfer_tile_pipelines_.size(),
           transfer_tile_instance_buffer_sizes_[0],
           transfer_tile_instance_buffer_sizes_[1],
           transfer_tile_instance_buffer_sizes_[2]);
