@@ -11,11 +11,14 @@
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
 #include <chrono>
+#include <condition_variable>
 #include <dispatch/dispatch.h>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -355,6 +358,19 @@ class MetalCommandProcessor : public CommandProcessor {
       xenos::Endian index_endian, const draw_util::ViewportInfo& viewport_info,
       uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
       uint32_t normalized_color_mask);
+  enum class MslShaderCompileStatus {
+    kReady,
+    kPending,
+    kFailed,
+    kNotQueued,
+  };
+  void InitializeMslAsyncCompilation();
+  void ShutdownMslAsyncCompilation();
+  MslShaderCompileStatus GetMslShaderCompileStatus(
+      MslShader::MslTranslation* translation);
+  bool EnqueueMslShaderCompilation(MslShader::MslTranslation* translation,
+                                   bool is_ios, uint8_t priority);
+  void MslShaderCompileThread(size_t thread_index);
   MTL::RenderPipelineState* GetOrCreateMslPipelineState(
       MslShader::MslTranslation* vertex_translation,
       MslShader::MslTranslation* pixel_translation, const RegisterFile& regs);
@@ -419,6 +435,30 @@ class MetalCommandProcessor : public CommandProcessor {
   SpirvShaderTranslator::ClipPlaneConstants spirv_clip_plane_constants_ = {};
   SpirvShaderTranslator::TessellationConstants spirv_tessellation_constants_ =
       {};
+  struct MslShaderCompileRequest {
+    MslShader::MslTranslation* translation = nullptr;
+    uint64_t shader_hash = 0;
+    uint64_t modification = 0;
+    bool is_ios = false;
+    uint8_t priority = 0;
+  };
+  struct MslShaderCompileRequestCompare {
+    bool operator()(const MslShaderCompileRequest& a,
+                    const MslShaderCompileRequest& b) const {
+      return a.priority < b.priority;
+    }
+  };
+  std::priority_queue<MslShaderCompileRequest,
+                      std::vector<MslShaderCompileRequest>,
+                      MslShaderCompileRequestCompare>
+      msl_shader_compile_queue_;
+  std::unordered_set<MslShader::MslTranslation*> msl_shader_compile_pending_;
+  std::unordered_set<MslShader::MslTranslation*> msl_shader_compile_failed_;
+  std::mutex msl_shader_compile_mutex_;
+  std::condition_variable msl_shader_compile_cv_;
+  std::vector<std::thread> msl_shader_compile_threads_;
+  size_t msl_shader_compile_busy_ = 0;
+  bool msl_shader_compile_shutdown_ = false;
   std::unordered_map<uint64_t, MTL::RenderPipelineState*> msl_pipeline_cache_;
 
   // SPIRV-Cross tessellation support.

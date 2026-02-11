@@ -77,6 +77,13 @@ using BYTE = uint8_t;
 #endif
 
 DECLARE_bool(clear_memory_page_state);
+DEFINE_int32(
+    metal_pipeline_creation_threads, -1,
+    "Number of threads used for SPIRV-Cross shader compilation in the Metal "
+    "backend. -1 to calculate automatically (75% of logical CPU cores), a "
+    "positive number to specify the number of threads explicitly (up to the "
+    "number of logical CPU cores), 0 to disable multithreaded compilation.",
+    "Metal");
 
 namespace xe {
 namespace gpu {
@@ -326,6 +333,7 @@ MetalCommandProcessor::~MetalCommandProcessor() {
     current_command_buffer_->release();
     current_command_buffer_ = nullptr;
   }
+  ShutdownMslAsyncCompilation();
   if (render_pass_descriptor_) {
     render_pass_descriptor_->release();
     render_pass_descriptor_ = nullptr;
@@ -428,6 +436,175 @@ MetalCommandProcessor::~MetalCommandProcessor() {
     spirv_uniforms_available_semaphore_ = nullptr;
   }
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
+}
+
+void MetalCommandProcessor::InitializeMslAsyncCompilation() {
+  ShutdownMslAsyncCompilation();
+
+  if (!cvars::async_shader_compilation) {
+    return;
+  }
+
+  uint32_t logical_processor_count = std::thread::hardware_concurrency();
+  if (!logical_processor_count) {
+    logical_processor_count = 6;
+  }
+
+  if (cvars::metal_pipeline_creation_threads == 0) {
+    return;
+  }
+
+  size_t thread_count = 0;
+  if (cvars::metal_pipeline_creation_threads < 0) {
+    thread_count = std::max<uint32_t>(logical_processor_count * 3 / 4, 1);
+  } else {
+    thread_count =
+        std::min<uint32_t>(uint32_t(cvars::metal_pipeline_creation_threads),
+                           logical_processor_count);
+  }
+  if (!thread_count) {
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+    msl_shader_compile_shutdown_ = false;
+  }
+
+  msl_shader_compile_threads_.reserve(thread_count);
+  for (size_t i = 0; i < thread_count; ++i) {
+    msl_shader_compile_threads_.emplace_back(
+        [this, i]() { MslShaderCompileThread(i); });
+  }
+
+  XELOGI(
+      "SPIRV-Cross: async Metal shader compilation enabled with {} worker "
+      "thread(s)",
+      thread_count);
+}
+
+void MetalCommandProcessor::ShutdownMslAsyncCompilation() {
+  {
+    std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+    msl_shader_compile_shutdown_ = true;
+  }
+  msl_shader_compile_cv_.notify_all();
+
+  for (std::thread& thread : msl_shader_compile_threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+  msl_shader_compile_threads_.clear();
+
+  std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+  std::priority_queue<MslShaderCompileRequest,
+                      std::vector<MslShaderCompileRequest>,
+                      MslShaderCompileRequestCompare>
+      empty_queue;
+  std::swap(msl_shader_compile_queue_, empty_queue);
+  msl_shader_compile_pending_.clear();
+  msl_shader_compile_failed_.clear();
+  msl_shader_compile_busy_ = 0;
+  msl_shader_compile_shutdown_ = false;
+}
+
+MetalCommandProcessor::MslShaderCompileStatus
+MetalCommandProcessor::GetMslShaderCompileStatus(
+    MslShader::MslTranslation* translation) {
+  if (!translation) {
+    return MslShaderCompileStatus::kFailed;
+  }
+
+  std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+  if (msl_shader_compile_failed_.find(translation) !=
+      msl_shader_compile_failed_.end()) {
+    return MslShaderCompileStatus::kFailed;
+  }
+  if (msl_shader_compile_pending_.find(translation) !=
+      msl_shader_compile_pending_.end()) {
+    return MslShaderCompileStatus::kPending;
+  }
+  return translation->is_valid() ? MslShaderCompileStatus::kReady
+                                 : MslShaderCompileStatus::kNotQueued;
+}
+
+bool MetalCommandProcessor::EnqueueMslShaderCompilation(
+    MslShader::MslTranslation* translation, bool is_ios, uint8_t priority) {
+  if (!translation || !cvars::async_shader_compilation ||
+      msl_shader_compile_threads_.empty()) {
+    return false;
+  }
+
+  if (translation->is_valid()) {
+    return true;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+    if (msl_shader_compile_failed_.find(translation) !=
+        msl_shader_compile_failed_.end()) {
+      return false;
+    }
+    if (msl_shader_compile_pending_.find(translation) !=
+        msl_shader_compile_pending_.end()) {
+      return true;
+    }
+
+    MslShaderCompileRequest request;
+    request.translation = translation;
+    request.shader_hash = translation->shader().ucode_data_hash();
+    request.modification = translation->modification();
+    request.is_ios = is_ios;
+    request.priority = priority;
+    msl_shader_compile_pending_.insert(translation);
+    msl_shader_compile_queue_.push(request);
+  }
+  msl_shader_compile_cv_.notify_one();
+  return true;
+}
+
+void MetalCommandProcessor::MslShaderCompileThread(size_t thread_index) {
+  while (true) {
+    MslShaderCompileRequest request;
+    {
+      std::unique_lock<std::mutex> lock(msl_shader_compile_mutex_);
+      msl_shader_compile_cv_.wait(lock, [this]() {
+        return msl_shader_compile_shutdown_ || !msl_shader_compile_queue_.empty();
+      });
+      if (msl_shader_compile_shutdown_) {
+        return;
+      }
+      request = msl_shader_compile_queue_.top();
+      msl_shader_compile_queue_.pop();
+      ++msl_shader_compile_busy_;
+    }
+
+    bool compiled = false;
+    if (request.translation) {
+      compiled = request.translation->CompileToMsl(device_, request.is_ios);
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+      if (request.translation) {
+        msl_shader_compile_pending_.erase(request.translation);
+        if (!compiled) {
+          msl_shader_compile_failed_.insert(request.translation);
+        }
+      }
+      if (msl_shader_compile_busy_) {
+        --msl_shader_compile_busy_;
+      }
+    }
+
+    if (!compiled) {
+      XELOGE(
+          "SPIRV-Cross: async Metal compile failed on worker {} (shader "
+          "{:016X}, mod {:016X})",
+          thread_index, request.shader_hash, request.modification);
+    }
+  }
 }
 
 #if METAL_SHADER_CONVERTER_AVAILABLE
@@ -653,6 +830,9 @@ bool MetalCommandProcessor::SetupContext() {
   if (!InitializeShaderTranslation()) {
     XELOGE("Failed to initialize shader translation");
     return false;
+  }
+  if (cvars::metal_use_spirvcross) {
+    InitializeMslAsyncCompilation();
   }
 #if METAL_SHADER_CONVERTER_AVAILABLE
   if (mesh_shader_supported_) {
@@ -1110,6 +1290,8 @@ void MetalCommandProcessor::ShutdownContext() {
   depth_only_pixel_function_name_.clear();
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
   frame_open_ = false;
+
+  ShutdownMslAsyncCompilation();
 
 #if METAL_SHADER_CONVERTER_AVAILABLE
   shader_cache_.clear();
@@ -3213,12 +3395,52 @@ bool MetalCommandProcessor::IssueDrawMsl(
       return false;
     }
   }
-  if (!vertex_translation->is_valid()) {
-    if (!vertex_translation->CompileToMsl(device_, kIsIos)) {
-      XELOGE(
-          "SPIRV-Cross: Failed to prepare vertex shader MSL/library/function");
-      return false;
+  auto ensure_msl_translation_ready =
+      [&](MslShader::MslTranslation* translation,
+          uint8_t priority) -> MslShaderCompileStatus {
+    if (!translation) {
+      return MslShaderCompileStatus::kFailed;
     }
+    MslShaderCompileStatus status = GetMslShaderCompileStatus(translation);
+    if (status == MslShaderCompileStatus::kReady ||
+        status == MslShaderCompileStatus::kPending ||
+        status == MslShaderCompileStatus::kFailed) {
+      return status;
+    }
+    if (EnqueueMslShaderCompilation(translation, kIsIos, priority)) {
+      return MslShaderCompileStatus::kPending;
+    }
+    if (!translation->CompileToMsl(device_, kIsIos)) {
+      std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+      msl_shader_compile_failed_.insert(translation);
+      return MslShaderCompileStatus::kFailed;
+    }
+    return MslShaderCompileStatus::kReady;
+  };
+  auto log_pending_compile =
+      [&](MslShader::MslTranslation* translation, const char* stage_tag) {
+        static auto last_pending_log = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_pending_log < std::chrono::seconds(1)) {
+          return;
+        }
+        last_pending_log = now;
+        XELOGI(
+            "SPIRV-Cross: Skipping draw - {} shader compile pending "
+            "(shader={:016X}, mod={:016X})",
+            stage_tag, translation->shader().ucode_data_hash(),
+            translation->modification());
+      };
+  MslShaderCompileStatus vertex_compile_status =
+      ensure_msl_translation_ready(vertex_translation, 1);
+  if (vertex_compile_status == MslShaderCompileStatus::kPending) {
+    log_pending_compile(vertex_translation, "vertex");
+    return true;
+  }
+  if (vertex_compile_status == MslShaderCompileStatus::kFailed) {
+    XELOGE(
+        "SPIRV-Cross: Failed to prepare vertex shader MSL/library/function");
+    return false;
   }
 
   MslShader::MslTranslation* pixel_translation = nullptr;
@@ -3233,12 +3455,15 @@ bool MetalCommandProcessor::IssueDrawMsl(
         return false;
       }
     }
-    if (!pixel_translation->is_valid()) {
-      if (!pixel_translation->CompileToMsl(device_, kIsIos)) {
-        XELOGE(
-            "SPIRV-Cross: Failed to prepare pixel shader MSL/library/function");
-        return false;
-      }
+    MslShaderCompileStatus pixel_compile_status =
+        ensure_msl_translation_ready(pixel_translation, 2);
+    if (pixel_compile_status == MslShaderCompileStatus::kPending) {
+      log_pending_compile(pixel_translation, "pixel");
+      return true;
+    }
+    if (pixel_compile_status == MslShaderCompileStatus::kFailed) {
+      XELOGE("SPIRV-Cross: Failed to prepare pixel shader MSL/library/function");
+      return false;
     }
   }
 
