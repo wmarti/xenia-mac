@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
 #include <chrono>
+#include <dispatch/dispatch.h>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -505,9 +506,15 @@ class MetalCommandProcessor : public CommandProcessor {
   MTL::Buffer* uniforms_buffer_ = nullptr;
   size_t draw_ring_count_ = 0;
 #if !METAL_SHADER_CONVERTER_AVAILABLE
-  // Exhausted SPIRV-Cross uniforms buffers kept alive until command buffer
-  // completion to avoid in-flight draw constant overwrites.
-  std::vector<MTL::Buffer*> command_buffer_spirv_uniforms_;
+  // Owning storage for all SPIRV-Cross uniforms buffers allocated for the
+  // current context.
+  std::vector<MTL::Buffer*> spirv_uniforms_pool_;
+  // Reusable SPIRV-Cross uniforms buffers returned from completed command
+  // buffers to reduce iOS allocation churn.
+  std::vector<MTL::Buffer*> spirv_uniforms_available_;
+  std::mutex spirv_uniforms_mutex_;
+  dispatch_semaphore_t spirv_uniforms_available_semaphore_ = nullptr;
+  bool spirv_uniforms_pool_initialized_ = false;
 #endif  // !METAL_SHADER_CONVERTER_AVAILABLE
 
 #if METAL_SHADER_CONVERTER_AVAILABLE

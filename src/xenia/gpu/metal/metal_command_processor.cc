@@ -409,17 +409,24 @@ MetalCommandProcessor::~MetalCommandProcessor() {
 
   ShutdownShaderStorage();
 #else
-  // SPIRV-Cross path: release directly-owned uniforms buffer.
-  if (uniforms_buffer_) {
-    uniforms_buffer_->release();
-    uniforms_buffer_ = nullptr;
-  }
-  for (MTL::Buffer* submitted_uniforms : command_buffer_spirv_uniforms_) {
-    if (submitted_uniforms) {
-      submitted_uniforms->release();
+  uniforms_buffer_ = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(spirv_uniforms_mutex_);
+    spirv_uniforms_available_.clear();
+    for (MTL::Buffer* pool_uniforms : spirv_uniforms_pool_) {
+      if (pool_uniforms) {
+        pool_uniforms->release();
+      }
     }
+    spirv_uniforms_pool_.clear();
+    spirv_uniforms_pool_initialized_ = false;
   }
-  command_buffer_spirv_uniforms_.clear();
+  if (spirv_uniforms_available_semaphore_) {
+#if !OS_OBJECT_USE_OBJC
+    dispatch_release(spirv_uniforms_available_semaphore_);
+#endif
+    spirv_uniforms_available_semaphore_ = nullptr;
+  }
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 }
 
@@ -598,6 +605,19 @@ bool MetalCommandProcessor::SetupContext() {
   mesh_shader_supported_ = supports_apple7 || supports_mac2;
 
   draw_ring_count_ = std::max<int32_t>(1, ::cvars::metal_draw_ring_count);
+#if XE_PLATFORM_IOS && !METAL_SHADER_CONVERTER_AVAILABLE
+  // On iOS SPIRV-Cross path, very large per-command-buffer ring sizes can keep
+  // each in-flight uniforms buffer busy for too long, leading to frequent
+  // pool back-pressure stalls with the triple-buffer model.
+  constexpr size_t kMaxIosSpirvRingPages = 8;
+  if (draw_ring_count_ > kMaxIosSpirvRingPages) {
+    XELOGW(
+        "SPIRV-Cross: clamping draw ring pages on iOS from {} to {} to keep "
+        "uniforms pool latency bounded",
+        draw_ring_count_, kMaxIosSpirvRingPages);
+    draw_ring_count_ = kMaxIosSpirvRingPages;
+  }
+#endif
 
   // Initialize shared memory
   shared_memory_ = std::make_unique<MetalSharedMemory>(*this, *memory_);
@@ -1105,6 +1125,27 @@ void MetalCommandProcessor::ShutdownContext() {
   msl_pipeline_cache_.clear();
   msl_shader_cache_.clear();
   spirv_shader_translator_.reset();
+
+#if !METAL_SHADER_CONVERTER_AVAILABLE
+  uniforms_buffer_ = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(spirv_uniforms_mutex_);
+    spirv_uniforms_available_.clear();
+    for (MTL::Buffer* pool_uniforms : spirv_uniforms_pool_) {
+      if (pool_uniforms) {
+        pool_uniforms->release();
+      }
+    }
+    spirv_uniforms_pool_.clear();
+    spirv_uniforms_pool_initialized_ = false;
+  }
+  if (spirv_uniforms_available_semaphore_) {
+#if !OS_OBJECT_USE_OBJC
+    dispatch_release(spirv_uniforms_available_semaphore_);
+#endif
+    spirv_uniforms_available_semaphore_ = nullptr;
+  }
+#endif  // !METAL_SHADER_CONVERTER_AVAILABLE
 
   shared_memory_.reset();
 #if METAL_SHADER_CONVERTER_AVAILABLE
@@ -3174,7 +3215,8 @@ bool MetalCommandProcessor::IssueDrawMsl(
   }
   if (!vertex_translation->is_valid()) {
     if (!vertex_translation->CompileToMsl(device_, kIsIos)) {
-      XELOGE("SPIRV-Cross: Failed to compile vertex shader to MSL");
+      XELOGE(
+          "SPIRV-Cross: Failed to prepare vertex shader MSL/library/function");
       return false;
     }
   }
@@ -3193,7 +3235,8 @@ bool MetalCommandProcessor::IssueDrawMsl(
     }
     if (!pixel_translation->is_valid()) {
       if (!pixel_translation->CompileToMsl(device_, kIsIos)) {
-        XELOGE("SPIRV-Cross: Failed to compile pixel shader to MSL");
+        XELOGE(
+            "SPIRV-Cross: Failed to prepare pixel shader MSL/library/function");
         return false;
       }
     }
@@ -4184,12 +4227,32 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
   current_command_buffer_ = command_queue_->commandBuffer();
   if (!current_command_buffer_) {
     XELOGE("EnsureCommandBuffer: failed to create command buffer");
+    DrainCommandBufferAutoreleasePool();
     return nullptr;
   }
-  ++submission_current_;
   current_command_buffer_->retain();
   current_command_buffer_->setLabel(
       NS::String::string("XeniaCommandBuffer", NS::UTF8StringEncoding));
+
+#if !METAL_SHADER_CONVERTER_AVAILABLE
+  if (cvars::metal_use_spirvcross && !EnsureSpirvUniformBuffer()) {
+    static auto last_ensure_uniforms_fail_log =
+        std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_ensure_uniforms_fail_log >= std::chrono::seconds(1)) {
+      last_ensure_uniforms_fail_log = now;
+      XELOGE(
+          "EnsureCommandBuffer: failed to prepare SPIRV-Cross uniforms "
+          "buffer");
+    }
+    current_command_buffer_->release();
+    current_command_buffer_ = nullptr;
+    DrainCommandBufferAutoreleasePool();
+    return nullptr;
+  }
+#endif  // !METAL_SHADER_CONVERTER_AVAILABLE
+
+  ++submission_current_;
   current_command_buffer_->addCompletedHandler([this](MTL::CommandBuffer*) {
     completed_command_buffers_.fetch_add(1, std::memory_order_relaxed);
   });
@@ -4207,16 +4270,6 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
     }
     frame_open_ = true;
   }
-
-#if !METAL_SHADER_CONVERTER_AVAILABLE
-  if (cvars::metal_use_spirvcross && !EnsureSpirvUniformBuffer()) {
-    XELOGE(
-        "EnsureCommandBuffer: failed to prepare SPIRV-Cross uniforms buffer");
-    current_command_buffer_->release();
-    current_command_buffer_ = nullptr;
-    return nullptr;
-  }
-#endif  // !METAL_SHADER_CONVERTER_AVAILABLE
 
   return current_command_buffer_;
 }
@@ -4443,89 +4496,159 @@ bool MetalCommandProcessor::EnsureSpirvUniformBuffer() {
     XELOGE("EnsureSpirvUniformBuffer: Metal device is null");
     return false;
   }
+
+  // Keep this aligned with the SPIRV-Cross descriptor table layout used by
+  // IssueDrawMsl (6 x 4KB CBVs + texture/sampler descriptor blocks).
+  constexpr size_t kUniformsBytesPerTable = 24576;
+  constexpr size_t kStageCount = 2;
+
   if (!draw_ring_count_) {
     XELOGW("SPIRV-Cross: draw ring count was zero, forcing to 1");
     draw_ring_count_ = 1;
   }
 
-  auto try_allocate_with_ring_fallback = [this](size_t initial_ring_count) {
-    size_t requested_ring_count = std::max<size_t>(1, initial_ring_count);
+#if XE_PLATFORM_IOS
+  // Keep one more in-flight uniforms buffer than a strict triple-buffer model
+  // to reduce CPU stalls on heavy frames while command buffers are retiring.
+  constexpr size_t kUniformsBuffersInFlightInitial = 4;
+#else
+  constexpr size_t kUniformsBuffersInFlightInitial = 4;
+#endif
+
+  if (!spirv_uniforms_pool_initialized_) {
+    size_t requested_ring_count = std::max<size_t>(1, draw_ring_count_);
     while (requested_ring_count >= 1) {
       const size_t descriptor_table_count = kStageCount * requested_ring_count;
       const size_t uniforms_buffer_size =
           kUniformsBytesPerTable * descriptor_table_count;
 
-      uniforms_buffer_ = device_->newBuffer(uniforms_buffer_size,
-                                            MTL::ResourceStorageModeShared);
-      if (uniforms_buffer_) {
+      std::vector<MTL::Buffer*> new_pool;
+      new_pool.reserve(kUniformsBuffersInFlightInitial);
+      bool allocation_failed = false;
+      for (size_t i = 0; i < kUniformsBuffersInFlightInitial; ++i) {
+        MTL::Buffer* buffer =
+            device_->newBuffer(uniforms_buffer_size, MTL::ResourceStorageModeShared);
+        if (!buffer) {
+          allocation_failed = true;
+          break;
+        }
+        buffer->setLabel(
+            NS::String::string("MslUniformsBuffer", NS::UTF8StringEncoding));
+        std::memset(buffer->contents(), 0, uniforms_buffer_size);
+        new_pool.push_back(buffer);
+      }
+
+      if (!allocation_failed &&
+          new_pool.size() == kUniformsBuffersInFlightInitial) {
+        {
+          std::lock_guard<std::mutex> lock(spirv_uniforms_mutex_);
+          for (MTL::Buffer* old_buffer : spirv_uniforms_pool_) {
+            if (old_buffer) {
+              old_buffer->release();
+            }
+          }
+          spirv_uniforms_pool_ = std::move(new_pool);
+          spirv_uniforms_available_.clear();
+          spirv_uniforms_available_.insert(spirv_uniforms_available_.end(),
+                                           spirv_uniforms_pool_.begin(),
+                                           spirv_uniforms_pool_.end());
+        }
+
+        if (spirv_uniforms_available_semaphore_) {
+#if !OS_OBJECT_USE_OBJC
+          dispatch_release(spirv_uniforms_available_semaphore_);
+#endif
+          spirv_uniforms_available_semaphore_ = nullptr;
+        }
+        spirv_uniforms_available_semaphore_ = dispatch_semaphore_create(
+            static_cast<long>(kUniformsBuffersInFlightInitial));
+        if (!spirv_uniforms_available_semaphore_) {
+          XELOGE("SPIRV-Cross: failed to create uniforms availability semaphore");
+          return false;
+        }
+
         if (requested_ring_count != draw_ring_count_) {
           XELOGW(
-              "SPIRV-Cross: Reduced uniforms ring from {} to {} pages after "
+              "SPIRV-Cross: reduced uniforms ring from {} to {} pages after "
               "allocation pressure",
               draw_ring_count_, requested_ring_count);
           draw_ring_count_ = requested_ring_count;
         }
-        uniforms_buffer_->setLabel(
-            NS::String::string("MslUniformsBuffer", NS::UTF8StringEncoding));
-        std::memset(uniforms_buffer_->contents(), 0, uniforms_buffer_size);
-        return true;
+        spirv_uniforms_pool_initialized_ = true;
+        break;
       }
 
+      for (MTL::Buffer* buffer : new_pool) {
+        if (buffer) {
+          buffer->release();
+        }
+      }
       if (requested_ring_count == 1) {
         break;
       }
-      const size_t fallback_ring_count =
-          std::max<size_t>(1, requested_ring_count / 2);
+      const size_t fallback_ring_count = std::max<size_t>(1, requested_ring_count / 2);
       XELOGW(
-          "SPIRV-Cross: Failed to allocate uniforms buffer with {} ring pages, "
+          "SPIRV-Cross: failed to allocate uniforms pool with {} ring pages, "
           "retrying with {}",
           requested_ring_count, fallback_ring_count);
       requested_ring_count = fallback_ring_count;
     }
-    return false;
-  };
 
-  if (try_allocate_with_ring_fallback(draw_ring_count_)) {
-    return true;
-  }
-
-  // If the queue is holding many in-flight command buffers, wait for completion
-  // once, then retry a minimal uniforms ring allocation.
-  if (command_queue_) {
-    XELOGW(
-        "SPIRV-Cross: uniforms allocation failed; draining Metal queue and "
-        "retrying");
-    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
-    MTL::CommandBuffer* sync_cmd = command_queue_->commandBuffer();
-    if (sync_cmd) {
-      uint64_t wait_value = 0;
-      if (wait_shared_event_) {
-        wait_value = ++wait_shared_event_value_;
-        sync_cmd->encodeSignalEvent(wait_shared_event_, wait_value);
-      }
-      sync_cmd->commit();
-      if (wait_shared_event_) {
-        wait_shared_event_->waitUntilSignaledValue(
-            wait_value, std::numeric_limits<uint64_t>::max());
-      } else {
-        sync_cmd->waitUntilCompleted();
-      }
+    if (!spirv_uniforms_pool_initialized_) {
+      XELOGE(
+          "Failed to create uniforms buffer pool for SPIRV-Cross path (ring "
+          "pages={}, bytes per table={})",
+          draw_ring_count_, kUniformsBytesPerTable);
+      return false;
     }
-    pool->release();
-    ProcessCompletedSubmissions();
   }
 
-  draw_ring_count_ = std::max<size_t>(
-      size_t(1), std::min<size_t>(draw_ring_count_, size_t(4)));
-  if (try_allocate_with_ring_fallback(draw_ring_count_)) {
-    return true;
+  if (!spirv_uniforms_available_semaphore_) {
+    XELOGE("SPIRV-Cross: uniforms pool semaphore is not initialized");
+    return false;
   }
 
-  XELOGE(
-      "Failed to create uniforms buffer for SPIRV-Cross path (ring pages={}, "
-      "bytes per table={})",
-      draw_ring_count_, kUniformsBytesPerTable);
-  return false;
+  if (dispatch_semaphore_wait(spirv_uniforms_available_semaphore_,
+                              DISPATCH_TIME_NOW) != 0) {
+    static auto last_wait_log = std::chrono::steady_clock::time_point{};
+    static uint32_t suppressed_wait_logs = 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_wait_log >= std::chrono::seconds(5)) {
+      last_wait_log = now;
+      size_t pool_size = 0;
+      size_t available_size = 0;
+      {
+        std::lock_guard<std::mutex> lock(spirv_uniforms_mutex_);
+        pool_size = spirv_uniforms_pool_.size();
+        available_size = spirv_uniforms_available_.size();
+      }
+      XELOGW(
+          "SPIRV-Cross: uniforms pool busy; waiting for an in-flight command "
+          "buffer to retire (in-use={}, total={}, available={}, ring "
+          "pages={}, suppressed_wait_logs={})",
+          pool_size - available_size, pool_size, available_size,
+          draw_ring_count_, suppressed_wait_logs);
+      suppressed_wait_logs = 0;
+    } else {
+      ++suppressed_wait_logs;
+    }
+    dispatch_semaphore_wait(spirv_uniforms_available_semaphore_,
+                            DISPATCH_TIME_FOREVER);
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(spirv_uniforms_mutex_);
+    if (spirv_uniforms_available_.empty()) {
+      XELOGE(
+          "SPIRV-Cross: uniforms semaphore signaled but no reusable buffer is "
+          "available");
+      return false;
+    }
+    uniforms_buffer_ = spirv_uniforms_available_.back();
+    spirv_uniforms_available_.pop_back();
+  }
+
+  return uniforms_buffer_ != nullptr;
 }
 
 bool MetalCommandProcessor::EnsureSpirvUniformBufferCapacity() {
@@ -4536,55 +4659,20 @@ bool MetalCommandProcessor::EnsureSpirvUniformBufferCapacity() {
     return EnsureSpirvUniformBuffer();
   }
 
-  MTL::Buffer* exhausted_uniforms = uniforms_buffer_;
-  uniforms_buffer_ = nullptr;
-  if (!EnsureSpirvUniformBuffer()) {
-    static bool rollover_logged = false;
-    if (!rollover_logged) {
-      rollover_logged = true;
-      XELOGW(
-          "SPIRV-Cross: uniforms ring expansion failed; forcing command "
-          "buffer rollover/wait and reusing current uniforms buffer");
-    }
-    uniforms_buffer_ = exhausted_uniforms;
-    if (current_command_buffer_) {
-      EndRenderEncoder();
-      uint64_t wait_value = 0;
-      if (wait_shared_event_) {
-        wait_value = ++wait_shared_event_value_;
-        current_command_buffer_->encodeSignalEvent(wait_shared_event_,
-                                                   wait_value);
-      }
-      current_command_buffer_->commit();
-      if (wait_shared_event_) {
-        wait_shared_event_->waitUntilSignaledValue(
-            wait_value, std::numeric_limits<uint64_t>::max());
-      } else {
-        current_command_buffer_->waitUntilCompleted();
-      }
-      current_command_buffer_->release();
-      current_command_buffer_ = nullptr;
-      ProcessCompletedSubmissions();
-    }
-    for (MTL::Buffer* retired_uniforms : command_buffer_spirv_uniforms_) {
-      if (retired_uniforms) {
-        retired_uniforms->release();
-      }
-    }
-    command_buffer_spirv_uniforms_.clear();
-    current_draw_index_ = 0;
-    BeginCommandBuffer();
-    if (!current_command_buffer_ || !current_render_encoder_) {
-      XELOGE(
-          "SPIRV-Cross: failed to restart command buffer after uniforms "
-          "rollover");
-      return false;
-    }
-    return true;
+  static bool rollover_logged = false;
+  if (!rollover_logged) {
+    rollover_logged = true;
+    XELOGW("SPIRV-Cross: uniforms ring exhausted; rotating Metal command buffer");
   }
 
-  command_buffer_spirv_uniforms_.push_back(exhausted_uniforms);
-  current_draw_index_ = 0;
+  EndCommandBuffer();
+  BeginCommandBuffer();
+  if (!current_command_buffer_ || !current_render_encoder_ || !uniforms_buffer_) {
+    XELOGE(
+        "SPIRV-Cross: failed to restart command buffer after uniforms ring "
+        "rollover");
+    return false;
+  }
   return true;
 }
 
@@ -4593,34 +4681,37 @@ void MetalCommandProcessor::ScheduleSpirvUniformBufferRelease(
   if (!command_buffer) {
     return;
   }
-  if (command_buffer_spirv_uniforms_.empty() && !uniforms_buffer_) {
+  if (!uniforms_buffer_) {
     return;
   }
 
   std::vector<MTL::Buffer*> submitted_uniforms;
-  submitted_uniforms.reserve(command_buffer_spirv_uniforms_.size() +
-                             (uniforms_buffer_ ? 1 : 0));
-  for (MTL::Buffer* retired_uniforms : command_buffer_spirv_uniforms_) {
-    if (retired_uniforms) {
-      submitted_uniforms.push_back(retired_uniforms);
-    }
-  }
-  command_buffer_spirv_uniforms_.clear();
-
-  if (uniforms_buffer_) {
-    submitted_uniforms.push_back(uniforms_buffer_);
-    uniforms_buffer_ = nullptr;
-  }
+  submitted_uniforms.reserve(1);
+  submitted_uniforms.push_back(uniforms_buffer_);
+  uniforms_buffer_ = nullptr;
 
   if (submitted_uniforms.empty()) {
     return;
   }
 
   command_buffer->addCompletedHandler(
-      [submitted_uniforms =
-           std::move(submitted_uniforms)](MTL::CommandBuffer*) mutable {
-        for (MTL::Buffer* uniforms : submitted_uniforms) {
-          uniforms->release();
+      [this, submitted_uniforms = std::move(submitted_uniforms)](
+          MTL::CommandBuffer*) mutable {
+        size_t returned_count = 0;
+        {
+          std::lock_guard<std::mutex> lock(spirv_uniforms_mutex_);
+          for (MTL::Buffer* uniforms : submitted_uniforms) {
+            if (!uniforms) {
+              continue;
+            }
+            spirv_uniforms_available_.push_back(uniforms);
+            ++returned_count;
+          }
+        }
+        if (spirv_uniforms_available_semaphore_) {
+          for (size_t i = 0; i < returned_count; ++i) {
+            dispatch_semaphore_signal(spirv_uniforms_available_semaphore_);
+          }
         }
       });
 }
