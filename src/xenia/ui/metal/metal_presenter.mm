@@ -74,7 +74,7 @@ DEFINE_bool(metal_presenter_use_backing_scale, false,
             "If false, drawable size equals logical window size.",
             "GPU");
 #else
-DEFINE_bool(metal_presenter_use_backing_scale, true,
+DEFINE_bool(metal_presenter_use_backing_scale, false,
             "Use platform backing scale for CAMetalLayer drawable size. "
             "If false, drawable size equals logical window size.",
             "GPU");
@@ -810,7 +810,7 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
 
   // Obtain a CAMetalLayer from the platform surface.
   CAMetalLayer* metal_layer = nullptr;
-  CGFloat backing_scale = 1.0;
+  CGFloat surface_scale = 1.0;
 
 #if XE_PLATFORM_IOS
   if (surface_type != Surface::kTypeIndex_iOSUIView) {
@@ -822,7 +822,7 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   metal_layer = ios_surface.GetOrCreateMetalLayer();
   UIView* view = ios_surface.view();
   if (view) {
-    backing_scale = [view contentScaleFactor];
+    surface_scale = [view contentScaleFactor];
   }
 #else
   if (surface_type != Surface::kTypeIndex_MacNSView) {
@@ -833,18 +833,6 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   MacNSViewSurface& mac_ns_view_surface =
       static_cast<MacNSViewSurface&>(new_surface);
   metal_layer = mac_ns_view_surface.GetOrCreateMetalLayer();
-  NSView* view = mac_ns_view_surface.view();
-  if (view) {
-    NSRect bounds = [view bounds];
-    if (bounds.size.width > 0.0 && bounds.size.height > 0.0) {
-      NSRect backing_bounds = [view convertRectToBacking:bounds];
-      if (backing_bounds.size.width > 0.0) {
-        backing_scale = backing_bounds.size.width / bounds.size.width;
-      }
-    } else if (view.window) {
-      backing_scale = view.window.backingScaleFactor;
-    }
-  }
 #endif
 
   if (!metal_layer) {
@@ -855,18 +843,24 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   // Configure the metal layer for our device using Objective-C syntax.
   metal_layer.device = (__bridge id<MTLDevice>)device_;
   metal_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-  if (backing_scale <= 0.0) {
-    backing_scale = 1.0;
+  if (surface_scale <= 0.0) {
+    surface_scale = 1.0;
   }
-  if (!cvars::metal_presenter_use_backing_scale) {
-    backing_scale = 1.0;
-  }
-  surface_scale_ = static_cast<float>(backing_scale);
+#if !XE_PLATFORM_IOS
+  // Match D3D12/Vulkan surface sizing semantics on macOS (no Retina multiplier
+  // at the presenter level).
+  surface_scale = 1.0;
+#else
+  // Match other backends' surface sizing semantics on iOS as well (logical
+  // surface size at presenter level).
+  surface_scale = 1.0;
+#endif
+  surface_scale_ = static_cast<float>(surface_scale);
   surface_width_in_points_ = new_surface_width;
   surface_height_in_points_ = new_surface_height;
-  metal_layer.contentsScale = backing_scale;
+  metal_layer.contentsScale = surface_scale;
   metal_layer.drawableSize =
-      CGSizeMake(new_surface_width * backing_scale, new_surface_height * backing_scale);
+      CGSizeMake(new_surface_width * surface_scale, new_surface_height * surface_scale);
 
   // Store the metal layer
   metal_layer_ = metal_layer;
@@ -874,7 +868,10 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   // Metal handles vsync through the CAMetalLayer
   is_vsync_implicit_out = true;
 
-  XELOGI("Metal surface connected successfully: {}x{}", new_surface_width, new_surface_height);
+  XELOGI("Metal surface connected successfully: {}x{} (scale={}, drawable={}x{})",
+         new_surface_width, new_surface_height, surface_scale,
+         uint32_t(metal_layer.drawableSize.width),
+         uint32_t(metal_layer.drawableSize.height));
   return SurfacePaintConnectResult::kSuccess;
 }
 
