@@ -1534,7 +1534,8 @@ def build_shaders(targets=None):
                  for name in files
                  if (name.endswith(".glsl") or
                      name.endswith(".hlsl") or
-                     name.endswith(".xesl"))]
+                     name.endswith(".xesl") or
+                     name.endswith(".metal"))]
     if sys.platform == "win32":
         all_targets = ["dxbc", "spirv"]
     elif sys.platform == "darwin":
@@ -1589,10 +1590,16 @@ def build_shaders(targets=None):
         dxbc_stages = ["vs", "hs", "ds", "gs", "ps", "cs"]
         for src_path in src_paths:
             src_name = os.path.basename(src_path)
-            if ((not src_name.endswith(".hlsl") and
-                 not src_name.endswith(".xesl")) or
+            src_is_xesl = src_name.endswith(".xesl")
+            if ((not src_name.endswith(".hlsl") and not src_is_xesl) or
                 len(src_name) <= 8 or src_name[-8] != "."):
                 continue
+            if src_is_xesl:
+                # Prefer dedicated HLSL sources when available.
+                alt_path = os.path.join(os.path.dirname(src_path),
+                                        src_name[:-5] + ".hlsl")
+                if os.path.exists(alt_path):
+                    continue
             dxbc_identifier = src_name[:-5].replace(".", "_")
             dxbc_stage = dxbc_identifier[-2:]
             if dxbc_stage not in dxbc_stages:
@@ -1675,12 +1682,28 @@ def build_shaders(targets=None):
 
         for src_path in src_paths:
             src_name = os.path.basename(src_path)
-            if (not src_name.endswith(".xesl") or len(src_name) <= 8 or
-                    src_name[-8] != "."):
+            src_is_xesl = src_name.endswith(".xesl")
+            src_is_metal = src_name.endswith(".metal")
+            if not src_is_xesl and not src_is_metal:
                 continue
-            if "fxaa" in src_name or "ffx_" in src_name:
-                continue
-            identifier = src_name[:-5].replace(".", "_")
+            if src_is_xesl:
+                if len(src_name) <= 8 or src_name[-8] != ".":
+                    continue
+                if "fxaa" in src_name or "ffx_" in src_name:
+                    continue
+                # Prefer dedicated MSL sources when available.
+                alt_path = os.path.join(os.path.dirname(src_path),
+                                        src_name[:-5] + ".metal")
+                if os.path.exists(alt_path):
+                    continue
+                identifier = src_name[:-5].replace(".", "_")
+            else:
+                if len(src_name) <= 6:
+                    continue
+                base_name = src_name[:-6]
+                if len(base_name) <= 3 or base_name[-3] != ".":
+                    continue
+                identifier = base_name.replace(".", "_")
             stage = identifier[-2:]
             if stage not in ["cs", "ps", "vs"]:
                 continue
