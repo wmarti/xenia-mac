@@ -1453,7 +1453,11 @@ bool MetalPresenter::EnsureGuestOutputPaintResources(uint32_t pixel_format) {
 
 bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id dest_texture,
                                               uint32_t source_width, uint32_t source_height,
-                                              bool force_swap_rb, bool use_pwl_gamma_ramp) {
+                                              bool force_swap_rb, bool use_pwl_gamma_ramp,
+                                              uint64_t* submission_out) {
+  if (submission_out) {
+    *submission_out = 0;
+  }
   if (!source_texture || !dest_texture) {
     XELOGE("MetalPresenter::CopyTextureToGuestOutput: Invalid textures");
     return false;
