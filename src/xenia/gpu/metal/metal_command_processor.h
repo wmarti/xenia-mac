@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <dispatch/dispatch.h>
@@ -364,16 +365,26 @@ class MetalCommandProcessor : public CommandProcessor {
     kFailed,
     kNotQueued,
   };
+  enum class MslPipelineCompileStatus {
+    kReady,
+    kPending,
+    kFailed,
+  };
+  struct MslPipelineCompileRequest;
   void InitializeMslAsyncCompilation();
   void ShutdownMslAsyncCompilation();
   MslShaderCompileStatus GetMslShaderCompileStatus(
       MslShader::MslTranslation* translation);
   bool EnqueueMslShaderCompilation(MslShader::MslTranslation* translation,
                                    bool is_ios, uint8_t priority);
+  bool EnqueueMslPipelineCompilation(const MslPipelineCompileRequest& request);
+  MTL::RenderPipelineState* CreateMslPipelineState(
+      const MslPipelineCompileRequest& request, std::string* error_out);
   void MslShaderCompileThread(size_t thread_index);
   MTL::RenderPipelineState* GetOrCreateMslPipelineState(
       MslShader::MslTranslation* vertex_translation,
-      MslShader::MslTranslation* pixel_translation, const RegisterFile& regs);
+      MslShader::MslTranslation* pixel_translation, const RegisterFile& regs,
+      MslPipelineCompileStatus* compile_status_out = nullptr);
 
   // Metal device and command queue (from provider)
   MTL::Device* device_ = nullptr;
@@ -442,9 +453,33 @@ class MetalCommandProcessor : public CommandProcessor {
     bool is_ios = false;
     uint8_t priority = 0;
   };
+  struct MslPipelineCompileRequest {
+    uint64_t pipeline_key = 0;
+    uint64_t vertex_shader_hash = 0;
+    uint64_t vertex_modification = 0;
+    uint64_t pixel_shader_hash = 0;
+    uint64_t pixel_modification = 0;
+    MTL::Function* vertex_function = nullptr;
+    MTL::Function* fragment_function = nullptr;
+    uint32_t sample_count = 1;
+    MTL::PixelFormat color_formats[4] = {
+        MTL::PixelFormatInvalid, MTL::PixelFormatInvalid,
+        MTL::PixelFormatInvalid, MTL::PixelFormatInvalid};
+    MTL::PixelFormat depth_format = MTL::PixelFormatInvalid;
+    MTL::PixelFormat stencil_format = MTL::PixelFormatInvalid;
+    uint32_t normalized_color_mask = 0;
+    uint32_t blendcontrol[4] = {};
+    uint8_t priority = 0;
+  };
   struct MslShaderCompileRequestCompare {
     bool operator()(const MslShaderCompileRequest& a,
                     const MslShaderCompileRequest& b) const {
+      return a.priority < b.priority;
+    }
+  };
+  struct MslPipelineCompileRequestCompare {
+    bool operator()(const MslPipelineCompileRequest& a,
+                    const MslPipelineCompileRequest& b) const {
       return a.priority < b.priority;
     }
   };
@@ -452,13 +487,22 @@ class MetalCommandProcessor : public CommandProcessor {
                       std::vector<MslShaderCompileRequest>,
                       MslShaderCompileRequestCompare>
       msl_shader_compile_queue_;
+  std::priority_queue<MslPipelineCompileRequest,
+                      std::vector<MslPipelineCompileRequest>,
+                      MslPipelineCompileRequestCompare>
+      msl_pipeline_compile_queue_;
   std::unordered_set<MslShader::MslTranslation*> msl_shader_compile_pending_;
   std::unordered_set<MslShader::MslTranslation*> msl_shader_compile_failed_;
+  std::unordered_set<uint64_t> msl_pipeline_compile_pending_;
+  std::unordered_set<uint64_t> msl_pipeline_compile_failed_;
   std::mutex msl_shader_compile_mutex_;
   std::condition_variable msl_shader_compile_cv_;
   std::vector<std::thread> msl_shader_compile_threads_;
   size_t msl_shader_compile_busy_ = 0;
   bool msl_shader_compile_shutdown_ = false;
+  std::atomic<int64_t> msl_shader_compile_failure_last_log_ns_{0};
+  std::atomic<int64_t> msl_pipeline_compile_failure_last_log_ns_{0};
+  std::atomic<int64_t> msl_pipeline_pending_last_log_ns_{0};
   std::unordered_map<uint64_t, MTL::RenderPipelineState*> msl_pipeline_cache_;
 
   // SPIRV-Cross tessellation support.

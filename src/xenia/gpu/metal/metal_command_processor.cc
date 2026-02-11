@@ -79,10 +79,11 @@ using BYTE = uint8_t;
 DECLARE_bool(clear_memory_page_state);
 DEFINE_int32(
     metal_pipeline_creation_threads, -1,
-    "Number of threads used for SPIRV-Cross shader compilation in the Metal "
-    "backend. -1 to calculate automatically (75% of logical CPU cores), a "
-    "positive number to specify the number of threads explicitly (up to the "
-    "number of logical CPU cores), 0 to disable multithreaded compilation.",
+    "Number of threads used for SPIRV-Cross shader and render pipeline "
+    "compilation in the Metal backend. -1 to calculate automatically (75% of "
+    "logical CPU cores), a positive number to specify the number of threads "
+    "explicitly (up to the number of logical CPU cores), 0 to disable "
+    "multithreaded compilation.",
     "Metal");
 
 namespace xe {
@@ -154,6 +155,29 @@ void LogMetalErrorDetails(const char* label, NS::Error* error) {
     XELOGE("{}: userInfo={}", label,
            info_desc ? info_desc->utf8String() : "<null>");
   }
+}
+
+constexpr int64_t kMslAsyncLogIntervalNs =
+    int64_t(std::chrono::nanoseconds(std::chrono::seconds(1)).count());
+
+int64_t GetSteadyTimeNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+bool ShouldLogRateLimited(std::atomic<int64_t>& last_log_ns,
+                          int64_t interval_ns) {
+  const int64_t now = GetSteadyTimeNs();
+  int64_t previous = last_log_ns.load(std::memory_order_relaxed);
+  while (now - previous >= interval_ns) {
+    if (last_log_ns.compare_exchange_weak(previous, now,
+                                          std::memory_order_relaxed,
+                                          std::memory_order_relaxed)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 constexpr uint32_t kPipelineDiskCacheMagic = 0x43504D58;  // 'XMPC'
@@ -478,7 +502,8 @@ void MetalCommandProcessor::InitializeMslAsyncCompilation() {
   }
 
   XELOGI(
-      "SPIRV-Cross: async Metal shader compilation enabled with {} worker "
+      "SPIRV-Cross: async Metal shader/pipeline compilation enabled with {} "
+      "worker "
       "thread(s)",
       thread_count);
 }
@@ -503,8 +528,22 @@ void MetalCommandProcessor::ShutdownMslAsyncCompilation() {
                       MslShaderCompileRequestCompare>
       empty_queue;
   std::swap(msl_shader_compile_queue_, empty_queue);
+  while (!msl_pipeline_compile_queue_.empty()) {
+    auto request = msl_pipeline_compile_queue_.top();
+    msl_pipeline_compile_queue_.pop();
+    if (request.vertex_function) {
+      request.vertex_function->release();
+      request.vertex_function = nullptr;
+    }
+    if (request.fragment_function) {
+      request.fragment_function->release();
+      request.fragment_function = nullptr;
+    }
+  }
   msl_shader_compile_pending_.clear();
   msl_shader_compile_failed_.clear();
+  msl_pipeline_compile_pending_.clear();
+  msl_pipeline_compile_failed_.clear();
   msl_shader_compile_busy_ = 0;
   msl_shader_compile_shutdown_ = false;
 }
@@ -564,46 +603,238 @@ bool MetalCommandProcessor::EnqueueMslShaderCompilation(
   return true;
 }
 
+bool MetalCommandProcessor::EnqueueMslPipelineCompilation(
+    const MslPipelineCompileRequest& request) {
+  if (!cvars::async_shader_compilation || msl_shader_compile_threads_.empty() ||
+      !request.vertex_function) {
+    return false;
+  }
+
+  MslPipelineCompileRequest queued_request = request;
+  {
+    std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+    if (msl_pipeline_cache_.find(request.pipeline_key) !=
+        msl_pipeline_cache_.end()) {
+      return true;
+    }
+    if (msl_pipeline_compile_failed_.find(request.pipeline_key) !=
+        msl_pipeline_compile_failed_.end()) {
+      return false;
+    }
+    if (msl_pipeline_compile_pending_.find(request.pipeline_key) !=
+        msl_pipeline_compile_pending_.end()) {
+      return true;
+    }
+
+    queued_request.vertex_function->retain();
+    if (queued_request.fragment_function) {
+      queued_request.fragment_function->retain();
+    }
+    msl_pipeline_compile_pending_.insert(request.pipeline_key);
+    msl_pipeline_compile_queue_.push(queued_request);
+  }
+
+  msl_shader_compile_cv_.notify_one();
+  return true;
+}
+
+MTL::RenderPipelineState* MetalCommandProcessor::CreateMslPipelineState(
+    const MslPipelineCompileRequest& request, std::string* error_out) {
+  if (error_out) {
+    error_out->clear();
+  }
+  if (!request.vertex_function) {
+    if (error_out) {
+      *error_out = "missing vertex shader function";
+    }
+    return nullptr;
+  }
+
+  MTL::RenderPipelineDescriptor* desc =
+      MTL::RenderPipelineDescriptor::alloc()->init();
+  desc->setVertexFunction(request.vertex_function);
+  if (request.fragment_function) {
+    desc->setFragmentFunction(request.fragment_function);
+  }
+
+  for (uint32_t i = 0; i < 4; ++i) {
+    desc->colorAttachments()->object(i)->setPixelFormat(request.color_formats[i]);
+  }
+  desc->setDepthAttachmentPixelFormat(request.depth_format);
+  desc->setStencilAttachmentPixelFormat(request.stencil_format);
+  desc->setSampleCount(request.sample_count);
+  // Alpha-to-mask is implemented in shader via gl_SampleMask output.
+  desc->setAlphaToCoverageEnabled(false);
+
+  for (uint32_t i = 0; i < 4; ++i) {
+    auto* color_attachment = desc->colorAttachments()->object(i);
+    if (request.color_formats[i] == MTL::PixelFormatInvalid) {
+      color_attachment->setWriteMask(MTL::ColorWriteMaskNone);
+      color_attachment->setBlendingEnabled(false);
+      continue;
+    }
+
+    uint32_t rt_write_mask = (request.normalized_color_mask >> (i * 4)) & 0xF;
+    color_attachment->setWriteMask(ToMetalColorWriteMask(rt_write_mask));
+    if (!rt_write_mask) {
+      color_attachment->setBlendingEnabled(false);
+      continue;
+    }
+
+    reg::RB_BLENDCONTROL blendcontrol;
+    blendcontrol.value = request.blendcontrol[i];
+
+    MTL::BlendFactor src_rgb =
+        ToMetalBlendFactorRgb(blendcontrol.color_srcblend);
+    MTL::BlendFactor dst_rgb =
+        ToMetalBlendFactorRgb(blendcontrol.color_destblend);
+    MTL::BlendOperation op_rgb =
+        ToMetalBlendOperation(blendcontrol.color_comb_fcn);
+    MTL::BlendFactor src_alpha =
+        ToMetalBlendFactorAlpha(blendcontrol.alpha_srcblend);
+    MTL::BlendFactor dst_alpha =
+        ToMetalBlendFactorAlpha(blendcontrol.alpha_destblend);
+    MTL::BlendOperation op_alpha =
+        ToMetalBlendOperation(blendcontrol.alpha_comb_fcn);
+
+    bool blending_enabled =
+        src_rgb != MTL::BlendFactorOne || dst_rgb != MTL::BlendFactorZero ||
+        op_rgb != MTL::BlendOperationAdd || src_alpha != MTL::BlendFactorOne ||
+        dst_alpha != MTL::BlendFactorZero || op_alpha != MTL::BlendOperationAdd;
+    color_attachment->setBlendingEnabled(blending_enabled);
+    if (blending_enabled) {
+      color_attachment->setSourceRGBBlendFactor(src_rgb);
+      color_attachment->setDestinationRGBBlendFactor(dst_rgb);
+      color_attachment->setRgbBlendOperation(op_rgb);
+      color_attachment->setSourceAlphaBlendFactor(src_alpha);
+      color_attachment->setDestinationAlphaBlendFactor(dst_alpha);
+      color_attachment->setAlphaBlendOperation(op_alpha);
+    }
+  }
+
+  NS::Error* error = nullptr;
+  MTL::RenderPipelineState* pipeline =
+      device_->newRenderPipelineState(desc, &error);
+  desc->release();
+
+  if (!pipeline && error_out && error) {
+    NS::String* description = error->localizedDescription();
+    if (description) {
+      *error_out = description->utf8String();
+    }
+  }
+
+  return pipeline;
+}
+
 void MetalCommandProcessor::MslShaderCompileThread(size_t thread_index) {
   while (true) {
-    MslShaderCompileRequest request;
+    MslShaderCompileRequest shader_request;
+    MslPipelineCompileRequest pipeline_request;
+    bool process_pipeline_request = false;
     {
       std::unique_lock<std::mutex> lock(msl_shader_compile_mutex_);
       msl_shader_compile_cv_.wait(lock, [this]() {
-        return msl_shader_compile_shutdown_ || !msl_shader_compile_queue_.empty();
+        return msl_shader_compile_shutdown_ || !msl_shader_compile_queue_.empty() ||
+               !msl_pipeline_compile_queue_.empty();
       });
       if (msl_shader_compile_shutdown_) {
         return;
       }
-      request = msl_shader_compile_queue_.top();
-      msl_shader_compile_queue_.pop();
+      if (!msl_pipeline_compile_queue_.empty()) {
+        process_pipeline_request = true;
+        pipeline_request = msl_pipeline_compile_queue_.top();
+        msl_pipeline_compile_queue_.pop();
+      } else {
+        shader_request = msl_shader_compile_queue_.top();
+        msl_shader_compile_queue_.pop();
+      }
       ++msl_shader_compile_busy_;
     }
 
-    bool compiled = false;
-    if (request.translation) {
-      compiled = request.translation->CompileToMsl(device_, request.is_ios);
-    }
+    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+    if (process_pipeline_request) {
+      std::string pipeline_error;
+      MTL::RenderPipelineState* pipeline =
+          CreateMslPipelineState(pipeline_request, &pipeline_error);
+      bool compiled = pipeline != nullptr;
 
-    {
-      std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
-      if (request.translation) {
-        msl_shader_compile_pending_.erase(request.translation);
-        if (!compiled) {
-          msl_shader_compile_failed_.insert(request.translation);
+      {
+        std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+        msl_pipeline_compile_pending_.erase(pipeline_request.pipeline_key);
+        if (compiled) {
+          auto insert_result =
+              msl_pipeline_cache_.emplace(pipeline_request.pipeline_key, pipeline);
+          if (!insert_result.second && pipeline) {
+            pipeline->release();
+          }
+          msl_pipeline_compile_failed_.erase(pipeline_request.pipeline_key);
+        } else {
+          msl_pipeline_compile_failed_.insert(pipeline_request.pipeline_key);
+        }
+        if (msl_shader_compile_busy_) {
+          --msl_shader_compile_busy_;
         }
       }
-      if (msl_shader_compile_busy_) {
-        --msl_shader_compile_busy_;
+
+      if (pipeline_request.vertex_function) {
+        pipeline_request.vertex_function->release();
+      }
+      if (pipeline_request.fragment_function) {
+        pipeline_request.fragment_function->release();
+      }
+
+      if (!compiled && ShouldLogRateLimited(
+                           msl_pipeline_compile_failure_last_log_ns_,
+                           kMslAsyncLogIntervalNs)) {
+        if (!pipeline_error.empty()) {
+          XELOGE(
+              "SPIRV-Cross: async Metal pipeline compile failed on worker {} "
+              "(VS {:016X} mod {:016X}, PS {:016X} mod {:016X}): {}",
+              thread_index, pipeline_request.vertex_shader_hash,
+              pipeline_request.vertex_modification,
+              pipeline_request.pixel_shader_hash,
+              pipeline_request.pixel_modification, pipeline_error);
+        } else {
+          XELOGE(
+              "SPIRV-Cross: async Metal pipeline compile failed on worker {} "
+              "(VS {:016X} mod {:016X}, PS {:016X} mod {:016X})",
+              thread_index, pipeline_request.vertex_shader_hash,
+              pipeline_request.vertex_modification,
+              pipeline_request.pixel_shader_hash,
+              pipeline_request.pixel_modification);
+        }
+      }
+    } else {
+      bool compiled = false;
+      if (shader_request.translation) {
+        compiled =
+            shader_request.translation->CompileToMsl(device_, shader_request.is_ios);
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+        if (shader_request.translation) {
+          msl_shader_compile_pending_.erase(shader_request.translation);
+          if (!compiled) {
+            msl_shader_compile_failed_.insert(shader_request.translation);
+          }
+        }
+        if (msl_shader_compile_busy_) {
+          --msl_shader_compile_busy_;
+        }
+      }
+
+      if (!compiled && ShouldLogRateLimited(msl_shader_compile_failure_last_log_ns_,
+                                            kMslAsyncLogIntervalNs)) {
+        XELOGE(
+            "SPIRV-Cross: async Metal compile failed on worker {} (shader "
+            "{:016X}, mod {:016X})",
+            thread_index, shader_request.shader_hash,
+            shader_request.modification);
       }
     }
-
-    if (!compiled) {
-      XELOGE(
-          "SPIRV-Cross: async Metal compile failed on worker {} (shader "
-          "{:016X}, mod {:016X})",
-          thread_index, request.shader_hash, request.modification);
-    }
+    pool->release();
   }
 }
 
@@ -3469,14 +3700,31 @@ bool MetalCommandProcessor::IssueDrawMsl(
 
   // Create or retrieve pipeline state.
   MTL::RenderPipelineState* pipeline = nullptr;
+  MslPipelineCompileStatus pipeline_compile_status =
+      MslPipelineCompileStatus::kReady;
   if (is_tessellated) {
     pipeline = GetOrCreateMslTessPipelineState(
         vertex_translation, pixel_translation, host_vertex_shader_type, regs);
   } else {
     pipeline = GetOrCreateMslPipelineState(vertex_translation,
-                                           pixel_translation, regs);
+                                           pixel_translation, regs,
+                                           &pipeline_compile_status);
   }
   if (!pipeline) {
+    if (!is_tessellated &&
+        pipeline_compile_status == MslPipelineCompileStatus::kPending) {
+      if (ShouldLogRateLimited(msl_pipeline_pending_last_log_ns_,
+                               kMslAsyncLogIntervalNs)) {
+        XELOGI(
+            "SPIRV-Cross: Skipping draw - render pipeline compile pending "
+            "(VS {:016X} mod {:016X}, PS {:016X} mod {:016X})",
+            vertex_translation->shader().ucode_data_hash(),
+            vertex_translation->modification(),
+            pixel_translation ? pixel_translation->shader().ucode_data_hash() : 0,
+            pixel_translation ? pixel_translation->modification() : 0);
+      }
+      return true;
+    }
     XELOGE("SPIRV-Cross: Failed to create pipeline state");
     return false;
   }
@@ -7737,7 +7985,11 @@ MetalCommandProcessor::GetCurrentSpirvPixelShaderModification(
 
 MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateMslPipelineState(
     MslShader::MslTranslation* vertex_translation,
-    MslShader::MslTranslation* pixel_translation, const RegisterFile& regs) {
+    MslShader::MslTranslation* pixel_translation, const RegisterFile& regs,
+    MslPipelineCompileStatus* compile_status_out) {
+  if (compile_status_out) {
+    *compile_status_out = MslPipelineCompileStatus::kFailed;
+  }
   if (!vertex_translation || !vertex_translation->metal_function()) {
     XELOGE("SPIRV-Cross: No valid vertex shader function");
     return nullptr;
@@ -7828,93 +8080,105 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateMslPipelineState(
   }
   uint64_t key = XXH3_64bits(&key_data, sizeof(key_data));
 
-  // Check cache.
-  auto it = msl_pipeline_cache_.find(key);
-  if (it != msl_pipeline_cache_.end()) {
-    return it->second;
+  bool use_async = cvars::async_shader_compilation &&
+                   !msl_shader_compile_threads_.empty() &&
+                   pixel_translation != nullptr;
+
+  {
+    std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+    auto it = msl_pipeline_cache_.find(key);
+    if (it != msl_pipeline_cache_.end()) {
+      if (compile_status_out) {
+        *compile_status_out = MslPipelineCompileStatus::kReady;
+      }
+      return it->second;
+    }
+    if (msl_pipeline_compile_pending_.find(key) !=
+        msl_pipeline_compile_pending_.end()) {
+      if (compile_status_out) {
+        *compile_status_out = MslPipelineCompileStatus::kPending;
+      }
+      return nullptr;
+    }
+    if (msl_pipeline_compile_failed_.find(key) !=
+        msl_pipeline_compile_failed_.end()) {
+      return nullptr;
+    }
   }
 
-  // Create pipeline descriptor.
-  MTL::RenderPipelineDescriptor* desc =
-      MTL::RenderPipelineDescriptor::alloc()->init();
-  desc->setVertexFunction(vertex_translation->metal_function());
-  if (pixel_translation && pixel_translation->metal_function()) {
-    desc->setFragmentFunction(pixel_translation->metal_function());
+  MslPipelineCompileRequest request = {};
+  request.pipeline_key = key;
+  request.vertex_shader_hash = vertex_translation->shader().ucode_data_hash();
+  request.vertex_modification = vertex_translation->modification();
+  if (pixel_translation) {
+    request.pixel_shader_hash = pixel_translation->shader().ucode_data_hash();
+    request.pixel_modification = pixel_translation->modification();
   }
-
+  request.vertex_function = vertex_translation->metal_function();
+  request.fragment_function =
+      pixel_translation ? pixel_translation->metal_function() : nullptr;
+  request.sample_count = sample_count;
+  request.depth_format = depth_format;
+  request.stencil_format = stencil_format;
+  request.normalized_color_mask = key_data.normalized_color_mask;
+  request.priority = pixel_translation ? 2 : 1;
   for (uint32_t i = 0; i < 4; ++i) {
-    desc->colorAttachments()->object(i)->setPixelFormat(color_formats[i]);
+    request.color_formats[i] = color_formats[i];
+    request.blendcontrol[i] = key_data.blendcontrol[i];
   }
-  desc->setDepthAttachmentPixelFormat(depth_format);
-  desc->setStencilAttachmentPixelFormat(stencil_format);
-  desc->setSampleCount(sample_count);
-  // Alpha-to-mask is implemented purely in the SPIR-V shader via
-  // gl_SampleMask output (matching the Vulkan backend).  Enabling
-  // pipeline-level alphaToCoverage would double-apply coverage.
-  desc->setAlphaToCoverageEnabled(false);
 
-  // Blending and color write masks.
-  for (uint32_t i = 0; i < 4; ++i) {
-    auto* color_attachment = desc->colorAttachments()->object(i);
-    if (color_formats[i] == MTL::PixelFormatInvalid) {
-      color_attachment->setWriteMask(MTL::ColorWriteMaskNone);
-      color_attachment->setBlendingEnabled(false);
-      continue;
+  if (use_async) {
+    if (EnqueueMslPipelineCompilation(request)) {
+      std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+      auto it = msl_pipeline_cache_.find(key);
+      if (it != msl_pipeline_cache_.end()) {
+        if (compile_status_out) {
+          *compile_status_out = MslPipelineCompileStatus::kReady;
+        }
+        return it->second;
+      }
+      if (msl_pipeline_compile_failed_.find(key) !=
+          msl_pipeline_compile_failed_.end()) {
+        return nullptr;
+      }
+      if (compile_status_out) {
+        *compile_status_out = MslPipelineCompileStatus::kPending;
+      }
+      return nullptr;
     }
-    uint32_t rt_write_mask = (key_data.normalized_color_mask >> (i * 4)) & 0xF;
-    color_attachment->setWriteMask(ToMetalColorWriteMask(rt_write_mask));
-    if (!rt_write_mask) {
-      color_attachment->setBlendingEnabled(false);
-      continue;
-    }
-    auto blendcontrol = regs.Get<reg::RB_BLENDCONTROL>(
-        reg::RB_BLENDCONTROL::rt_register_indices[i]);
-    MTL::BlendFactor src_rgb =
-        ToMetalBlendFactorRgb(blendcontrol.color_srcblend);
-    MTL::BlendFactor dst_rgb =
-        ToMetalBlendFactorRgb(blendcontrol.color_destblend);
-    MTL::BlendOperation op_rgb =
-        ToMetalBlendOperation(blendcontrol.color_comb_fcn);
-    MTL::BlendFactor src_alpha =
-        ToMetalBlendFactorAlpha(blendcontrol.alpha_srcblend);
-    MTL::BlendFactor dst_alpha =
-        ToMetalBlendFactorAlpha(blendcontrol.alpha_destblend);
-    MTL::BlendOperation op_alpha =
-        ToMetalBlendOperation(blendcontrol.alpha_comb_fcn);
-    bool blending_enabled =
-        src_rgb != MTL::BlendFactorOne || dst_rgb != MTL::BlendFactorZero ||
-        op_rgb != MTL::BlendOperationAdd || src_alpha != MTL::BlendFactorOne ||
-        dst_alpha != MTL::BlendFactorZero || op_alpha != MTL::BlendOperationAdd;
-    color_attachment->setBlendingEnabled(blending_enabled);
-    if (blending_enabled) {
-      color_attachment->setSourceRGBBlendFactor(src_rgb);
-      color_attachment->setDestinationRGBBlendFactor(dst_rgb);
-      color_attachment->setRgbBlendOperation(op_rgb);
-      color_attachment->setSourceAlphaBlendFactor(src_alpha);
-      color_attachment->setDestinationAlphaBlendFactor(dst_alpha);
-      color_attachment->setAlphaBlendOperation(op_alpha);
+    std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+    if (msl_pipeline_compile_failed_.find(key) !=
+        msl_pipeline_compile_failed_.end()) {
+      return nullptr;
     }
   }
 
-  // No vertex descriptor — SPIRV-Cross shaders use vfetch to read from
-  // shared memory directly (same as the MSC path's vertex fetch mode).
-
-  NS::Error* error = nullptr;
+  std::string error_message;
   MTL::RenderPipelineState* pipeline =
-      device_->newRenderPipelineState(desc, &error);
-  desc->release();
-
+      CreateMslPipelineState(request, &error_message);
   if (!pipeline) {
-    if (error) {
-      XELOGE("SPIRV-Cross: Failed to create pipeline: {}",
-             error->localizedDescription()->utf8String());
+    if (!error_message.empty()) {
+      XELOGE("SPIRV-Cross: Failed to create pipeline: {}", error_message);
     } else {
       XELOGE("SPIRV-Cross: Failed to create pipeline (unknown error)");
     }
+    std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+    msl_pipeline_compile_failed_.insert(key);
     return nullptr;
   }
 
-  msl_pipeline_cache_[key] = pipeline;
+  {
+    std::lock_guard<std::mutex> lock(msl_shader_compile_mutex_);
+    auto [it, inserted] = msl_pipeline_cache_.emplace(key, pipeline);
+    if (!inserted) {
+      pipeline->release();
+      pipeline = it->second;
+    }
+    msl_pipeline_compile_failed_.erase(key);
+  }
+  if (compile_status_out) {
+    *compile_status_out = MslPipelineCompileStatus::kReady;
+  }
   return pipeline;
 }
 
