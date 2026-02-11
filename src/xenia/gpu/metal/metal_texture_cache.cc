@@ -1913,9 +1913,10 @@ MTL::Texture* MetalTextureCache::CreateTextureCube(
   }
 
   MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
-  // Always use TextureTypeCubeArray to match the shader binding type (which is
-  // always texturecube_array in the translated MSL).
-  descriptor->setTextureType(MTL::TextureTypeCubeArray);
+  // Use cube for single-cube textures to match non-array cube bindings in the
+  // translated MSL, and cube-array only when multiple cubes are present.
+  descriptor->setTextureType(cube_count > 1 ? MTL::TextureTypeCubeArray
+                                            : MTL::TextureTypeCube);
   descriptor->setArrayLength(std::max(cube_count, 1u));
   descriptor->setPixelFormat(format);
   descriptor->setWidth(width);
@@ -2103,8 +2104,8 @@ MTL::Texture* MetalTextureCache::CreateNullTextureCube() {
   }
 
   MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()->init();
-  // Always create as CubeArray for binding compatibility.
-  descriptor->setTextureType(MTL::TextureTypeCubeArray);
+  // Null cube texture must match non-array cube bindings in translated MSL.
+  descriptor->setTextureType(MTL::TextureTypeCube);
   descriptor->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
   descriptor->setWidth(1);
   descriptor->setHeight(1);
@@ -3060,8 +3061,25 @@ MTL::Texture* MetalTextureCache::MetalTexture::GetOrCreateView(
   MTL::PixelFormat view_format =
       get_view_pixel_format(key(), is_signed, metal_texture_->pixelFormat());
 
+  MTL::TextureType view_type = metal_texture_->textureType();
+  switch (dimension) {
+    case xenos::FetchOpDimension::kCube:
+      // SPIRV-Cross translates cube fetches to non-array cube textures.
+      view_type = MTL::TextureTypeCube;
+      break;
+    case xenos::FetchOpDimension::k3DOrStacked:
+      view_type = key().dimension == xenos::DataDimension::k3D
+                      ? MTL::TextureType3D
+                      : MTL::TextureType2DArray;
+      break;
+    default:
+      view_type = MTL::TextureType2DArray;
+      break;
+  }
+
   if (host_swizzle == xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA) {
-    if (!is_signed || view_format == metal_texture_->pixelFormat()) {
+    if ((!is_signed || view_format == metal_texture_->pixelFormat()) &&
+        metal_texture_->textureType() == view_type) {
       return metal_texture_;
     }
   }
@@ -3074,25 +3092,13 @@ MTL::Texture* MetalTextureCache::MetalTexture::GetOrCreateView(
     return found->second;
   }
 
-  MTL::TextureType view_type = metal_texture_->textureType();
-  switch (dimension) {
-    case xenos::FetchOpDimension::kCube:
-      view_type = MTL::TextureTypeCubeArray;
-      break;
-    case xenos::FetchOpDimension::k3DOrStacked:
-      view_type = key().dimension == xenos::DataDimension::k3D
-                      ? MTL::TextureType3D
-                      : MTL::TextureType2DArray;
-      break;
-    default:
-      view_type = MTL::TextureType2DArray;
-      break;
-  }
-
   uint32_t slice_count = 1;
   switch (view_type) {
     case MTL::TextureType2DArray:
       slice_count = metal_texture_->arrayLength();
+      break;
+    case MTL::TextureTypeCube:
+      slice_count = 6;
       break;
     case MTL::TextureTypeCubeArray:
       slice_count = metal_texture_->arrayLength() * 6;
@@ -3113,7 +3119,9 @@ MTL::Texture* MetalTextureCache::MetalTexture::GetOrCreateView(
   MTL::Texture* view = metal_texture_->newTextureView(
       view_format, view_type, level_range, slice_range, swizzle);
   if (!view) {
-    return metal_texture_;
+    // Returning a mismatched base type can trigger Metal validation asserts.
+    return metal_texture_->textureType() == view_type ? metal_texture_
+                                                      : nullptr;
   }
 
   swizzled_view_cache_.emplace(view_key, view);
