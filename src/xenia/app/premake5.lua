@@ -48,9 +48,16 @@ project("xenia-app")
   })
   apu_transitive_deps()
   local_platform_files()
+  local main_init_file = "../base/main_init_"..platform_suffix..".cc"
+  if platform_suffix == "mac" then
+    main_init_file = "../base/main_init_posix.cc"
+  end
   files({
-    "../base/main_init_"..platform_suffix..".cc",
+    main_init_file,
     "../ui/windowed_app_main_qt.cc",
+  })
+  externalincludedirs({
+    project_root.."/third_party",
   })
 
   resincludedirs({
@@ -102,7 +109,7 @@ project("xenia-app")
       "xenia-ui-vulkan",
     })
 
-  filter({"architecture:x86_64", "files:../base/main_init_"..platform_suffix..".cc"})
+  filter({"architecture:x86_64", "files:../base/main_init_win.cc"})
     vectorextensions("SSE2")  -- Disable AVX for main_init_win.cc so our AVX check doesn't use AVX instructions.
 
   filter("platforms:not Android-*")

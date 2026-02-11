@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 
 #include "xenia/ui/metal/metal_provider.h"
 #include "xenia/ui/presenter.h"
@@ -44,9 +45,14 @@ class MetalGuestOutputRefreshContext final
   // The guest output Metal texture that the refresher should write to.
   // Initial state is undefined, refresher must write all pixels.
   id resource_uav_capable() const { return resource_; }
+  void SetSubmissionId(uint64_t submission_id) {
+    submission_id_ = submission_id;
+  }
+  uint64_t submission_id() const { return submission_id_; }
 
  private:
   id resource_;
+  uint64_t submission_id_ = 0;
 };
 
 class MetalUIDrawContext final : public UIDrawContext {
@@ -84,7 +90,8 @@ class MetalPresenter : public Presenter {
   // Helper method to copy Metal texture to guest output texture
   bool CopyTextureToGuestOutput(MTL::Texture* source_texture, id dest_texture,
                                 uint32_t source_width, uint32_t source_height,
-                                bool force_swap_rb, bool use_pwl_gamma_ramp);
+                                bool force_swap_rb, bool use_pwl_gamma_ramp,
+                                uint64_t* submission_out = nullptr);
 
   // Upload gamma ramp data used by the present path.
   bool UpdateGammaRamp(const void* table_data, size_t table_bytes,
