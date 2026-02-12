@@ -933,14 +933,15 @@ bool MetalPresenter::RefreshGuestOutputImpl(
 
   // Create or reuse Metal texture for guest output
   id<MTLTexture> guest_output_texture = guest_output_textures_[mailbox_index];
+  MTLPixelFormat guest_output_format = ::cvars::metal_presenter_force_10bpc
+                                           ? MTLPixelFormatRGB10A2Unorm
+                                           : MTLPixelFormatRGBA8Unorm;
 
   // Check if we need to create or recreate the texture
   if (!guest_output_texture || guest_output_texture.width != frontbuffer_width ||
-      guest_output_texture.height != frontbuffer_height) {
+      guest_output_texture.height != frontbuffer_height ||
+      guest_output_texture.pixelFormat != guest_output_format) {
     id<MTLTexture> previous_texture = guest_output_texture;
-    MTLPixelFormat guest_output_format = ::cvars::metal_presenter_force_10bpc
-                                             ? MTLPixelFormatRGB10A2Unorm
-                                             : MTLPixelFormatRGBA8Unorm;
     // Create texture descriptor for guest output
     MTLTextureDescriptor* descriptor =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:guest_output_format
