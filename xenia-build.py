@@ -1396,12 +1396,16 @@ class BaseBuildCommand(Command):
             schemes = args["target"] or ["xenia-app"]
             nested_args = [["-scheme", scheme] for scheme in schemes]
             scheme_args = [arg for pair in nested_args for arg in pair]
+            # Xcode config names in generated projects are capitalized
+            # (Checked/Debug/Release/Valgrind); lowercase values can fall back
+            # to a different default configuration.
+            xcode_config = args["config"].capitalize()
             result = subprocess.call([
                 "xcodebuild",
                 "-workspace",
                 "build/xenia.xcworkspace",
                 "-configuration",
-                args["config"]
+                xcode_config
             ] + scheme_args + pass_args, env=dict(os.environ))
         else:
             result = subprocess.call([
