@@ -1051,14 +1051,25 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
     return false;
   }
-
-  MTL::ComputeCommandEncoder* encoder = cmd->computeCommandEncoder();
-  if (!encoder) {
-    if (use_upload_batch) {
+  bool command_buffer_has_work = false;
+  auto handle_upload_failure = [&](bool abort_batch) {
+    if (use_upload_batch && command_buffer_has_work) {
+      release_buffer_after(cmd, constants_buffer, constants_buffer_size);
+      release_buffer_after(cmd, dest_buffer, size_t(dest_buffer_size));
+      upload_batch_command_buffer_has_work_ = true;
       AbortUploadCommandBufferBatch();
+      return;
     }
     release_buffer_immediate(constants_buffer, constants_buffer_size);
     release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
+    if (use_upload_batch && abort_batch) {
+      AbortUploadCommandBufferBatch();
+    }
+  };
+
+  MTL::ComputeCommandEncoder* encoder = cmd->computeCommandEncoder();
+  if (!encoder) {
+    handle_upload_failure(true);
     return false;
   }
   encoder->setComputePipelineState(pipeline);
@@ -1095,8 +1106,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
                                          load_shader_info.source_bpe_log2) ||
           !GetCurrentScaledResolveBuffer(source_buffer, source_buffer_offset,
                                          source_buffer_length)) {
-        release_buffer_immediate(constants_buffer, constants_buffer_size);
-        release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
+        handle_upload_failure(false);
         return false;
       }
       encoder->setBuffer(source_buffer, source_buffer_offset, 2);
@@ -1176,6 +1186,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
                              slice * stored_level.slice_size_bytes,
                          1);
       encoder->dispatchThreadgroups(threadgroups, threads_per_group);
+      command_buffer_has_work = true;
       ++dispatch_index;
     }
   }
@@ -1186,11 +1197,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
   if (use_blit_upload) {
     MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
     if (!blit) {
-      if (use_upload_batch) {
-        AbortUploadCommandBufferBatch();
-      }
-      release_buffer_immediate(constants_buffer, constants_buffer_size);
-      release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
+      handle_upload_failure(true);
       return false;
     }
 
@@ -1275,11 +1282,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
           MTL::Buffer* staging_buffer = acquire_buffer(staging_size);
           if (!staging_buffer) {
             blit->endEncoding();
-            if (use_upload_batch) {
-              AbortUploadCommandBufferBatch();
-            }
-            release_buffer_immediate(constants_buffer, constants_buffer_size);
-            release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
+            handle_upload_failure(true);
             return false;
           }
 
