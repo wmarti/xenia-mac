@@ -90,6 +90,7 @@ class MetalCommandProcessor : public CommandProcessor {
   MTL::CommandBuffer* GetCurrentCommandBuffer() const {
     return current_command_buffer_;
   }
+  bool HasActiveRenderEncoder() const { return current_render_encoder_ != nullptr; }
   uint32_t current_draw_index() const { return current_draw_index_; }
   uint64_t GetCurrentSubmission() const;
   uint64_t GetCompletedSubmission() const;

@@ -1021,11 +1021,13 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
                          : nullptr;
   bool use_upload_batch = use_blit_upload && upload_batch_command_buffer_ &&
                           command_processor_ && !current_command_buffer;
-  // Reuse the CP submission only before any draws in that submission, to avoid
-  // changing draw/resolve ordering assumptions.
+  // Reuse the CP submission only before any draws in that submission and only
+  // when no render pass is active, so we don't perturb attachment load/store
+  // behavior by tearing down an encoder mid-pass.
   bool use_current_command_buffer =
       use_blit_upload && command_processor_ && current_command_buffer &&
-      command_processor_->current_draw_index() == 0;
+      command_processor_->current_draw_index() == 0 &&
+      !command_processor_->HasActiveRenderEncoder();
   if (use_upload_batch && texture_resolution_scaled) {
     bool needs_base_scaled_range = false;
     bool needs_mips_scaled_range = false;
@@ -1055,7 +1057,6 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
   if (use_upload_batch) {
     cmd = upload_batch_command_buffer_;
   } else if (use_current_command_buffer) {
-    command_processor_->EndRenderEncoder();
     cmd = current_command_buffer;
   } else {
     cmd = queue->commandBuffer();
