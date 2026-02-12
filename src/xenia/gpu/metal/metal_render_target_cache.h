@@ -448,6 +448,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   MTL::Texture* CreateColorTexture(uint32_t width, uint32_t height,
                                    xenos::ColorRenderTargetFormat format,
                                    uint32_t samples,
+                                   bool transient_render_target_only = false,
                                    bool allow_unpooled_fallback = true);
   MTL::Texture* CreateDepthTexture(uint32_t width, uint32_t height,
                                    xenos::DepthRenderTargetFormat format,

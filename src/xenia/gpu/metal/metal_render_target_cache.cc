@@ -3330,7 +3330,8 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
 
 MTL::Texture* MetalRenderTargetCache::CreateColorTexture(
     uint32_t width, uint32_t height, xenos::ColorRenderTargetFormat format,
-    uint32_t samples, bool allow_unpooled_fallback) {
+    uint32_t samples, bool transient_render_target_only,
+    bool allow_unpooled_fallback) {
   MTL::PixelFormat resource_format = GetColorResourcePixelFormat(format);
   MTL::PixelFormat draw_format = GetColorDrawPixelFormat(format);
   MTL::PixelFormat transfer_format =
@@ -3345,20 +3346,34 @@ MTL::Texture* MetalRenderTargetCache::CreateColorTexture(
   desc->setTextureType(samples > 1 ? MTL::TextureType2DMultisample
                                    : MTL::TextureType2D);
   desc->setSampleCount(samples);
-  MTL::TextureUsage usage =
-      MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead;
+  MTL::TextureUsage usage = MTL::TextureUsageRenderTarget;
+  if (!transient_render_target_only) {
+    usage |= MTL::TextureUsageShaderRead;
+  }
   if (needs_pixel_format_view) {
     usage |= MTL::TextureUsagePixelFormatView;
   }
   desc->setUsage(usage);
-  desc->setStorageMode(MTL::StorageModePrivate);
 
   MTL::Texture* texture = nullptr;
-  if (render_target_heap_pool_) {
-    texture = render_target_heap_pool_->CreateTexture(desc);
-  }
-  if (!texture && (!render_target_heap_pool_ || allow_unpooled_fallback)) {
+  bool can_use_memoryless = false;
+#if XE_PLATFORM_IOS
+  can_use_memoryless = transient_render_target_only && !needs_pixel_format_view;
+#endif
+  if (can_use_memoryless) {
+    // Dummy fallback color targets are transient (load/store don't care) and
+    // never sampled - memoryless is optimal on iOS TBDR.
+    desc->setStorageMode(MTL::StorageModeMemoryless);
     texture = device_->newTexture(desc);
+  }
+  if (!texture) {
+    desc->setStorageMode(MTL::StorageModePrivate);
+    if (render_target_heap_pool_ && !can_use_memoryless) {
+      texture = render_target_heap_pool_->CreateTexture(desc);
+    }
+    if (!texture && (!render_target_heap_pool_ || allow_unpooled_fallback)) {
+      texture = device_->newTexture(desc);
+    }
   }
   desc->release();
   // Initial clear is handled on first bind via load actions; avoid
@@ -3729,13 +3744,19 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
                                      : xenos::MsaaSamples::k1X;
       entry.target = std::make_unique<MetalRenderTarget>(dummy_rt_key);
       entry.last_cleared_frame = frame_id_ - 1;
-      // Try to keep dummy target allocations in the heap budget first.
-      MTL::Texture* tex =
-          CreateColorTexture(width, height, fmt, dummy_sample_count, false);
+      // Prefer memoryless transient attachments on iOS (inside
+      // CreateColorTexture), otherwise keep dummy allocations in heap budget.
+      MTL::Texture* tex = CreateColorTexture(
+          width, height, fmt, dummy_sample_count,
+          /*transient_render_target_only=*/true,
+          /*allow_unpooled_fallback=*/false);
       while (!tex && render_target_heap_pool_ &&
              dummy_color_targets_.size() > 1 &&
              evict_oldest_dummy_target(dummy_key)) {
-        tex = CreateColorTexture(width, height, fmt, dummy_sample_count, false);
+        tex = CreateColorTexture(
+            width, height, fmt, dummy_sample_count,
+            /*transient_render_target_only=*/true,
+            /*allow_unpooled_fallback=*/false);
       }
       if (!tex) {
         static uint64_t last_unpooled_fallback_log_frame = 0;
@@ -3747,7 +3768,9 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
               width, height, dummy_sample_count);
           last_unpooled_fallback_log_frame = frame_id_;
         }
-        tex = CreateColorTexture(width, height, fmt, dummy_sample_count, true);
+        tex = CreateColorTexture(width, height, fmt, dummy_sample_count,
+                                 /*transient_render_target_only=*/true,
+                                 /*allow_unpooled_fallback=*/true);
       }
       entry.target->SetTexture(tex);
       if (tex) {
