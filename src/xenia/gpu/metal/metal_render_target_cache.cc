@@ -99,16 +99,26 @@ class ScopedAutoreleasePool {
 constexpr size_t kTransferTileInstanceBufferMaxBytes =
     64ull * 1024ull * 1024ull;
 constexpr size_t kTransferTileInstanceSoftBaseBytes =
-    6ull * 1024ull * 1024ull;
+    4ull * 1024ull * 1024ull;
 constexpr size_t kTransferTileInstanceSoftLowCoverageBytes =
-    12ull * 1024ull * 1024ull;
+    8ull * 1024ull * 1024ull;
+constexpr uint64_t kTransferTileInstanceLowCoverageRatioDivisor = 8ull;
+constexpr uint64_t kTransferTileInstanceMediumCoverageRatioDivisor = 3ull;
+constexpr size_t kTransferTileInstanceSmallRectPenaltyCount = 4;
+constexpr size_t kTransferTileInstanceSmallRectPenaltyNumerator = 1;
+constexpr size_t kTransferTileInstanceSmallRectPenaltyDenominator = 2;
 #else
 constexpr size_t kTransferTileInstanceBufferMaxBytes =
     256ull * 1024ull * 1024ull;
 constexpr size_t kTransferTileInstanceSoftBaseBytes =
-    24ull * 1024ull * 1024ull;
+    32ull * 1024ull * 1024ull;
 constexpr size_t kTransferTileInstanceSoftLowCoverageBytes =
-    48ull * 1024ull * 1024ull;
+    64ull * 1024ull * 1024ull;
+constexpr uint64_t kTransferTileInstanceLowCoverageRatioDivisor = 3ull;
+constexpr uint64_t kTransferTileInstanceMediumCoverageRatioDivisor = 2ull;
+constexpr size_t kTransferTileInstanceSmallRectPenaltyCount = 2;
+constexpr size_t kTransferTileInstanceSmallRectPenaltyNumerator = 3;
+constexpr size_t kTransferTileInstanceSmallRectPenaltyDenominator = 4;
 #endif
 
 MTL::ComputePipelineState* CreateComputePipelineFromEmbeddedLibrary(
@@ -5326,17 +5336,27 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
       size_t adaptive_soft_limit_bytes = kTransferTileInstanceSoftBaseBytes;
       if (dest_width && dest_height) {
         uint64_t dest_pixels = uint64_t(dest_width) * uint64_t(dest_height);
-        if (total_covered_pixels * 4ull <= dest_pixels) {
+        if (total_covered_pixels *
+                kTransferTileInstanceLowCoverageRatioDivisor <=
+            dest_pixels) {
           adaptive_soft_limit_bytes = kTransferTileInstanceSoftLowCoverageBytes;
-        } else if (total_covered_pixels * 2ull <= dest_pixels) {
+        } else if (total_covered_pixels *
+                       kTransferTileInstanceMediumCoverageRatioDivisor <=
+                   dest_pixels) {
           adaptive_soft_limit_bytes =
               (kTransferTileInstanceSoftBaseBytes +
                kTransferTileInstanceSoftLowCoverageBytes) /
               2;
         }
       }
-      if (build_infos.size() <= 2 && adaptive_soft_limit_bytes > (kAlignment * 64)) {
-        adaptive_soft_limit_bytes /= 2;
+      if (build_infos.size() <= kTransferTileInstanceSmallRectPenaltyCount &&
+          adaptive_soft_limit_bytes > (kAlignment * 64)) {
+        size_t penalized_soft_limit_bytes =
+            adaptive_soft_limit_bytes *
+            kTransferTileInstanceSmallRectPenaltyNumerator /
+            kTransferTileInstanceSmallRectPenaltyDenominator;
+        adaptive_soft_limit_bytes =
+            std::max(penalized_soft_limit_bytes, kAlignment * 64);
       }
       adaptive_soft_limit_bytes =
           std::min(adaptive_soft_limit_bytes, kTransferTileInstanceBufferMaxBytes);
