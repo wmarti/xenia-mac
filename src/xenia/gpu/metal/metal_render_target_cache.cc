@@ -6047,6 +6047,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
 
           // Bind host depth source if needed.
           if (mode_info.uses_host_depth) {
+            uint32_t host_depth_index = mode_info.source_is_color ? 1 : 2;
             if (shader_key.host_depth_source_is_copy) {
               if (edram_buffer_) {
                 encoder->setFragmentBuffer(edram_buffer_, 0, 1);
@@ -6056,7 +6057,18 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                   encoder->setFragmentBuffer(dummy, 0, 1);
                 }
               }
+              MTL::Texture* dummy_host_depth =
+                  GetTransferDummyDepthTexture(1);
+              if (!dummy_host_depth) {
+                continue;
+              }
+              encoder->setFragmentTexture(dummy_host_depth, host_depth_index);
             } else {
+              MTL::Buffer* dummy = GetTransferDummyBuffer();
+              if (!dummy) {
+                continue;
+              }
+              encoder->setFragmentBuffer(dummy, 0, 1);
               auto* host_depth_rt =
                   static_cast<MetalRenderTarget*>(transfer.host_depth_source);
               MTL::Texture* host_depth_texture =
@@ -6064,7 +6076,6 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               if (!host_depth_texture) {
                 continue;
               }
-              uint32_t host_depth_index = mode_info.source_is_color ? 1 : 2;
               encoder->setFragmentTexture(host_depth_texture, host_depth_index);
             }
           }
@@ -6474,9 +6485,11 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
 MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateTransferPipelines(
     const TransferShaderKey& key, MTL::PixelFormat dest_format,
     bool dest_is_uint, bool tile_instanced) {
+  TransferShaderKey pipeline_key = key;
+  pipeline_key.host_depth_source_is_copy = 0;
   auto& pipeline_map =
       tile_instanced ? transfer_tile_pipelines_ : transfer_pipelines_;
-  auto it = pipeline_map.find(key);
+  auto it = pipeline_map.find(pipeline_key);
   if (it != pipeline_map.end()) {
     return it->second;
   }
@@ -6525,7 +6538,6 @@ MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateTransferPipelines(
   bool source_is_multisample =
       key.source_msaa_samples != xenos::MsaaSamples::k1X;
   bool dest_is_multisample = key.dest_msaa_samples != xenos::MsaaSamples::k1X;
-  bool host_depth_is_copy = key.host_depth_source_is_copy != 0;
   bool host_depth_is_multisample =
       key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X;
   uint32_t host_depth_texture_index = source_is_color ? 1 : 2;
@@ -6559,8 +6571,6 @@ MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateTransferPipelines(
   append_define(source, "XE_TRANSFER_DEST_SAMPLE_ID_FROM_SAMPLE",
                 key.dest_sample_id_from_sample ? 1 : 0);
   append_define(source, "XE_TRANSFER_HAS_HOST_DEPTH", has_host_depth ? 1 : 0);
-  append_define(source, "XE_TRANSFER_HOST_DEPTH_IS_COPY",
-                host_depth_is_copy ? 1 : 0);
   append_define(source, "XE_TRANSFER_HOST_DEPTH_IS_MULTISAMPLE",
                 host_depth_is_multisample ? 1 : 0);
   append_define(source, "XE_TRANSFER_SOURCE_FORMAT",
@@ -6971,14 +6981,14 @@ vertex VSOut transfer_tile_vs(uint vid [[vertex_id]],
   #endif
 #endif
 
-#if XE_TRANSFER_HAS_HOST_DEPTH && XE_TRANSFER_HOST_DEPTH_IS_COPY
+#if XE_TRANSFER_HAS_HOST_DEPTH
   #define XE_TRANSFER_HOST_DEPTH_BUFFER_PARAM \
       , device const uint* xe_transfer_host_depth_buffer [[buffer(1)]]
 #else
   #define XE_TRANSFER_HOST_DEPTH_BUFFER_PARAM
 #endif
 
-#if XE_TRANSFER_HAS_HOST_DEPTH && !XE_TRANSFER_HOST_DEPTH_IS_COPY
+#if XE_TRANSFER_HAS_HOST_DEPTH
   #if XE_TRANSFER_HOST_DEPTH_IS_MULTISAMPLE
     #define XE_TRANSFER_HOST_DEPTH_TEXTURE_PARAM \
         , texture2d_ms<float, access::read> xe_transfer_host_depth \
@@ -8154,127 +8164,128 @@ fragment TransferDepthOut transfer_ps(
   float host_depth32 = 0.0f;
   bool has_host_depth = false;
 
-#if XE_TRANSFER_HAS_HOST_DEPTH && !XE_TRANSFER_HOST_DEPTH_IS_COPY
-  uint host_tile_pixel_x = dest_tile_pixel_x;
-  uint host_tile_pixel_y = dest_tile_pixel_y;
-  uint host_sample_id = dest_sample_id;
-  uint host_msaa = XE_TRANSFER_HOST_DEPTH_MSAA_SAMPLES;
+#if XE_TRANSFER_HAS_HOST_DEPTH
+  if (constants.host_depth_source_is_copy == 0u) {
+    uint host_tile_pixel_x = dest_tile_pixel_x;
+    uint host_tile_pixel_y = dest_tile_pixel_y;
+    uint host_sample_id = dest_sample_id;
+    uint host_msaa = XE_TRANSFER_HOST_DEPTH_MSAA_SAMPLES;
 
-  if (host_msaa != dest_msaa) {
-    if (host_msaa >= 4u) {
-      if (dest_msaa == 2u) {
-        if (msaa_2x_supported) {
-          host_sample_id = XeBitFieldInsert(
-              dest_tile_pixel_x, dest_sample_id ^ 1u, 1u, 31u);
-        } else {
-          host_sample_id = XeBitFieldInsert(
-              dest_sample_id, dest_tile_pixel_x, 0u, 1u);
-        }
-        host_tile_pixel_x = dest_tile_pixel_x >> 1u;
-      } else {
-        host_sample_id = XeBitFieldInsert(
-            dest_tile_pixel_x & 1u, dest_tile_pixel_y, 1u, 1u);
-        host_tile_pixel_x = dest_tile_pixel_x >> 1u;
-        host_tile_pixel_y = dest_tile_pixel_y >> 1u;
-      }
-    } else if (dest_msaa >= 4u) {
-      host_tile_pixel_x = XeBitFieldInsert(
-          dest_sample_id, dest_tile_pixel_x, 1u, 31u);
-    }
-
-    if (host_msaa < 4u) {
-      if (dest_msaa >= 4u) {
-        if (host_msaa == 2u) {
-          host_sample_id = dest_sample_id >> 1u;
+    if (host_msaa != dest_msaa) {
+      if (host_msaa >= 4u) {
+        if (dest_msaa == 2u) {
           if (msaa_2x_supported) {
-            host_sample_id ^= 1u;
+            host_sample_id = XeBitFieldInsert(
+                dest_tile_pixel_x, dest_sample_id ^ 1u, 1u, 31u);
           } else {
             host_sample_id = XeBitFieldInsert(
-                host_sample_id, host_sample_id, 1u, 1u);
+                dest_sample_id, dest_tile_pixel_x, 0u, 1u);
           }
+          host_tile_pixel_x = dest_tile_pixel_x >> 1u;
         } else {
-          host_tile_pixel_y = XeBitFieldInsert(
-              dest_sample_id >> 1u, dest_tile_pixel_y, 1u, 31u);
-        }
-      } else {
-        if (host_msaa == 2u) {
-          host_sample_id = dest_tile_pixel_y & 1u;
-          if (msaa_2x_supported) {
-            host_sample_id ^= 1u;
-          } else {
-            host_sample_id = XeBitFieldInsert(
-                host_sample_id, host_sample_id, 1u, 1u);
-          }
+          host_sample_id = XeBitFieldInsert(
+              dest_tile_pixel_x & 1u, dest_tile_pixel_y, 1u, 1u);
+          host_tile_pixel_x = dest_tile_pixel_x >> 1u;
           host_tile_pixel_y = dest_tile_pixel_y >> 1u;
-        } else {
-          if (msaa_2x_supported) {
-            host_tile_pixel_y = XeBitFieldInsert(
-                dest_sample_id ^ 1u, dest_tile_pixel_y, 1u, 31u);
+        }
+      } else if (dest_msaa >= 4u) {
+        host_tile_pixel_x = XeBitFieldInsert(
+            dest_sample_id, dest_tile_pixel_x, 1u, 31u);
+      }
+
+      if (host_msaa < 4u) {
+        if (dest_msaa >= 4u) {
+          if (host_msaa == 2u) {
+            host_sample_id = dest_sample_id >> 1u;
+            if (msaa_2x_supported) {
+              host_sample_id ^= 1u;
+            } else {
+              host_sample_id = XeBitFieldInsert(
+                  host_sample_id, host_sample_id, 1u, 1u);
+            }
           } else {
             host_tile_pixel_y = XeBitFieldInsert(
                 dest_sample_id >> 1u, dest_tile_pixel_y, 1u, 31u);
           }
+        } else {
+          if (host_msaa == 2u) {
+            host_sample_id = dest_tile_pixel_y & 1u;
+            if (msaa_2x_supported) {
+              host_sample_id ^= 1u;
+            } else {
+              host_sample_id = XeBitFieldInsert(
+                  host_sample_id, host_sample_id, 1u, 1u);
+            }
+            host_tile_pixel_y = dest_tile_pixel_y >> 1u;
+          } else {
+            if (msaa_2x_supported) {
+              host_tile_pixel_y = XeBitFieldInsert(
+                  dest_sample_id ^ 1u, dest_tile_pixel_y, 1u, 31u);
+            } else {
+              host_tile_pixel_y = XeBitFieldInsert(
+                  dest_sample_id >> 1u, dest_tile_pixel_y, 1u, 31u);
+            }
+          }
         }
       }
     }
-  }
 
-  uint host_pixel_x = 0u;
-  uint host_pixel_y = 0u;
+    uint host_pixel_x = 0u;
+    uint host_pixel_y = 0u;
 #if XE_TRANSFER_TILE_INSTANCED
-  host_pixel_x = in.host_base.x + host_tile_pixel_x;
-  host_pixel_y = in.host_base.y + host_tile_pixel_y;
+    host_pixel_x = in.host_base.x + host_tile_pixel_x;
+    host_pixel_y = in.host_base.y + host_tile_pixel_y;
 #else
-  uint host_tile_index =
-      uint(int(dest_tile_index) + constants.host_depth_address.source_to_dest) &
-      (kEdramTileCount - 1u);
-  uint host_pitch_tiles = constants.host_depth_address.source_pitch;
-  uint host_tile_index_y = 0u;
-  uint host_tile_index_x = 0u;
-  XeFastDivMod(host_tile_index, host_pitch_tiles,
-               constants.host_depth_source_pitch_tiles_inv, host_tile_index_y,
-               host_tile_index_x);
-  host_pixel_x =
-      host_tile_index_x *
-          (tile_width_samples >> (host_msaa >= 4u ? 1u : 0u)) +
-      host_tile_pixel_x;
-  host_pixel_y =
-      host_tile_index_y *
-          (tile_height_samples >> (host_msaa >= 2u ? 1u : 0u)) +
-      host_tile_pixel_y;
+    uint host_tile_index =
+        uint(int(dest_tile_index) +
+             constants.host_depth_address.source_to_dest) &
+        (kEdramTileCount - 1u);
+    uint host_pitch_tiles = constants.host_depth_address.source_pitch;
+    uint host_tile_index_y = 0u;
+    uint host_tile_index_x = 0u;
+    XeFastDivMod(host_tile_index, host_pitch_tiles,
+                 constants.host_depth_source_pitch_tiles_inv,
+                 host_tile_index_y, host_tile_index_x);
+    host_pixel_x =
+        host_tile_index_x *
+            (tile_width_samples >> (host_msaa >= 4u ? 1u : 0u)) +
+        host_tile_pixel_x;
+    host_pixel_y =
+        host_tile_index_y *
+            (tile_height_samples >> (host_msaa >= 2u ? 1u : 0u)) +
+        host_tile_pixel_y;
 #endif
 
 #if XE_TRANSFER_HOST_DEPTH_IS_MULTISAMPLE
-  host_depth32 = xe_transfer_host_depth.read(
-      uint2(host_pixel_x, host_pixel_y), host_sample_id).r;
+    host_depth32 = xe_transfer_host_depth.read(
+        uint2(host_pixel_x, host_pixel_y), host_sample_id).r;
 #else
-  host_depth32 =
-      xe_transfer_host_depth.read(uint2(host_pixel_x, host_pixel_y)).r;
+    host_depth32 =
+        xe_transfer_host_depth.read(uint2(host_pixel_x, host_pixel_y)).r;
 #endif
-  has_host_depth = true;
-#endif
-
-#if XE_TRANSFER_HAS_HOST_DEPTH && XE_TRANSFER_HOST_DEPTH_IS_COPY
-  uint dest_tile_sample_x = dest_tile_pixel_x;
-  uint dest_tile_sample_y = dest_tile_pixel_y;
-  if (dest_msaa >= 2u) {
-    if (dest_msaa >= 4u) {
-      dest_tile_sample_x = XeBitFieldInsert(
-          dest_sample_id, dest_tile_pixel_x, 1u, 31u);
+  } else {
+    uint dest_tile_sample_x = dest_tile_pixel_x;
+    uint dest_tile_sample_y = dest_tile_pixel_y;
+    if (dest_msaa >= 2u) {
+      if (dest_msaa >= 4u) {
+        dest_tile_sample_x = XeBitFieldInsert(
+            dest_sample_id, dest_tile_pixel_x, 1u, 31u);
+      }
+      uint vert_sample = 0u;
+      if (dest_msaa == 2u && msaa_2x_supported) {
+        vert_sample = dest_sample_id ^ 1u;
+      } else {
+        vert_sample = dest_sample_id >> 1u;
+      }
+      dest_tile_sample_y = XeBitFieldInsert(
+          vert_sample, dest_tile_pixel_y, 1u, 31u);
     }
-    uint vert_sample = 0u;
-    if (dest_msaa == 2u && msaa_2x_supported) {
-      vert_sample = dest_sample_id ^ 1u;
-    } else {
-      vert_sample = dest_sample_id >> 1u;
-    }
-    dest_tile_sample_y = XeBitFieldInsert(
-        vert_sample, dest_tile_pixel_y, 1u, 31u);
+    uint host_depth_offset =
+        (tile_width_samples * tile_height_samples) * dest_tile_index +
+        tile_width_samples * dest_tile_sample_y + dest_tile_sample_x;
+    host_depth32 =
+        as_type<float>(xe_transfer_host_depth_buffer[host_depth_offset]);
   }
-  uint host_depth_offset =
-      (tile_width_samples * tile_height_samples) * dest_tile_index +
-      tile_width_samples * dest_tile_sample_y + dest_tile_sample_x;
-  host_depth32 = as_type<float>(xe_transfer_host_depth_buffer[host_depth_offset]);
   has_host_depth = true;
 #endif
 
@@ -8385,7 +8396,7 @@ fragment TransferDepthOut transfer_ps(
     return nullptr;
   }
 
-  pipeline_map.emplace(key, pipeline);
+  pipeline_map.emplace(pipeline_key, pipeline);
 
   return pipeline;
 }
