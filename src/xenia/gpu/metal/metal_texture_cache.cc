@@ -461,6 +461,63 @@ bool MetalTextureCache::ShouldUploadViaBlit() const {
   return ::cvars::metal_texture_upload_via_blit;
 }
 
+void MetalTextureCache::BeginUploadCommandBufferBatch() {
+  ++upload_batch_depth_;
+  if (upload_batch_depth_ != 1) {
+    return;
+  }
+  if (!ShouldUploadViaBlit() || !command_processor_) {
+    return;
+  }
+  MTL::CommandQueue* queue = command_processor_->GetMetalCommandQueue();
+  if (!queue) {
+    return;
+  }
+  MTL::CommandBuffer* cmd = queue->commandBuffer();
+  if (!cmd) {
+    return;
+  }
+  cmd->retain();
+  cmd->setLabel(
+      NS::String::string("XeniaTextureUploadBatch", NS::UTF8StringEncoding));
+  upload_batch_command_buffer_ = cmd;
+  upload_batch_command_buffer_has_work_ = false;
+}
+
+void MetalTextureCache::EndUploadCommandBufferBatch() {
+  if (!upload_batch_depth_) {
+    return;
+  }
+  --upload_batch_depth_;
+  if (upload_batch_depth_ != 0) {
+    return;
+  }
+  MTL::CommandBuffer* cmd = upload_batch_command_buffer_;
+  upload_batch_command_buffer_ = nullptr;
+  bool has_work = upload_batch_command_buffer_has_work_;
+  upload_batch_command_buffer_has_work_ = false;
+  if (!cmd) {
+    return;
+  }
+  if (!has_work) {
+    cmd->release();
+    return;
+  }
+  cmd->addCompletedHandler(^(MTL::CommandBuffer* completed_cmd) {
+    completed_cmd->release();
+  });
+  cmd->commit();
+}
+
+void MetalTextureCache::AbortUploadCommandBufferBatch() {
+  MTL::CommandBuffer* cmd = upload_batch_command_buffer_;
+  upload_batch_command_buffer_ = nullptr;
+  upload_batch_command_buffer_has_work_ = false;
+  if (cmd) {
+    cmd->release();
+  }
+}
+
 bool MetalTextureCache::IsDecompressionNeededForKey(TextureKey key) const {
   switch (key.format) {
     case xenos::TextureFormat::k_DXT1:
@@ -931,8 +988,87 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
   }
 
   const bool use_blit_upload = ShouldUploadViaBlit();
+
+  auto find_stored_level =
+      [&](bool is_base_storage,
+          uint32_t stored_level) -> const StoredLevelHostLayout* {
+    for (const StoredLevelHostLayout& layout : stored_levels) {
+      if (layout.is_base == is_base_storage && layout.level == stored_level) {
+        return &layout;
+      }
+    }
+    return nullptr;
+  };
+
+  bool use_upload_batch =
+      use_blit_upload && upload_batch_command_buffer_ &&
+      !texture_resolution_scaled;
+  if (use_upload_batch) {
+    constexpr uint32_t kBlitAlignment = 256;
+    for (uint32_t level = level_first; level <= level_last; ++level) {
+      uint32_t stored_level = std::min(level, level_packed);
+      bool is_base_storage =
+          stored_level == 0 && (level_packed != 0 || level == 0);
+      const StoredLevelHostLayout* stored_layout =
+          find_stored_level(is_base_storage, stored_level);
+      if (!stored_layout) {
+        continue;
+      }
+
+      uint32_t packed_offset_blocks_x = 0;
+      uint32_t packed_offset_blocks_y = 0;
+      uint32_t packed_offset_z = 0;
+      if (level >= level_packed) {
+        texture_util::GetPackedMipOffset(
+            width, height, depth, key.format, level, packed_offset_blocks_x,
+            packed_offset_blocks_y, packed_offset_z);
+      }
+
+      size_t bytes_per_image =
+          size_t(stored_layout->row_pitch_bytes) * stored_layout->height_blocks;
+
+      for (uint32_t slice = 0; slice < array_size; ++slice) {
+        size_t source_offset_bytes = stored_layout->dest_offset_bytes +
+                                     slice * stored_layout->slice_size_bytes;
+        if (level >= level_packed) {
+          if (host_block_compressed) {
+            uint32_t packed_offset_blocks_x_scaled =
+                packed_offset_blocks_x * texture_resolution_scale_x;
+            uint32_t packed_offset_blocks_y_scaled =
+                packed_offset_blocks_y * texture_resolution_scale_y;
+            source_offset_bytes += packed_offset_z * bytes_per_image;
+            source_offset_bytes +=
+                packed_offset_blocks_y_scaled * stored_layout->row_pitch_bytes;
+            source_offset_bytes +=
+                packed_offset_blocks_x_scaled * bytes_per_block;
+          } else {
+            uint32_t packed_offset_texels_x =
+                packed_offset_blocks_x * block_width;
+            uint32_t packed_offset_texels_y =
+                packed_offset_blocks_y * block_height;
+            packed_offset_texels_x *= texture_resolution_scale_x;
+            packed_offset_texels_y *= texture_resolution_scale_y;
+            source_offset_bytes += packed_offset_z * bytes_per_image;
+            source_offset_bytes +=
+                packed_offset_texels_y * stored_layout->row_pitch_bytes;
+            source_offset_bytes +=
+                packed_offset_texels_x * load_shader_info.bytes_per_host_block;
+          }
+        }
+        if (source_offset_bytes % kBlitAlignment) {
+          use_upload_batch = false;
+          break;
+        }
+      }
+      if (!use_upload_batch) {
+        break;
+      }
+    }
+  }
+
   ScopedAutoreleasePool autorelease_pool;
-  MTL::CommandBuffer* cmd = queue->commandBuffer();
+  MTL::CommandBuffer* cmd =
+      use_upload_batch ? upload_batch_command_buffer_ : queue->commandBuffer();
   if (!cmd) {
     release_buffer_immediate(constants_buffer, constants_buffer_size);
     release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
@@ -940,6 +1076,9 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
   }
   MTL::ComputeCommandEncoder* encoder = cmd->computeCommandEncoder();
   if (!encoder) {
+    if (use_upload_batch) {
+      AbortUploadCommandBufferBatch();
+    }
     release_buffer_immediate(constants_buffer, constants_buffer_size);
     release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
     return false;
@@ -1069,6 +1208,9 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
   if (use_blit_upload) {
     MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
     if (!blit) {
+      if (use_upload_batch) {
+        AbortUploadCommandBufferBatch();
+      }
       release_buffer_immediate(constants_buffer, constants_buffer_size);
       release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
       return false;
@@ -1076,17 +1218,6 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
 
     uint32_t bytes_per_host_block = load_shader_info.bytes_per_host_block;
     const uint32_t blit_alignment = 256;
-
-    auto find_stored_level =
-        [&](bool is_base_storage,
-            uint32_t stored_level) -> const StoredLevelHostLayout* {
-      for (const StoredLevelHostLayout& layout : stored_levels) {
-        if (layout.is_base == is_base_storage && layout.level == stored_level) {
-          return &layout;
-        }
-      }
-      return nullptr;
-    };
 
     for (uint32_t level = level_first; level <= level_last; ++level) {
       uint32_t stored_level = std::min(level, level_packed);
@@ -1166,6 +1297,9 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
           MTL::Buffer* staging_buffer = acquire_buffer(staging_size);
           if (!staging_buffer) {
             blit->endEncoding();
+            if (use_upload_batch) {
+              AbortUploadCommandBufferBatch();
+            }
             release_buffer_immediate(constants_buffer, constants_buffer_size);
             release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
             return false;
@@ -1207,11 +1341,15 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     blit->endEncoding();
     release_buffer_after(cmd, constants_buffer, constants_buffer_size);
     release_buffer_after(cmd, dest_buffer, size_t(dest_buffer_size));
-    cmd->retain();
-    cmd->addCompletedHandler(^(MTL::CommandBuffer* cb) {
-      cb->release();
-    });
-    cmd->commit();
+    if (use_upload_batch) {
+      upload_batch_command_buffer_has_work_ = true;
+    } else {
+      cmd->retain();
+      cmd->addCompletedHandler(^(MTL::CommandBuffer* cb) {
+        cb->release();
+      });
+      cmd->commit();
+    }
   } else {
     cmd->commit();
     cmd->waitUntilCompleted();
@@ -1728,6 +1866,8 @@ void MetalTextureCache::InitializeNorm16Selection(MTL::Device* device) {
 void MetalTextureCache::Shutdown() {
   SCOPE_profile_cpu_f("gpu");
 
+  AbortUploadCommandBufferBatch();
+
   ClearCache();
 
   for (size_t i = 0; i < kLoadShaderCount; ++i) {
@@ -2199,8 +2339,12 @@ MTL::Texture* MetalTextureCache::CreateNullTextureCube() {
 void MetalTextureCache::RequestTextures(uint32_t used_texture_mask) {
   SCOPE_profile_cpu_f("gpu");
 
+  BeginUploadCommandBufferBatch();
+
   // Call base class implementation first
   TextureCache::RequestTextures(used_texture_mask);
+
+  EndUploadCommandBufferBatch();
 
   // Intentionally no Metal-specific per-fetch logging here - invalid fetch
   // constants are already reported by the shared TextureCache logic.
