@@ -1351,7 +1351,13 @@ bool MetalCommandProcessor::SetupContext() {
   depth_desc->setPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
   depth_desc->setWidth(render_target_width_);
   depth_desc->setHeight(render_target_height_);
+#if XE_PLATFORM_IOS
+  // This fallback depth/stencil target is transient (clear/dontcare only) and
+  // never sampled, so memoryless is the most efficient iOS storage mode.
+  depth_desc->setStorageMode(MTL::StorageModeMemoryless);
+#else
   depth_desc->setStorageMode(MTL::StorageModePrivate);
+#endif
   depth_desc->setUsage(MTL::TextureUsageRenderTarget);
 
   depth_stencil_texture_ = device_->newTexture(depth_desc);
