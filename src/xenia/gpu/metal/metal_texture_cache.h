@@ -148,7 +148,7 @@ class MetalTextureCache : public TextureCache {
   bool ShouldUploadViaBlit() const;
   void BeginUploadCommandBufferBatch();
   void EndUploadCommandBufferBatch();
-  void AbortUploadCommandBufferBatch();
+  void AbortUploadCommandBufferBatch(bool commit_if_has_work = true);
 
   // Format / load shader mapping for Metal texture loading.
   bool IsDecompressionNeededForKey(TextureKey key) const;

@@ -516,13 +516,22 @@ void MetalTextureCache::EndUploadCommandBufferBatch() {
   cmd->commit();
 }
 
-void MetalTextureCache::AbortUploadCommandBufferBatch() {
+void MetalTextureCache::AbortUploadCommandBufferBatch(bool commit_if_has_work) {
   MTL::CommandBuffer* cmd = upload_batch_command_buffer_;
   upload_batch_command_buffer_ = nullptr;
+  bool has_work = upload_batch_command_buffer_has_work_;
   upload_batch_command_buffer_has_work_ = false;
-  if (cmd) {
-    cmd->release();
+  if (!cmd) {
+    return;
   }
+  if (!has_work || !commit_if_has_work) {
+    cmd->release();
+    return;
+  }
+  cmd->addCompletedHandler(^(MTL::CommandBuffer* completed_cmd) {
+    completed_cmd->release();
+  });
+  cmd->commit();
 }
 
 bool MetalTextureCache::IsDecompressionNeededForKey(TextureKey key) const {
@@ -1042,6 +1051,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
     return false;
   }
+
   MTL::ComputeCommandEncoder* encoder = cmd->computeCommandEncoder();
   if (!encoder) {
     if (use_upload_batch) {
@@ -1834,7 +1844,7 @@ void MetalTextureCache::InitializeNorm16Selection(MTL::Device* device) {
 void MetalTextureCache::Shutdown() {
   SCOPE_profile_cpu_f("gpu");
 
-  AbortUploadCommandBufferBatch();
+  AbortUploadCommandBufferBatch(false);
 
   ClearCache();
 
