@@ -6124,42 +6124,24 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
       MTL::RenderCommandEncoder* encoder = ensure_transfer_encoder();
       if (encoder) {
         bool transfer_viewport_full_set = false;
-        bool transfer_scissor_full_set = false;
-        auto set_full_transfer_viewport_scissor = [&]() {
-          if (transfer_viewport_full_set) {
-            if (!transfer_scissor_full_set) {
-              MTL::ScissorRect scissor;
-              scissor.x = 0;
-              scissor.y = 0;
-              scissor.width = dest_width;
-              scissor.height = dest_height;
-              encoder->setScissorRect(scissor);
-              transfer_scissor_full_set = true;
-            }
-            return;
-          }
-          MTL::Viewport vp;
-          vp.originX = 0.0;
-          vp.originY = 0.0;
-          vp.width = double(dest_width);
-          vp.height = double(dest_height);
-          vp.znear = 0.0;
-          vp.zfar = 1.0;
-          encoder->setViewport(vp);
-          MTL::ScissorRect scissor;
-          scissor.x = 0;
-          scissor.y = 0;
-          scissor.width = dest_width;
-          scissor.height = dest_height;
-          encoder->setScissorRect(scissor);
-          transfer_viewport_full_set = true;
-          transfer_scissor_full_set = true;
-        };
+        MTL::ScissorRect last_transfer_scissor = {};
+        bool last_transfer_scissor_valid = false;
         MTL::RenderPipelineState* last_transfer_pipeline = nullptr;
         MTL::DepthStencilState* last_transfer_depth_state = nullptr;
         MTL::Buffer* last_transfer_fragment_buffer_1 = nullptr;
         std::array<MTL::Texture*, 3> last_transfer_fragment_textures = {
             nullptr, nullptr, nullptr};
+        bool last_transfer_stencil_reference_valid = false;
+        uint32_t last_transfer_stencil_reference = 0;
+        bool transfer_constants_valid = false;
+        TransferShaderConstants last_transfer_constants = {};
+        enum class TransferVertexSlot1Binding { kNone, kBuffer, kBytes };
+        TransferVertexSlot1Binding last_transfer_vertex_slot_1_binding =
+            TransferVertexSlot1Binding::kNone;
+        MTL::Buffer* last_transfer_vertex_buffer_1 = nullptr;
+        size_t last_transfer_vertex_buffer_1_offset = 0;
+        bool last_transfer_vertex_bytes_1_valid = false;
+        TransferRectInstance last_transfer_vertex_bytes_1 = {};
         auto bind_transfer_pipeline = [&](MTL::RenderPipelineState* pipeline) {
           if (last_transfer_pipeline != pipeline) {
             encoder->setRenderPipelineState(pipeline);
@@ -6187,6 +6169,84 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
             encoder->setFragmentBuffer(buffer, 0, 1);
             last_transfer_fragment_buffer_1 = buffer;
           }
+        };
+        auto bind_transfer_stencil_reference = [&](uint32_t reference) {
+          if (!last_transfer_stencil_reference_valid ||
+              last_transfer_stencil_reference != reference) {
+            encoder->setStencilReferenceValue(reference);
+            last_transfer_stencil_reference = reference;
+            last_transfer_stencil_reference_valid = true;
+          }
+        };
+        auto bind_transfer_constants = [&](const TransferShaderConstants& constants) {
+          if (!transfer_constants_valid ||
+              std::memcmp(&last_transfer_constants, &constants,
+                          sizeof(constants)) != 0) {
+            encoder->setVertexBytes(&constants, sizeof(constants), 0);
+            encoder->setFragmentBytes(&constants, sizeof(constants), 0);
+            last_transfer_constants = constants;
+            transfer_constants_valid = true;
+          }
+        };
+        auto bind_transfer_scissor = [&](const MTL::ScissorRect& scissor) {
+          if (!last_transfer_scissor_valid ||
+              last_transfer_scissor.x != scissor.x ||
+              last_transfer_scissor.y != scissor.y ||
+              last_transfer_scissor.width != scissor.width ||
+              last_transfer_scissor.height != scissor.height) {
+            encoder->setScissorRect(scissor);
+            last_transfer_scissor = scissor;
+            last_transfer_scissor_valid = true;
+          }
+        };
+        auto bind_transfer_vertex_buffer_1 = [&](MTL::Buffer* buffer,
+                                                 size_t offset) {
+          if (last_transfer_vertex_slot_1_binding !=
+                  TransferVertexSlot1Binding::kBuffer ||
+              last_transfer_vertex_buffer_1 != buffer ||
+              last_transfer_vertex_buffer_1_offset != offset) {
+            encoder->setVertexBuffer(buffer, offset, 1);
+            last_transfer_vertex_slot_1_binding =
+                TransferVertexSlot1Binding::kBuffer;
+            last_transfer_vertex_buffer_1 = buffer;
+            last_transfer_vertex_buffer_1_offset = offset;
+            last_transfer_vertex_bytes_1_valid = false;
+          }
+        };
+        auto bind_transfer_vertex_bytes_1 =
+            [&](const TransferRectInstance& rect_instance) {
+              if (last_transfer_vertex_slot_1_binding !=
+                      TransferVertexSlot1Binding::kBytes ||
+                  !last_transfer_vertex_bytes_1_valid ||
+                  std::memcmp(&last_transfer_vertex_bytes_1, &rect_instance,
+                              sizeof(rect_instance)) != 0) {
+                encoder->setVertexBytes(&rect_instance, sizeof(rect_instance), 1);
+                last_transfer_vertex_slot_1_binding =
+                    TransferVertexSlot1Binding::kBytes;
+                last_transfer_vertex_buffer_1 = nullptr;
+                last_transfer_vertex_buffer_1_offset = 0;
+                last_transfer_vertex_bytes_1 = rect_instance;
+                last_transfer_vertex_bytes_1_valid = true;
+              }
+            };
+        auto set_full_transfer_viewport_scissor = [&]() {
+          if (!transfer_viewport_full_set) {
+            MTL::Viewport vp;
+            vp.originX = 0.0;
+            vp.originY = 0.0;
+            vp.width = double(dest_width);
+            vp.height = double(dest_height);
+            vp.znear = 0.0;
+            vp.zfar = 1.0;
+            encoder->setViewport(vp);
+            transfer_viewport_full_set = true;
+          }
+          MTL::ScissorRect scissor;
+          scissor.x = 0;
+          scissor.y = 0;
+          scissor.width = dest_width;
+          scissor.height = dest_height;
+          bind_transfer_scissor(scissor);
         };
 
         std::vector<Transfer::Rectangle> merged_transfer_rectangles;
@@ -6481,24 +6541,21 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
 
           auto draw_transfer = [&](uint32_t sample_id) {
             constants.dest_sample_id = sample_id;
+            bind_transfer_constants(constants);
             if (use_tile_instancing) {
               set_full_transfer_viewport_scissor();
-              encoder->setVertexBytes(&constants, sizeof(constants), 0);
-              encoder->setFragmentBytes(&constants, sizeof(constants), 0);
               for (const auto& batch : tile_batches) {
-                encoder->setScissorRect(batch.scissor);
-                encoder->setVertexBuffer(batch.buffer, batch.buffer_offset, 1);
+                bind_transfer_scissor(batch.scissor);
+                bind_transfer_vertex_buffer_1(batch.buffer, batch.buffer_offset);
                 encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
                                         NS::UInteger(0), NS::UInteger(4),
                                         NS::UInteger(batch.instance_count));
               }
             } else {
-              encoder->setVertexBytes(&constants, sizeof(constants), 0);
-              encoder->setFragmentBytes(&constants, sizeof(constants), 0);
               if (rect_instance_buffer && rect_instance_count) {
                 set_full_transfer_viewport_scissor();
-                encoder->setVertexBuffer(rect_instance_buffer,
-                                         rect_instance_buffer_offset, 1);
+                bind_transfer_vertex_buffer_1(rect_instance_buffer,
+                                              rect_instance_buffer_offset);
                 encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
                                         NS::UInteger(0), NS::UInteger(4),
                                         NS::UInteger(rect_instance_count));
@@ -6521,8 +6578,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                   rect_instance.origin_y = float(scaled_y);
                   rect_instance.size_x = float(scaled_width);
                   rect_instance.size_y = float(scaled_height);
-                  encoder->setVertexBytes(&rect_instance, sizeof(rect_instance),
-                                          1);
+                  bind_transfer_vertex_bytes_1(rect_instance);
                   encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
                                           NS::UInteger(0), NS::UInteger(4),
                                           NS::UInteger(1));
@@ -6541,7 +6597,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               constants.stencil_mask = uint32_t(1) << bit;
               constants.stencil_clear = 0;
               bind_transfer_depth_state(stencil_state);
-              encoder->setStencilReferenceValue(uint32_t(1) << bit);
+              bind_transfer_stencil_reference(uint32_t(1) << bit);
               draw_transfer_samples(draw_transfer);
             }
           } else {
