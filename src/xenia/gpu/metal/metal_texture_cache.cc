@@ -1011,68 +1011,6 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
       use_blit_upload && upload_batch_command_buffer_ &&
       !texture_resolution_scaled &&
       command_processor_ && !command_processor_->GetCurrentCommandBuffer();
-  if (use_upload_batch) {
-    constexpr uint32_t kBlitAlignment = 256;
-    for (uint32_t level = level_first; level <= level_last; ++level) {
-      uint32_t stored_level = std::min(level, level_packed);
-      bool is_base_storage =
-          stored_level == 0 && (level_packed != 0 || level == 0);
-      const StoredLevelHostLayout* stored_layout =
-          find_stored_level(is_base_storage, stored_level);
-      if (!stored_layout) {
-        continue;
-      }
-
-      uint32_t packed_offset_blocks_x = 0;
-      uint32_t packed_offset_blocks_y = 0;
-      uint32_t packed_offset_z = 0;
-      if (level >= level_packed) {
-        texture_util::GetPackedMipOffset(
-            width, height, depth, key.format, level, packed_offset_blocks_x,
-            packed_offset_blocks_y, packed_offset_z);
-      }
-
-      size_t bytes_per_image =
-          size_t(stored_layout->row_pitch_bytes) * stored_layout->height_blocks;
-
-      for (uint32_t slice = 0; slice < array_size; ++slice) {
-        size_t source_offset_bytes = stored_layout->dest_offset_bytes +
-                                     slice * stored_layout->slice_size_bytes;
-        if (level >= level_packed) {
-          if (host_block_compressed) {
-            uint32_t packed_offset_blocks_x_scaled =
-                packed_offset_blocks_x * texture_resolution_scale_x;
-            uint32_t packed_offset_blocks_y_scaled =
-                packed_offset_blocks_y * texture_resolution_scale_y;
-            source_offset_bytes += packed_offset_z * bytes_per_image;
-            source_offset_bytes +=
-                packed_offset_blocks_y_scaled * stored_layout->row_pitch_bytes;
-            source_offset_bytes +=
-                packed_offset_blocks_x_scaled * bytes_per_block;
-          } else {
-            uint32_t packed_offset_texels_x =
-                packed_offset_blocks_x * block_width;
-            uint32_t packed_offset_texels_y =
-                packed_offset_blocks_y * block_height;
-            packed_offset_texels_x *= texture_resolution_scale_x;
-            packed_offset_texels_y *= texture_resolution_scale_y;
-            source_offset_bytes += packed_offset_z * bytes_per_image;
-            source_offset_bytes +=
-                packed_offset_texels_y * stored_layout->row_pitch_bytes;
-            source_offset_bytes +=
-                packed_offset_texels_x * load_shader_info.bytes_per_host_block;
-          }
-        }
-        if (source_offset_bytes % kBlitAlignment) {
-          use_upload_batch = false;
-          break;
-        }
-      }
-      if (!use_upload_batch) {
-        break;
-      }
-    }
-  }
 
   ScopedAutoreleasePool autorelease_pool;
   MTL::CommandBuffer* cmd =
