@@ -5606,6 +5606,53 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
     const std::vector<Transfer>& transfers_for_shaders =
         used_blit ? filtered_transfers : transfers;
 
+    auto is_full_target_rectangle = [&](const Transfer::Rectangle& rect) -> bool {
+      uint32_t scaled_x = 0;
+      uint32_t scaled_y = 0;
+      uint32_t scaled_width = 0;
+      uint32_t scaled_height = 0;
+      if (!get_scaled_rect(rect, scaled_x, scaled_y, scaled_width,
+                           scaled_height)) {
+        return false;
+      }
+      return !scaled_x && !scaled_y && scaled_width == dest_width &&
+             scaled_height == dest_height;
+    };
+
+    auto transfers_fully_overwrite_target = [&]() -> bool {
+      if (transfers_for_shaders.empty()) {
+        return false;
+      }
+      for (const Transfer& transfer : transfers_for_shaders) {
+        Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithCutout];
+        uint32_t rectangle_count = transfer.GetRectangles(
+            dest_key.base_tiles, dest_key.GetPitchTiles(),
+            dest_key.msaa_samples, IsKey64bpp(dest_key), rectangles,
+            resolve_clear_rectangle);
+        if (rectangle_count != 1 || !is_full_target_rectangle(rectangles[0])) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    bool resolve_clear_fully_overwrites_target = false;
+    if (resolve_clear_needed && resolve_clear_rectangle) {
+      resolve_clear_fully_overwrites_target =
+          is_full_target_rectangle(*resolve_clear_rectangle);
+    }
+
+    // Prefer DontCare on transfer-pass loads only when destination contents are
+    // provably fully overwritten by this pass.
+    bool transfer_pass_load_dontcare =
+        resolve_clear_fully_overwrites_target && transfers_for_shaders.empty();
+    if (!transfer_pass_load_dontcare && !resolve_clear_needed) {
+      transfer_pass_load_dontcare = transfers_fully_overwrite_target();
+    }
+    MTL::LoadAction transfer_load_action = transfer_pass_load_dontcare
+                                               ? MTL::LoadActionDontCare
+                                               : MTL::LoadActionLoad;
+
     MTL::RenderCommandEncoder* transfer_encoder = nullptr;
     auto ensure_transfer_encoder = [&]() -> MTL::RenderCommandEncoder* {
       if (transfer_encoder) {
@@ -5616,19 +5663,19 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
       if (dest_is_depth) {
         auto* da = rp->depthAttachment();
         da->setTexture(dest_texture);
-        da->setLoadAction(MTL::LoadActionLoad);
+        da->setLoadAction(transfer_load_action);
         da->setStoreAction(MTL::StoreActionStore);
         if (dest_pixel_format == MTL::PixelFormatDepth32Float_Stencil8 ||
             dest_pixel_format == MTL::PixelFormatDepth24Unorm_Stencil8) {
           auto* sa = rp->stencilAttachment();
           sa->setTexture(dest_texture);
-          sa->setLoadAction(MTL::LoadActionLoad);
+          sa->setLoadAction(transfer_load_action);
           sa->setStoreAction(MTL::StoreActionStore);
         }
       } else {
         auto* ca = rp->colorAttachments()->object(0);
         ca->setTexture(dest_texture);
-        ca->setLoadAction(MTL::LoadActionLoad);
+        ca->setLoadAction(transfer_load_action);
         ca->setStoreAction(MTL::StoreActionStore);
       }
       transfer_encoder = cmd->renderCommandEncoder(rp);
