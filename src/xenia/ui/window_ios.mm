@@ -19,6 +19,11 @@
 namespace xe {
 namespace ui {
 
+namespace {
+constexpr uint32_t kForcedLogicalWidth = 1280;
+constexpr uint32_t kForcedLogicalHeight = 720;
+}  // namespace
+
 std::unique_ptr<Window> Window::Create(WindowedAppContext& app_context,
                                        const std::string_view title,
                                        uint32_t desired_logical_width,
@@ -51,11 +56,9 @@ void iOSWindow::SetNativeView(UIView* view,
 void iOSWindow::HandleSizeChange() {
   if (!view_) return;
 
-  // Report size in points to match Surface::GetSize semantics.
-  // MetalPresenter applies the scale factor when computing drawable size.
-  CGRect bounds = [view_ bounds];
-  uint32_t width = static_cast<uint32_t>(bounds.size.width);
-  uint32_t height = static_cast<uint32_t>(bounds.size.height);
+  // Force a fixed logical rendering resolution on iOS.
+  uint32_t width = kForcedLogicalWidth;
+  uint32_t height = kForcedLogicalHeight;
 
   WindowDestructionReceiver destruction_receiver(this);
   OnActualSizeUpdate(width, height, destruction_receiver);
@@ -81,12 +84,11 @@ bool iOSWindow::OpenImpl() {
     OnMonitorUpdate(monitor_event);
   }
 
-  // Report initial size in points (logical coordinates).
-  // MetalPresenter applies the backing scale factor for drawable size.
+  // Force a fixed logical rendering resolution on iOS.
   CGRect bounds = [view_ bounds];
   CGFloat scale = [view_ contentScaleFactor];
-  uint32_t width = static_cast<uint32_t>(bounds.size.width);
-  uint32_t height = static_cast<uint32_t>(bounds.size.height);
+  uint32_t width = kForcedLogicalWidth;
+  uint32_t height = kForcedLogicalHeight;
   {
     WindowDestructionReceiver destruction_receiver(this);
     OnActualSizeUpdate(width, height, destruction_receiver);
@@ -102,7 +104,10 @@ bool iOSWindow::OpenImpl() {
 
   SetupDisplayLink();
 
-  XELOGI("iOSWindow: Opened ({}x{} @ {:.0f}x scale)", width, height, scale);
+  XELOGI(
+      "iOSWindow: Opened (forced {}x{}, view_bounds={}x{} @ {:.0f}x scale)",
+      width, height, static_cast<uint32_t>(bounds.size.width),
+      static_cast<uint32_t>(bounds.size.height), scale);
   return true;
 }
 
@@ -260,9 +265,10 @@ void iOSWindow::SetupDisplayLink() {
       displayLinkWithTarget:g_display_link_target
                    selector:@selector(displayLinkFired:)];
   [g_display_link_target setDisplayLink:display_link_];
-  // Prefer 60 FPS but allow the system to adjust.
+  // Keep presenter pacing at display-rate cadence (60Hz minimum, 120Hz max on
+  // ProMotion devices) to avoid opportunistic 30Hz downshifts.
   display_link_.preferredFrameRateRange =
-      CAFrameRateRangeMake(30.0, 120.0, 60.0);
+      CAFrameRateRangeMake(60.0, 120.0, 60.0);
   [display_link_ addToRunLoop:[NSRunLoop mainRunLoop]
                       forMode:NSRunLoopCommonModes];
 

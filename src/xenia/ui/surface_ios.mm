@@ -15,6 +15,11 @@
 namespace xe {
 namespace ui {
 
+namespace {
+constexpr uint32_t kForcedLogicalWidth = 1280;
+constexpr uint32_t kForcedLogicalHeight = 720;
+}  // namespace
+
 bool iOSUIViewSurface::GetSizeImpl(uint32_t& width_out,
                                    uint32_t& height_out) const {
   if (!view_) {
@@ -23,14 +28,9 @@ bool iOSUIViewSurface::GetSizeImpl(uint32_t& width_out,
     return false;
   }
 
-  // Return size in points (logical size), not pixels.
-  // MetalPresenter multiplies by contentScaleFactor (backing_scale) to get
-  // the drawable size in pixels. Returning pixels here would cause
-  // double-scaling (points * scale * scale), leading to massive drawable
-  // sizes, allocation failures, or extreme slowdown on high-DPI iOS devices.
-  CGRect bounds = [view_ bounds];
-  width_out = static_cast<uint32_t>(bounds.size.width);
-  height_out = static_cast<uint32_t>(bounds.size.height);
+  // Force fixed logical rendering resolution on iOS.
+  width_out = kForcedLogicalWidth;
+  height_out = kForcedLogicalHeight;
 
   return true;
 }
@@ -44,7 +44,10 @@ CAMetalLayer* iOSUIViewSurface::GetOrCreateMetalLayer() const {
   // or by replacing the layer directly.
   CALayer* layer = [view_ layer];
   if ([layer isKindOfClass:[CAMetalLayer class]]) {
-    return static_cast<CAMetalLayer*>(layer);
+    CAMetalLayer* metal_layer = static_cast<CAMetalLayer*>(layer);
+    // Keep fixed-size drawables from stretching on non-16:9 displays.
+    metal_layer.contentsGravity = kCAGravityResizeAspect;
+    return metal_layer;
   }
 
   // Create and set a new CAMetalLayer.
@@ -53,6 +56,7 @@ CAMetalLayer* iOSUIViewSurface::GetOrCreateMetalLayer() const {
   [view_.layer addSublayer:metalLayer];
   metalLayer.frame = view_.bounds;
   metalLayer.contentsScale = [UIScreen mainScreen].scale;
+  metalLayer.contentsGravity = kCAGravityResizeAspect;
   metalLayer.framebufferOnly = YES;
   metalLayer.opaque = YES;
 
