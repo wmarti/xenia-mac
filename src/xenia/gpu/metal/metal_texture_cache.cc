@@ -469,6 +469,13 @@ void MetalTextureCache::BeginUploadCommandBufferBatch() {
   if (!ShouldUploadViaBlit() || !command_processor_) {
     return;
   }
+  // Avoid cross-command-buffer upload batching while a draw/copy command
+  // buffer is already active in the command processor. Keeping upload work on
+  // a separate command buffer in that state can reorder with in-flight render
+  // setup and lead to startup rendering regressions.
+  if (command_processor_->GetCurrentCommandBuffer()) {
+    return;
+  }
   MTL::CommandQueue* queue = command_processor_->GetMetalCommandQueue();
   if (!queue) {
     return;
@@ -1002,7 +1009,8 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
 
   bool use_upload_batch =
       use_blit_upload && upload_batch_command_buffer_ &&
-      !texture_resolution_scaled;
+      !texture_resolution_scaled &&
+      command_processor_ && !command_processor_->GetCurrentCommandBuffer();
   if (use_upload_batch) {
     constexpr uint32_t kBlitAlignment = 256;
     for (uint32_t level = level_first; level <= level_last; ++level) {
