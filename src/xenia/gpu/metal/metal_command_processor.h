@@ -125,6 +125,7 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Use base class WriteRegister - don't override with empty implementation!
   // The base class stores values in register_file_->values[] which we need.
+  void OnPrimaryBufferEnd() override;
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
 
@@ -166,6 +167,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // Command buffer management
   void BeginCommandBuffer();
   void EndCommandBuffer();
+  bool CanEndSubmissionImmediately();
   void WaitForPendingCompletionHandlers();
   void ProcessCompletedSubmissions();
   bool EnsureDrawRingCapacity();
