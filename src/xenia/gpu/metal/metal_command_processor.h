@@ -678,6 +678,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // Each draw uses a different region of the descriptor heap to avoid
   // overwriting previous draws' descriptors before GPU execution
   uint32_t current_draw_index_ = 0;
+  bool copy_resolve_writes_pending_ = false;
 
   // Memexport tracking for shared memory invalidation.
   std::vector<draw_util::MemExportRange> memexport_ranges_;

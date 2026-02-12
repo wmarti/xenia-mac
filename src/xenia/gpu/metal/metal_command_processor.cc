@@ -1672,6 +1672,7 @@ void MetalCommandProcessor::PrepareForWait() {
     SetActiveDrawRing(nullptr);
 #endif
     current_draw_index_ = 0;
+    copy_resolve_writes_pending_ = false;
   }
   DrainCommandBufferAutoreleasePool();
 
@@ -1757,6 +1758,7 @@ void MetalCommandProcessor::ShutdownContext() {
     SetActiveDrawRing(nullptr);
 #endif
     current_draw_index_ = 0;
+    copy_resolve_writes_pending_ = false;
   }
 
   // Even if we have no active command buffer at this point, there may be
@@ -2387,6 +2389,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     SetActiveDrawRing(nullptr);
 #endif
     current_draw_index_ = 0;
+    copy_resolve_writes_pending_ = false;
   }
 
   if (primitive_processor_ && frame_open_) {
@@ -2525,7 +2528,7 @@ void MetalCommandProcessor::OnPrimaryBufferEnd() {
   if (!cvars::submit_on_primary_buffer_end || !current_command_buffer_) {
     return;
   }
-  if (!CanEndSubmissionImmediately()) {
+  if (!copy_resolve_writes_pending_ && !CanEndSubmissionImmediately()) {
     return;
   }
   EndCommandBuffer();
@@ -2603,6 +2606,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
   // Check for copy mode
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode != xenos::EdramMode::kCopy && copy_resolve_writes_pending_) {
+    // Preserve resolve write visibility when transitioning from copy-only
+    // bursts to regular draw work.
+    EndCommandBuffer();
+  }
   if (edram_mode == xenos::EdramMode::kCopy) {
     return IssueCopy();
   }
@@ -4974,8 +4982,19 @@ bool MetalCommandProcessor::IssueCopy() {
   //     written_length, true);
   //   }
 
-  // Resolve touched guest memory; commit immediately so following packets don't
-  // observe stale resolve results.
+  // Copy-only resolve bursts can stay open and be coalesced until a draw,
+  // primary-buffer end, swap, or explicit synchronization point.
+  if (current_draw_index_ == 0
+#if METAL_SHADER_CONVERTER_AVAILABLE
+      && command_buffer_draw_rings_.empty()
+#endif
+  ) {
+    copy_resolve_writes_pending_ = true;
+    return true;
+  }
+
+  // Resolve touched guest memory in a draw-containing submission; commit now
+  // so following packets don't observe stale resolve results.
 #if METAL_SHADER_CONVERTER_AVAILABLE
   ScheduleDrawRingRelease(copy_command_buffer);
 #else
@@ -4990,6 +5009,7 @@ bool MetalCommandProcessor::IssueCopy() {
   SetActiveDrawRing(nullptr);
 #endif
   current_draw_index_ = 0;
+  copy_resolve_writes_pending_ = false;
 
   return true;
 }
@@ -5558,6 +5578,7 @@ void MetalCommandProcessor::EndCommandBuffer() {
 #endif
     current_draw_index_ = 0;
   }
+  copy_resolve_writes_pending_ = false;
   DrainCommandBufferAutoreleasePool();
 }
 
