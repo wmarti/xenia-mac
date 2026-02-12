@@ -2507,10 +2507,15 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 static_cast<ui::metal::MetalGuestOutputRefreshContext&>(
                     context);
             context.SetIs8bpc(!use_pwl_gamma_ramp_copy);
-            return metal_presenter->CopyTextureToGuestOutput(
+            uint64_t submission_id = 0;
+            bool copy_success = metal_presenter->CopyTextureToGuestOutput(
                 source_texture, metal_context.resource_uav_capable(),
                 source_width, source_height, force_swap_rb_copy,
-                use_pwl_gamma_ramp_copy);
+                use_pwl_gamma_ramp_copy, &submission_id);
+            if (copy_success && submission_id) {
+              metal_context.SetSubmissionId(submission_id);
+            }
+            return copy_success;
           });
     }
   }
