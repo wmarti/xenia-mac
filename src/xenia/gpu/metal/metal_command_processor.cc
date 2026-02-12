@@ -77,6 +77,7 @@ using BYTE = uint8_t;
 #endif
 
 DECLARE_bool(clear_memory_page_state);
+DECLARE_bool(submit_on_primary_buffer_end);
 DEFINE_int32(
     metal_pipeline_creation_threads, -1,
     "Number of threads used for SPIRV-Cross shader and render pipeline "
@@ -1351,9 +1352,9 @@ bool MetalCommandProcessor::SetupContext() {
   depth_desc->setPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
   depth_desc->setWidth(render_target_width_);
   depth_desc->setHeight(render_target_height_);
-#if XE_PLATFORM_IOS
   // This fallback depth/stencil target is transient (clear/dontcare only) and
   // never sampled, so memoryless is the most efficient iOS storage mode.
+#if XE_PLATFORM_IOS
   depth_desc->setStorageMode(MTL::StorageModeMemoryless);
 #else
   depth_desc->setStorageMode(MTL::StorageModePrivate);
@@ -2493,6 +2494,16 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           });
     }
   }
+}
+
+void MetalCommandProcessor::OnPrimaryBufferEnd() {
+  if (!cvars::submit_on_primary_buffer_end) {
+    return;
+  }
+  if (!current_command_buffer_) {
+    return;
+  }
+  EndCommandBuffer();
 }
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
@@ -4868,30 +4879,13 @@ bool MetalCommandProcessor::IssueDrawMsl(
 }
 
 bool MetalCommandProcessor::IssueCopy() {
-  // Finish any in-flight rendering so the render target contents are
-  // available to the render target cache, similar to D3D12's
-  // D3D12CommandProcessor::IssueCopy.
-  if (current_render_encoder_) {
-    current_render_encoder_->endEncoding();
-    current_render_encoder_->release();
-    current_render_encoder_ = nullptr;
-  }
-
-  if (!current_command_buffer_) {
-    if (!command_queue_) {
-      XELOGE("MetalCommandProcessor::IssueCopy: no command queue");
-      return false;
-    }
-    // Note: commandBuffer() returns an autoreleased object, we must retain it.
-    current_command_buffer_ = command_queue_->commandBuffer();
-    if (!current_command_buffer_) {
-      XELOGE(
-          "MetalCommandProcessor::IssueCopy: failed to create command buffer");
-      return false;
-    }
-    current_command_buffer_->retain();
-    current_command_buffer_->setLabel(
-        NS::String::string("XeniaCopyCommandBuffer", NS::UTF8StringEncoding));
+  // Finish any in-flight rendering so render target contents are visible to
+  // resolve logic, but keep submission open to match D3D12/Vulkan ordering.
+  EndRenderEncoder();
+  MTL::CommandBuffer* copy_command_buffer = EnsureCommandBuffer();
+  if (!copy_command_buffer) {
+    XELOGE("MetalCommandProcessor::IssueCopy: failed to get command buffer");
+    return false;
   }
 
   if (!render_target_cache_) {
@@ -4903,27 +4897,14 @@ bool MetalCommandProcessor::IssueCopy() {
   uint32_t written_length = 0;
 
   if (!render_target_cache_->Resolve(*memory_, written_address, written_length,
-                                     current_command_buffer_)) {
+                                     copy_command_buffer)) {
     XELOGE("MetalCommandProcessor::IssueCopy - Resolve failed");
     return false;
   }
 
   if (!written_length) {
-    // Commit any in-flight work so ordering matches D3D12 submission behavior.
-#if METAL_SHADER_CONVERTER_AVAILABLE
-    ScheduleDrawRingRelease(current_command_buffer_);
-#else
-    if (cvars::metal_use_spirvcross) {
-      ScheduleSpirvUniformBufferRelease(current_command_buffer_);
-    }
-#endif
-    current_command_buffer_->commit();
-    current_command_buffer_->release();
-    current_command_buffer_ = nullptr;
-#if METAL_SHADER_CONVERTER_AVAILABLE
-    SetActiveDrawRing(nullptr);
-#endif
-    current_draw_index_ = 0;
+    // Keep the current submission open - it will be finalized at swap,
+    // primary-buffer boundary, or explicit synchronization points.
     return true;
   }
 
@@ -4943,23 +4924,6 @@ bool MetalCommandProcessor::IssueCopy() {
   //     primitive_processor_->MemoryInvalidationCallback(written_address,
   //     written_length, true);
   //   }
-
-  // Submit the command buffer without waiting - the resolve writes are now
-  // ordered in the same submission as the preceding draws.
-#if METAL_SHADER_CONVERTER_AVAILABLE
-  ScheduleDrawRingRelease(current_command_buffer_);
-#else
-  if (cvars::metal_use_spirvcross) {
-    ScheduleSpirvUniformBufferRelease(current_command_buffer_);
-  }
-#endif
-  current_command_buffer_->commit();
-  current_command_buffer_->release();
-  current_command_buffer_ = nullptr;
-#if METAL_SHADER_CONVERTER_AVAILABLE
-  SetActiveDrawRing(nullptr);
-#endif
-  current_draw_index_ = 0;
 
   return true;
 }
