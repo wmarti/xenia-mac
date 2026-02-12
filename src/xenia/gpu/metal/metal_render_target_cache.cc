@@ -5983,7 +5983,73 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
           encoder->setViewport(vp);
           transfer_viewport_full_set = true;
         };
-        for (const auto& invocation : transfer_invocations_) {
+        MTL::RenderPipelineState* last_transfer_pipeline = nullptr;
+        MTL::DepthStencilState* last_transfer_depth_state = nullptr;
+        MTL::Buffer* last_transfer_fragment_buffer_1 = nullptr;
+        std::array<MTL::Texture*, 3> last_transfer_fragment_textures = {
+            nullptr, nullptr, nullptr};
+        auto bind_transfer_pipeline = [&](MTL::RenderPipelineState* pipeline) {
+          if (last_transfer_pipeline != pipeline) {
+            encoder->setRenderPipelineState(pipeline);
+            last_transfer_pipeline = pipeline;
+          }
+        };
+        auto bind_transfer_depth_state = [&](MTL::DepthStencilState* state) {
+          if (last_transfer_depth_state != state) {
+            encoder->setDepthStencilState(state);
+            last_transfer_depth_state = state;
+          }
+        };
+        auto bind_transfer_fragment_texture = [&](uint32_t index,
+                                                  MTL::Texture* texture) {
+          if (index >= last_transfer_fragment_textures.size()) {
+            return;
+          }
+          if (last_transfer_fragment_textures[index] != texture) {
+            encoder->setFragmentTexture(texture, index);
+            last_transfer_fragment_textures[index] = texture;
+          }
+        };
+        auto bind_transfer_fragment_buffer_1 = [&](MTL::Buffer* buffer) {
+          if (last_transfer_fragment_buffer_1 != buffer) {
+            encoder->setFragmentBuffer(buffer, 0, 1);
+            last_transfer_fragment_buffer_1 = buffer;
+          }
+        };
+
+        std::vector<Transfer::Rectangle> merged_transfer_rectangles;
+        for (size_t invocation_index = 0;
+             invocation_index < transfer_invocations_.size();) {
+          const auto& invocation = transfer_invocations_[invocation_index];
+          size_t merged_invocation_end = invocation_index + 1;
+          while (merged_invocation_end < transfer_invocations_.size() &&
+                 invocation.CanBeMergedIntoOneDraw(
+                     transfer_invocations_[merged_invocation_end])) {
+            ++merged_invocation_end;
+          }
+
+          merged_transfer_rectangles.clear();
+          merged_transfer_rectangles.reserve(
+              (merged_invocation_end - invocation_index) *
+              Transfer::kMaxRectanglesWithCutout);
+          for (size_t merged_index = invocation_index;
+               merged_index < merged_invocation_end; ++merged_index) {
+            Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithCutout];
+            uint32_t rectangle_count =
+                transfer_invocations_[merged_index].transfer.GetRectangles(
+                    dest_key.base_tiles, dest_key.GetPitchTiles(),
+                    dest_key.msaa_samples, IsKey64bpp(dest_key), rectangles,
+                    resolve_clear_rectangle);
+            for (uint32_t rect_index = 0; rect_index < rectangle_count;
+                 ++rect_index) {
+              merged_transfer_rectangles.push_back(rectangles[rect_index]);
+            }
+          }
+          invocation_index = merged_invocation_end;
+          if (merged_transfer_rectangles.empty()) {
+            continue;
+          }
+
           const Transfer& transfer = invocation.transfer;
           const TransferShaderKey& shader_key = invocation.shader_key;
           const TransferModeInfo& mode_info =
@@ -6011,14 +6077,14 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
           if (is_stencil_bit) {
             // Depth/stencil state set per-bit below.
           } else if (dest_is_depth) {
-            encoder->setDepthStencilState(GetTransferDepthStencilState(true));
+            bind_transfer_depth_state(GetTransferDepthStencilState(true));
           } else {
             MTL::DepthStencilState* no_depth_state =
                 GetTransferNoDepthStencilState();
             if (!no_depth_state) {
               continue;
             }
-            encoder->setDepthStencilState(no_depth_state);
+            bind_transfer_depth_state(no_depth_state);
           }
 
           // Bind source textures.
@@ -6029,19 +6095,19 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
             }
             assert_true(source_texture->pixelFormat() == source_transfer_format,
                         "Transfer source must use ownership pixel format");
-            encoder->setFragmentTexture(source_texture, 0);
+            bind_transfer_fragment_texture(0, source_texture);
           } else {
             MTL::Texture* depth_texture = source_rt->texture();
             if (!depth_texture) {
               continue;
             }
-            encoder->setFragmentTexture(depth_texture, 0);
+            bind_transfer_fragment_texture(0, depth_texture);
             if (needs_source_stencil) {
               MTL::Texture* stencil_texture = GetStencilTextureView(source_rt);
               if (!stencil_texture) {
                 continue;
               }
-              encoder->setFragmentTexture(stencil_texture, 1);
+              bind_transfer_fragment_texture(1, stencil_texture);
             }
           }
 
@@ -6050,11 +6116,11 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
             uint32_t host_depth_index = mode_info.source_is_color ? 1 : 2;
             if (shader_key.host_depth_source_is_copy) {
               if (edram_buffer_) {
-                encoder->setFragmentBuffer(edram_buffer_, 0, 1);
+                bind_transfer_fragment_buffer_1(edram_buffer_);
               } else {
                 MTL::Buffer* dummy = GetTransferDummyBuffer();
                 if (dummy) {
-                  encoder->setFragmentBuffer(dummy, 0, 1);
+                  bind_transfer_fragment_buffer_1(dummy);
                 }
               }
               MTL::Texture* dummy_host_depth =
@@ -6062,13 +6128,14 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               if (!dummy_host_depth) {
                 continue;
               }
-              encoder->setFragmentTexture(dummy_host_depth, host_depth_index);
+              bind_transfer_fragment_texture(host_depth_index,
+                                             dummy_host_depth);
             } else {
               MTL::Buffer* dummy = GetTransferDummyBuffer();
               if (!dummy) {
                 continue;
               }
-              encoder->setFragmentBuffer(dummy, 0, 1);
+              bind_transfer_fragment_buffer_1(dummy);
               auto* host_depth_rt =
                   static_cast<MetalRenderTarget*>(transfer.host_depth_source);
               MTL::Texture* host_depth_texture =
@@ -6076,7 +6143,8 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               if (!host_depth_texture) {
                 continue;
               }
-              encoder->setFragmentTexture(host_depth_texture, host_depth_index);
+              bind_transfer_fragment_texture(host_depth_index,
+                                             host_depth_texture);
             }
           }
 
@@ -6159,20 +6227,14 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               dest_height ? (2.0f / float(dest_height)) : 0.0f;
           constants.dest_sample_id = 0;
 
-          Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithCutout];
-          uint32_t rectangle_count = transfer.GetRectangles(
-              dest_key.base_tiles, dest_key.GetPitchTiles(),
-              dest_key.msaa_samples, IsKey64bpp(dest_key), rectangles,
-              resolve_clear_rectangle);
-          if (!rectangle_count) {
-            continue;
-          }
+          const uint32_t rectangle_count =
+              uint32_t(merged_transfer_rectangles.size());
 
           std::vector<TransferTileBatch> tile_batches;
           bool use_tile_instancing = false;
           if (::cvars::metal_transfer_tile_instancing) {
             use_tile_instancing = build_tile_batches(
-                rectangles, rectangle_count, constants,
+                merged_transfer_rectangles.data(), rectangle_count, constants,
                 mode_info.uses_host_depth,
                 shader_key.host_depth_source_is_copy != 0, tile_batches);
             if (!use_tile_instancing &&
@@ -6221,8 +6283,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
           if (!pipeline) {
             continue;
           }
-
-          encoder->setRenderPipelineState(pipeline);
+          bind_transfer_pipeline(pipeline);
 
           bool use_sample_id_for_invocation =
               shader_key.dest_sample_id_from_sample != 0;
@@ -6254,7 +6315,8 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               encoder->setFragmentBytes(&constants, sizeof(constants), 0);
               for (uint32_t rect_index = 0; rect_index < rectangle_count;
                    ++rect_index) {
-                if (!set_rect_viewport(encoder, rectangles[rect_index])) {
+                if (!set_rect_viewport(encoder,
+                                       merged_transfer_rectangles[rect_index])) {
                   continue;
                 }
                 encoder->drawPrimitives(MTL::PrimitiveTypeTriangle,
@@ -6272,7 +6334,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               }
               constants.stencil_mask = uint32_t(1) << bit;
               constants.stencil_clear = 0;
-              encoder->setDepthStencilState(stencil_state);
+              bind_transfer_depth_state(stencil_state);
               encoder->setStencilReferenceValue(uint32_t(1) << bit);
               draw_transfer_samples(draw_transfer);
             }
