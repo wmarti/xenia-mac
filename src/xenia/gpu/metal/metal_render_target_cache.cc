@@ -95,6 +95,14 @@ class ScopedAutoreleasePool {
   NS::AutoreleasePool* pool_;
 };
 
+#if XE_PLATFORM_IOS
+constexpr size_t kTransferTileInstanceBufferMaxBytes =
+    64ull * 1024ull * 1024ull;
+#else
+constexpr size_t kTransferTileInstanceBufferMaxBytes =
+    256ull * 1024ull * 1024ull;
+#endif
+
 MTL::ComputePipelineState* CreateComputePipelineFromEmbeddedLibrary(
     MTL::Device* device, const void* metallib_data, size_t metallib_size,
     const char* debug_name) {
@@ -2991,7 +2999,7 @@ void MetalRenderTargetCache::BeginFrame() {
     XELOGI(
         "Metal mem: frame={} rt={} map={} dummy={} pipelines={} "
         "tile_pipelines={} inst_buf_sizes=[{}, {}, {}]",
-        frame_id_, render_targets().size(), render_target_map_.size(),
+        frame_id_, render_target_map_.size(), render_target_map_.size(),
         dummy_color_targets_.size(), transfer_pipelines_.size(),
         transfer_tile_pipelines_.size(),
         transfer_tile_instance_buffer_sizes_[0],
@@ -3018,7 +3026,7 @@ bool MetalRenderTargetCache::Update(
       XELOGI(
           "Metal mem: frame={} rt={} map={} dummy={} pipelines={} "
           "tile_pipelines={} inst_buf_sizes=[{}, {}, {}]",
-          frame_id_, render_targets().size(), render_target_map_.size(),
+          frame_id_, render_target_map_.size(), render_target_map_.size(),
           dummy_color_targets_.size(), transfer_pipelines_.size(),
           transfer_tile_pipelines_.size(),
           transfer_tile_instance_buffer_sizes_[0],
@@ -5127,6 +5135,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
       uint32_t tile_y_start = 0;
       uint32_t tile_y_end = 0;
     };
+    bool transfer_tile_instance_budget_hit = false;
 
     auto allocate_instance_buffer = [&](size_t size, MTL::Buffer*& buffer,
                                         size_t& offset) -> bool {
@@ -5150,10 +5159,29 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
       constexpr size_t kAlignment = 256;
       size_t aligned_offset =
           xe::align(transfer_tile_instance_buffer_offset_, size_t(kAlignment));
+      if (size > kTransferTileInstanceBufferMaxBytes ||
+          aligned_offset > kTransferTileInstanceBufferMaxBytes ||
+          aligned_offset > (kTransferTileInstanceBufferMaxBytes - size)) {
+        transfer_tile_instance_budget_hit = true;
+        return false;
+      }
       size_t required = aligned_offset + size;
+      if (transfer_tile_instance_buffers_[buffer_index] &&
+          transfer_tile_instance_buffer_sizes_[buffer_index] < required &&
+          aligned_offset != 0) {
+        transfer_tile_instance_budget_hit = true;
+        return false;
+      }
       if (!transfer_tile_instance_buffers_[buffer_index] ||
           transfer_tile_instance_buffer_sizes_[buffer_index] < required) {
         size_t new_size = xe::round_up<size_t>(required, 65536);
+        if (new_size > kTransferTileInstanceBufferMaxBytes) {
+          new_size = kTransferTileInstanceBufferMaxBytes;
+        }
+        if (new_size < required) {
+          transfer_tile_instance_budget_hit = true;
+          return false;
+        }
         if (transfer_tile_instance_buffers_[buffer_index]) {
           transfer_tile_instance_retired_buffers_[buffer_index].push_back(
               transfer_tile_instance_buffers_[buffer_index]);
@@ -5959,6 +5987,17 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                 rectangles, rectangle_count, constants,
                 mode_info.uses_host_depth,
                 shader_key.host_depth_source_is_copy != 0, tile_batches);
+            if (!use_tile_instancing && transfer_tile_instance_budget_hit) {
+              static uint64_t last_tile_budget_log_frame = 0;
+              if (last_tile_budget_log_frame != frame_id_) {
+                XELOGW(
+                    "Metal transfer tile instancing fallback: exceeded {} MiB "
+                    "instance-buffer budget this frame",
+                    kTransferTileInstanceBufferMaxBytes >> 20);
+                last_tile_budget_log_frame = frame_id_;
+              }
+              transfer_tile_instance_budget_hit = false;
+            }
           }
 
           MTL::RenderPipelineState* pipeline = GetOrCreateTransferPipelines(
