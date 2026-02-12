@@ -197,11 +197,17 @@ project("xenia-app")
       "-ldxilconv",
       "-lLLVMDxcSupport",
     })
-    libdirs({
-      metal_converter_libdir,
-      "/opt/homebrew/opt/sdl2/lib",
-      "/usr/local/opt/sdl2/lib",
-    })
+    if _OPTIONS["mac-x86_64"] then
+      libdirs({
+        metal_converter_libdir,
+        "/usr/local/opt/sdl2/lib",
+      })
+    else
+      libdirs({
+        metal_converter_libdir,
+        "/opt/homebrew/opt/sdl2/lib",
+      })
+    end
   filter({"system:macosx", "architecture:arm64"})
     libdirs({ dxilconv_libdir_arm64 })
   filter({"system:macosx", "architecture:x86_64"})

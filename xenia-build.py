@@ -333,6 +333,46 @@ def setup_qt():
         return False
 
 
+def select_macos_qt_dir(prefer_x86_64=False):
+    """Returns the best Homebrew Qt root for the requested macOS target arch."""
+    if sys.platform != "darwin":
+        return None
+    if prefer_x86_64:
+        candidates = [
+            "/usr/local/opt/qt",
+            "/usr/local/opt/qt@6",
+            "/opt/homebrew/opt/qt",
+            "/opt/homebrew/opt/qt@6",
+        ]
+    else:
+        candidates = [
+            "/opt/homebrew/opt/qt",
+            "/opt/homebrew/opt/qt@6",
+            "/usr/local/opt/qt",
+            "/usr/local/opt/qt@6",
+        ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def configure_qt_for_macos_target(target_arch=None, extra_premake_args=None):
+    """Selects QT_DIR for the requested macOS build target."""
+    if sys.platform != "darwin":
+        return
+    prefer_x86_64 = target_arch == "x86_64"
+    if extra_premake_args and "--mac-x86_64" in extra_premake_args:
+        prefer_x86_64 = True
+    qt_dir = select_macos_qt_dir(prefer_x86_64=prefer_x86_64)
+    if not qt_dir:
+        return
+    if os.environ.get("QT_DIR") != qt_dir:
+        os.environ["QT_DIR"] = qt_dir
+        target = "x86_64" if prefer_x86_64 else "arm64"
+        print(f"Using Qt for macOS {target}: {qt_dir}")
+
+
 def get_dir_newest_mtime(directory):
     """Get the newest modification time in a directory tree (files and dirs).
 
@@ -1336,6 +1376,7 @@ class PremakeCommand(Command):
     def execute(self, args, pass_args, cwd):
         # Update premake. If no binary found, it will be built from source.
         print("Running premake...\n")
+        configure_qt_for_macos_target(extra_premake_args=pass_args)
         ret = run_platform_premake(target_os_override=args["target_os"],
                                    cc=args["cc"], devenv=args["devenv"],
                                    extra_premake_args=pass_args)
@@ -1379,6 +1420,8 @@ class BaseBuildCommand(Command):
         premake_args = None
         if sys.platform == "darwin" and arch == "x86_64":
             premake_args = ["--mac-x86_64"]
+        configure_qt_for_macos_target(target_arch=arch,
+                                      extra_premake_args=premake_args)
 
         # Check Vulkan SDK availability (skip on macOS and iOS).
         if sys.platform != "darwin" and target_os != "ios" and not os.environ.get("VULKAN_SDK"):
@@ -1538,6 +1581,7 @@ class BuildCommand(BaseBuildCommand):
 
     def execute(self, args, pass_args, cwd):
         print(f"Building {args['config']}...\n")
+        configure_qt_for_macos_target(target_arch=args.get("arch"))
 
         # Generate MOC files before building
         if not generate_moc_files():
@@ -2091,6 +2135,8 @@ class TestCommand(BaseBuildCommand):
             for arch in archs_to_test:
                 if sys.platform == "darwin" and is_macos_arm64_host():
                     premake_args = ["--mac-x86_64"] if arch == "x86_64" else []
+                    configure_qt_for_macos_target(
+                        target_arch=arch, extra_premake_args=premake_args)
                     run_platform_premake(
                         cc=args.get("cc"),
                         enable_tests=enable_tests,
