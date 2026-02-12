@@ -123,7 +123,7 @@ static void EmitGuestTrampoline(uint8_t* dst,
   EmitMovSequence(out, 2, reinterpret_cast<uint64_t>(userdata2));  // X2
   EmitMovSequence(out, 16, reinterpret_cast<uint64_t>(thunk));     // X16
   *out++ = 0xD61F0000 | (16 << 5);  // BR X16
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_APPLE
   sys_icache_invalidate(dst, kGuestTrampolineCodeSize);
 #else
   __builtin___clear_cache(reinterpret_cast<char*>(dst),
