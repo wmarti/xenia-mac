@@ -18,6 +18,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
+#include "xenia/gpu/metal/metal_resource_tracker.h"
 
 namespace xe {
 namespace gpu {
@@ -100,6 +101,7 @@ void MetalPrimitiveProcessor::Shutdown(bool from_destructor) {
   // Release all frame index buffers
   for (auto& frame_buffer : frame_index_buffers_) {
     if (frame_buffer.buffer) {
+      TrackMetalBufferReleased(frame_buffer.size);
       frame_buffer.buffer->release();
     }
   }
@@ -107,6 +109,7 @@ void MetalPrimitiveProcessor::Shutdown(bool from_destructor) {
 
   // Release built-in index buffer
   if (builtin_index_buffer_) {
+    TrackMetalBufferReleased(builtin_index_buffer_size_);
     builtin_index_buffer_->release();
     builtin_index_buffer_ = nullptr;
     builtin_index_buffer_gpu_address_ = 0;
@@ -143,6 +146,7 @@ void MetalPrimitiveProcessor::BeginFrame() {
                        // Keep buffers used in the last 2 frames
                        if (current_frame - buffer.last_frame_used > 2) {
                          if (buffer.buffer) {
+                           TrackMetalBufferReleased(buffer.size);
                            buffer.buffer->release();
                          }
                          return true;
@@ -186,6 +190,7 @@ bool MetalPrimitiveProcessor::InitializeBuiltinIndexBuffer(
     return false;
   }
   builtin_index_buffer_size_ = size_bytes;
+  TrackMetalBufferCreated(size_bytes);
 
   builtin_index_buffer_->setLabel(NS::String::string(
       "Xenia Built-in Index Buffer", NS::UTF8StringEncoding));
@@ -244,6 +249,7 @@ void* MetalPrimitiveProcessor::RequestHostConvertedIndexBufferForCurrentFrame(
       backend_handle_out = 0;
       return nullptr;
     }
+    TrackMetalBufferCreated(allocation_size);
 
     char label[256];
     snprintf(label, sizeof(label), "Xenia Converted Index Buffer (%zu bytes)",
