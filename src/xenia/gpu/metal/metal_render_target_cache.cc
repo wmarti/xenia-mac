@@ -6229,6 +6229,21 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                 last_transfer_vertex_bytes_1_valid = true;
               }
             };
+        auto bind_transfer_vertex_bytes_1_span =
+            [&](const TransferRectInstance* rect_instances,
+                uint32_t rect_instance_count) {
+              if (!rect_instances || !rect_instance_count) {
+                return;
+              }
+              encoder->setVertexBytes(
+                  rect_instances,
+                  size_t(rect_instance_count) * sizeof(TransferRectInstance), 1);
+              last_transfer_vertex_slot_1_binding =
+                  TransferVertexSlot1Binding::kBytes;
+              last_transfer_vertex_buffer_1 = nullptr;
+              last_transfer_vertex_buffer_1_offset = 0;
+              last_transfer_vertex_bytes_1_valid = false;
+            };
         auto set_full_transfer_viewport_scissor = [&]() {
           if (!transfer_viewport_full_set) {
             MTL::Viewport vp;
@@ -6466,6 +6481,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
           MTL::Buffer* rect_instance_buffer = nullptr;
           size_t rect_instance_buffer_offset = 0;
           uint32_t rect_instance_count = 0;
+          std::vector<TransferRectInstance> rect_instance_fallback;
           bool use_tile_instancing = false;
           if (::cvars::metal_transfer_tile_instancing) {
             use_tile_instancing = build_tile_batches(
@@ -6512,11 +6528,35 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               transfer_tile_instance_budget_hit = false;
             }
           }
-          if (!use_tile_instancing && rectangle_count > 1) {
-            build_rect_instance_stream(
-                merged_transfer_rectangles.data(), rectangle_count,
-                rect_instance_buffer, rect_instance_buffer_offset,
-                rect_instance_count);
+          if (!use_tile_instancing) {
+            if (rectangle_count > 1) {
+              build_rect_instance_stream(
+                  merged_transfer_rectangles.data(), rectangle_count,
+                  rect_instance_buffer, rect_instance_buffer_offset,
+                  rect_instance_count);
+            }
+            if (!rect_instance_buffer || !rect_instance_count) {
+              rect_instance_fallback.reserve(rectangle_count);
+              for (uint32_t rect_index = 0; rect_index < rectangle_count;
+                   ++rect_index) {
+                uint32_t scaled_x = 0;
+                uint32_t scaled_y = 0;
+                uint32_t scaled_width = 0;
+                uint32_t scaled_height = 0;
+                if (!get_scaled_rect(merged_transfer_rectangles[rect_index],
+                                     scaled_x, scaled_y, scaled_width,
+                                     scaled_height) ||
+                    !scaled_width || !scaled_height) {
+                  continue;
+                }
+                TransferRectInstance rect_instance = {};
+                rect_instance.origin_x = float(scaled_x);
+                rect_instance.origin_y = float(scaled_y);
+                rect_instance.size_x = float(scaled_width);
+                rect_instance.size_y = float(scaled_height);
+                rect_instance_fallback.push_back(rect_instance);
+              }
+            }
           }
 
           MTL::RenderPipelineState* pipeline = GetOrCreateTransferPipelines(
@@ -6559,29 +6599,28 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                 encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
                                         NS::UInteger(0), NS::UInteger(4),
                                         NS::UInteger(rect_instance_count));
-              } else {
+              } else if (!rect_instance_fallback.empty()) {
                 set_full_transfer_viewport_scissor();
-                for (uint32_t rect_index = 0; rect_index < rectangle_count;
-                     ++rect_index) {
-                  uint32_t scaled_x = 0;
-                  uint32_t scaled_y = 0;
-                  uint32_t scaled_width = 0;
-                  uint32_t scaled_height = 0;
-                  if (!get_scaled_rect(merged_transfer_rectangles[rect_index],
-                                       scaled_x, scaled_y, scaled_width,
-                                       scaled_height) ||
-                      !scaled_width || !scaled_height) {
-                    continue;
+                constexpr uint32_t kTransferRectInlineBatchMax = 240;
+                const TransferRectInstance* rect_instances =
+                    rect_instance_fallback.data();
+                uint32_t rect_instances_remaining =
+                    uint32_t(rect_instance_fallback.size());
+                while (rect_instances_remaining) {
+                  uint32_t batch_count =
+                      std::min(rect_instances_remaining,
+                               kTransferRectInlineBatchMax);
+                  if (batch_count == 1) {
+                    bind_transfer_vertex_bytes_1(*rect_instances);
+                  } else {
+                    bind_transfer_vertex_bytes_1_span(rect_instances,
+                                                      batch_count);
                   }
-                  TransferRectInstance rect_instance = {};
-                  rect_instance.origin_x = float(scaled_x);
-                  rect_instance.origin_y = float(scaled_y);
-                  rect_instance.size_x = float(scaled_width);
-                  rect_instance.size_y = float(scaled_height);
-                  bind_transfer_vertex_bytes_1(rect_instance);
                   encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
                                           NS::UInteger(0), NS::UInteger(4),
-                                          NS::UInteger(1));
+                                          NS::UInteger(batch_count));
+                  rect_instances += batch_count;
+                  rect_instances_remaining -= batch_count;
                 }
               }
             }
