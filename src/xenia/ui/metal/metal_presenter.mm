@@ -80,6 +80,7 @@ MetalPresenter::MetalPresenter(MetalProvider* provider, HostGpuLossCallback host
   // Initialize guest output textures to nil
   guest_output_textures_.fill(nil);
   guest_output_submissions_.fill(0);
+  guest_output_waited_submission_ = 0;
 }
 
 MetalPresenter::~MetalPresenter() = default;
@@ -204,6 +205,7 @@ void MetalPresenter::Shutdown() {
     }
   }
   guest_output_submissions_.fill(0);
+  guest_output_waited_submission_ = 0;
   last_guest_output_mailbox_index_.store(UINT32_MAX, std::memory_order_relaxed);
   guest_output_submission_counter_.store(0, std::memory_order_relaxed);
   metalfx_input_width_ = 0;
@@ -513,13 +515,17 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
         guest_output_mailbox_index, &guest_output_properties, &guest_output_paint_config));
     if (guest_output_mailbox_index != UINT32_MAX) {
       uint64_t await_submission = guest_output_submissions_[guest_output_mailbox_index];
-      if (await_submission && shared_event_) {
+      // The presenter uses one serialized Metal queue. Once a wait for
+      // submission N has been encoded in this queue, later presenter command
+      // buffers don't need to re-check/re-encode waits for <= N.
+      if (await_submission > guest_output_waited_submission_ && shared_event_) {
         id<MTLSharedEvent> shared_event = (id<MTLSharedEvent>)shared_event_;
         uint64_t completed_submission = [shared_event signaledValue];
         if (await_submission > completed_submission) {
           [command_buffer encodeWaitForEvent:shared_event
                                        value:await_submission];
         }
+        guest_output_waited_submission_ = await_submission;
       }
       guest_output_texture = guest_output_textures_[guest_output_mailbox_index];
     }

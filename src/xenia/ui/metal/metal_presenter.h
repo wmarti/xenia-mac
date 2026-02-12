@@ -180,6 +180,7 @@ class MetalPresenter : public Presenter {
   std::array<id, kGuestOutputMailboxSize> guest_output_textures_;
   std::atomic<uint32_t> last_guest_output_mailbox_index_{UINT32_MAX};
   std::array<uint64_t, kGuestOutputMailboxSize> guest_output_submissions_{};
+  uint64_t guest_output_waited_submission_ = 0;
   std::atomic<uint64_t> guest_output_submission_counter_{0};
   std::atomic<bool> capture_requested_{false};
 };
