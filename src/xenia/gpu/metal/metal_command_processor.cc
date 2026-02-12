@@ -276,6 +276,26 @@ void PopulatePipelineFormatsFromRenderPassDescriptor(
   }
 }
 
+void EnsureDepthFormatForDepthWritingFragment(const char* pipeline_name,
+                                              bool fragment_writes_depth,
+                                              MTL::PixelFormat* depth_format) {
+  if (!fragment_writes_depth || !depth_format ||
+      *depth_format != MTL::PixelFormatInvalid) {
+    return;
+  }
+  // Metal requires a valid depth attachment format if the fragment shader
+  // writes depth even when the current render pass has no depth target bound.
+  *depth_format = MTL::PixelFormatDepth32Float;
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    XELOGW(
+        "{}: fragment writes depth without a bound depth attachment; "
+        "using Depth32Float pipeline fallback",
+        pipeline_name);
+  }
+}
+
 MTL::ComputePipelineState* CreateComputePipelineFromEmbeddedLibrary(
     MTL::Device* device, const void* metallib_data, size_t metallib_size,
     const char* debug_name) {
@@ -2886,8 +2906,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   } else if (use_geometry_emulation) {
     geometry_pipeline_state = GetOrCreateGeometryPipelineState(
         vertex_translation, pixel_translation, geometry_shader_key, regs);
-    pipeline =
-        geometry_pipeline_state ? geometry_pipeline_state->pipeline : nullptr;
+    if (!geometry_pipeline_state || !geometry_pipeline_state->pipeline) {
+      static bool geometry_pipeline_failure_logged = false;
+      if (!geometry_pipeline_failure_logged) {
+        geometry_pipeline_failure_logged = true;
+        XELOGW(
+            "Metal: geometry emulation pipeline creation failed; skipping "
+            "geometry-emulated draws instead of aborting the backend draw "
+            "packet");
+      }
+      return true;
+    }
+    pipeline = geometry_pipeline_state->pipeline;
   } else {
     pipeline =
         GetOrCreatePipelineState(vertex_translation, pixel_translation, regs);
@@ -5809,6 +5839,10 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreatePipelineState(
         pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
         &sample_count);
   }
+  bool pixel_shader_writes_depth =
+      pixel_translation && pixel_translation->shader().writes_depth();
+  EnsureDepthFormatForDepthWritingFragment(
+      "Pipeline", pixel_shader_writes_depth, &depth_format);
 
   struct PipelineKey {
     const void* vs;
@@ -6195,6 +6229,11 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
         pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
         &sample_count);
   }
+  bool pixel_shader_writes_depth =
+      use_fallback_pixel_shader ||
+      (pixel_translation && pixel_translation->shader().writes_depth());
+  EnsureDepthFormatForDepthWritingFragment(
+      "Geometry pipeline", pixel_shader_writes_depth, &depth_format);
 
   struct GeometryPipelineKey {
     const void* vs;
@@ -6692,6 +6731,12 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
     XELOGE(
         "Failed to create geometry pipeline state: {}",
         error ? error->localizedDescription()->utf8String() : "unknown error");
+    XELOGE(
+        "Geometry pipeline details: vs_fn='{}' gs_fn='{}' ps_fn='{}' "
+        "depth_format={} stencil_format={} samples={}",
+        vertex_stage->function_name, geometry_stage->function_name,
+        pixel_function ? pixel_function : "<null>", uint32_t(depth_format),
+        uint32_t(stencil_format), sample_count);
     LogMetalErrorDetails("Geometry pipeline error", error);
     return nullptr;
   }
@@ -6796,6 +6841,11 @@ MetalCommandProcessor::GetOrCreateTessellationPipelineState(
         pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
         &sample_count);
   }
+  bool pixel_shader_writes_depth =
+      use_fallback_pixel_shader ||
+      (pixel_translation && pixel_translation->shader().writes_depth());
+  EnsureDepthFormatForDepthWritingFragment(
+      "Tessellation pipeline", pixel_shader_writes_depth, &depth_format);
 
   struct TessellationPipelineKey {
     const void* ds;
@@ -8234,6 +8284,12 @@ MetalCommandProcessor::GetOrCreateMslTessPipelineState(
         pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
         &sample_count);
   }
+  bool fragment_writes_depth =
+      (pixel_translation && pixel_translation->shader().writes_depth()) ||
+      (!pixel_translation && depth_only_pixel_library_ &&
+       !depth_only_pixel_function_name_.empty());
+  EnsureDepthFormatForDepthWritingFragment(
+      "SPIRV-Cross tess pipeline", fragment_writes_depth, &depth_format);
 
   // Build cache key incorporating RT formats, tessellation mode, and blend
   // state (same blend fields as GetOrCreateMslPipelineState).
@@ -8594,6 +8650,10 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateMslPipelineState(
         pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
         &sample_count);
   }
+  bool pixel_shader_writes_depth =
+      pixel_translation && pixel_translation->shader().writes_depth();
+  EnsureDepthFormatForDepthWritingFragment(
+      "SPIRV-Cross pipeline", pixel_shader_writes_depth, &depth_format);
 
   // Build pipeline cache key.
   struct MslPipelineKey {
