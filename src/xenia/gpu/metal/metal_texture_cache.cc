@@ -1016,9 +1016,16 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     return nullptr;
   };
 
-  bool use_upload_batch =
-      use_blit_upload && upload_batch_command_buffer_ &&
-      command_processor_ && !command_processor_->GetCurrentCommandBuffer();
+  MTL::CommandBuffer* current_command_buffer =
+      command_processor_ ? command_processor_->GetCurrentCommandBuffer()
+                         : nullptr;
+  bool use_upload_batch = use_blit_upload && upload_batch_command_buffer_ &&
+                          command_processor_ && !current_command_buffer;
+  // Reuse the CP submission only before any draws in that submission, to avoid
+  // changing draw/resolve ordering assumptions.
+  bool use_current_command_buffer =
+      use_blit_upload && command_processor_ && current_command_buffer &&
+      command_processor_->current_draw_index() == 0;
   if (use_upload_batch && texture_resolution_scaled) {
     bool needs_base_scaled_range = false;
     bool needs_mips_scaled_range = false;
@@ -1044,8 +1051,15 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
   }
 
   ScopedAutoreleasePool autorelease_pool;
-  MTL::CommandBuffer* cmd =
-      use_upload_batch ? upload_batch_command_buffer_ : queue->commandBuffer();
+  MTL::CommandBuffer* cmd = nullptr;
+  if (use_upload_batch) {
+    cmd = upload_batch_command_buffer_;
+  } else if (use_current_command_buffer) {
+    command_processor_->EndRenderEncoder();
+    cmd = current_command_buffer;
+  } else {
+    cmd = queue->commandBuffer();
+  }
   if (!cmd) {
     release_buffer_immediate(constants_buffer, constants_buffer_size);
     release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
@@ -1053,11 +1067,14 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
   }
   bool command_buffer_has_work = false;
   auto handle_upload_failure = [&](bool abort_batch) {
-    if (use_upload_batch && command_buffer_has_work) {
+    if ((use_upload_batch || use_current_command_buffer) &&
+        command_buffer_has_work) {
       release_buffer_after(cmd, constants_buffer, constants_buffer_size);
       release_buffer_after(cmd, dest_buffer, size_t(dest_buffer_size));
-      upload_batch_command_buffer_has_work_ = true;
-      AbortUploadCommandBufferBatch();
+      if (use_upload_batch) {
+        upload_batch_command_buffer_has_work_ = true;
+        AbortUploadCommandBufferBatch();
+      }
       return;
     }
     release_buffer_immediate(constants_buffer, constants_buffer_size);
@@ -1324,7 +1341,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     release_buffer_after(cmd, dest_buffer, size_t(dest_buffer_size));
     if (use_upload_batch) {
       upload_batch_command_buffer_has_work_ = true;
-    } else {
+    } else if (!use_current_command_buffer) {
       cmd->retain();
       cmd->addCompletedHandler(^(MTL::CommandBuffer* cb) {
         cb->release();
