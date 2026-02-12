@@ -4614,28 +4614,6 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
 
   bool draw_resolution_scaled = IsDrawResolutionScaled();
 
-  MetalRenderTarget* src_rt = nullptr;
-  RenderTarget* const* accumulated_targets =
-      last_update_accumulated_render_targets();
-
-  if (is_depth) {
-    // For depth resolves, use the current depth render target as the source,
-    // matching D3D12/Vulkan behavior.
-    if (accumulated_targets && accumulated_targets[0]) {
-      src_rt = static_cast<MetalRenderTarget*>(accumulated_targets[0]);
-    }
-  } else {
-    // Color resolves select the source via copy_src_select.
-    uint32_t copy_src = resolve_info.rb_copy_control.copy_src_select;
-    if (copy_src < xenos::kMaxColorRenderTargets) {
-      if (accumulated_targets && accumulated_targets[1 + copy_src]) {
-        src_rt =
-            static_cast<MetalRenderTarget*>(accumulated_targets[1 + copy_src]);
-      }
-    } else {
-    }
-  }
-
   const auto& coord = resolve_info.coordinate_info;
   uint32_t resolve_width = coord.width_div_8 * 8;
   uint32_t resolve_height = resolve_info.height_div_8 * 8;
@@ -4644,15 +4622,6 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
   uint32_t dump_base, dump_row_length_used, dump_rows, dump_pitch;
   resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows,
                                     dump_pitch);
-  if (src_rt) {
-    const RenderTargetKey& src_key = src_rt->key();
-    if (dump_pitch != src_key.GetPitchTiles()) {
-      XELOGW(
-          "MetalResolve: dump_pitch {} does not match src pitch_tiles {} "
-          "(rt_key=0x{:08X})",
-          dump_pitch, src_key.GetPitchTiles(), src_key.key);
-    }
-  }
   // Match D3D12/Vulkan: dump host RT ownership into EDRAM, then resolve
   // from EDRAM to shared memory. Resolve-time blend fallback is not correct
   // because blending state is per-draw, not per-resolve.
