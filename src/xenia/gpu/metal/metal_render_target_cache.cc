@@ -3299,7 +3299,7 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
 
 MTL::Texture* MetalRenderTargetCache::CreateColorTexture(
     uint32_t width, uint32_t height, xenos::ColorRenderTargetFormat format,
-    uint32_t samples) {
+    uint32_t samples, bool allow_unpooled_fallback) {
   MTL::PixelFormat resource_format = GetColorResourcePixelFormat(format);
   MTL::PixelFormat draw_format = GetColorDrawPixelFormat(format);
   MTL::PixelFormat transfer_format =
@@ -3326,7 +3326,7 @@ MTL::Texture* MetalRenderTargetCache::CreateColorTexture(
   if (render_target_heap_pool_) {
     texture = render_target_heap_pool_->CreateTexture(desc);
   }
-  if (!texture) {
+  if (!texture && (!render_target_heap_pool_ || allow_unpooled_fallback)) {
     texture = device_->newTexture(desc);
   }
   desc->release();
@@ -3666,6 +3666,26 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
                          (uint64_t(height & 0xFFFFu) << 16) |
                          (uint64_t(dummy_sample_count & 0xFFu) << 32) |
                          (uint64_t(uint32_t(fmt) & 0xFFFFu) << 40);
+    auto evict_oldest_dummy_target = [&](uint64_t keep_key) -> bool {
+      uint64_t oldest_key = 0;
+      uint64_t oldest_frame = frame_id_;
+      bool found = false;
+      for (const auto& it : dummy_color_targets_) {
+        if (it.first == keep_key) {
+          continue;
+        }
+        if (!found || it.second.last_used_frame < oldest_frame) {
+          oldest_frame = it.second.last_used_frame;
+          oldest_key = it.first;
+          found = true;
+        }
+      }
+      if (found) {
+        dummy_color_targets_.erase(oldest_key);
+      }
+      return found;
+    };
+
     auto& entry = dummy_color_targets_[dummy_key];
     if (!entry.target || !entry.target->texture()) {
       RenderTargetKey dummy_rt_key;
@@ -3678,8 +3698,26 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
                                      : xenos::MsaaSamples::k1X;
       entry.target = std::make_unique<MetalRenderTarget>(dummy_rt_key);
       entry.last_cleared_frame = frame_id_ - 1;
+      // Try to keep dummy target allocations in the heap budget first.
       MTL::Texture* tex =
-          CreateColorTexture(width, height, fmt, dummy_sample_count);
+          CreateColorTexture(width, height, fmt, dummy_sample_count, false);
+      while (!tex && render_target_heap_pool_ &&
+             dummy_color_targets_.size() > 1 &&
+             evict_oldest_dummy_target(dummy_key)) {
+        tex = CreateColorTexture(width, height, fmt, dummy_sample_count, false);
+      }
+      if (!tex) {
+        static uint64_t last_unpooled_fallback_log_frame = 0;
+        if (render_target_heap_pool_ &&
+            last_unpooled_fallback_log_frame != frame_id_) {
+          XELOGW(
+              "Metal RT dummy target: heap allocation failed for {}x{} {}x; "
+              "falling back to unpooled texture",
+              width, height, dummy_sample_count);
+          last_unpooled_fallback_log_frame = frame_id_;
+        }
+        tex = CreateColorTexture(width, height, fmt, dummy_sample_count, true);
+      }
       entry.target->SetTexture(tex);
       if (tex) {
         MTL::PixelFormat resource_format = GetColorResourcePixelFormat(fmt);
@@ -3707,22 +3745,9 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
 #else
     constexpr size_t kMaxDummyColorTargets = 8;
 #endif
-    if (dummy_color_targets_.size() > kMaxDummyColorTargets) {
-      uint64_t oldest_key = 0;
-      uint64_t oldest_frame = frame_id_;
-      bool found = false;
-      for (const auto& it : dummy_color_targets_) {
-        if (it.first == dummy_key) {
-          continue;
-        }
-        if (!found || it.second.last_used_frame < oldest_frame) {
-          oldest_frame = it.second.last_used_frame;
-          oldest_key = it.first;
-          found = true;
-        }
-      }
-      if (found) {
-        dummy_color_targets_.erase(oldest_key);
+    while (dummy_color_targets_.size() > kMaxDummyColorTargets) {
+      if (!evict_oldest_dummy_target(dummy_key)) {
+        break;
       }
     }
 
