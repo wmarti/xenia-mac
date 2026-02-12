@@ -34,7 +34,11 @@
 
 #if defined(__aarch64__)
   /* ARM64 (Android) */
-  #define SLIBSUF ".so"
+  #if defined(__APPLE__)
+    #define SLIBSUF ".dylib"
+  #else
+    #define SLIBSUF ".so"
+  #endif
   #undef  ARCH_AARCH64
   #define ARCH_AARCH64 1
   #define HAVE_ARMV8 1
@@ -151,6 +155,9 @@
 #endif
 #ifndef HAVE_MMXEXT_INLINE
 #define HAVE_MMXEXT_INLINE 0
+#endif
+#ifndef HAVE_MMXEXT
+#define HAVE_MMXEXT 0
 #endif
 #ifndef HAVE_SSE_INLINE
 #define HAVE_SSE_INLINE 0
@@ -311,12 +318,16 @@
     #define HAVE_ARC4RANDOM 1
     #define HAVE_RSYNC_CONTIMEOUT 1
   #else
-    /* Linux desktop */
-    #define HAVE_PTHREAD_CANCEL 1
-    #define HAVE_SYMVER 1
-    #define HAVE_SYS_SOUNDCARD_H 1
-    #define HAVE_GLOB 1
-    #define CONFIG_ICONV 1
+    /* Linux desktop / macOS */
+    #if defined(__APPLE__)
+      #define CONFIG_ICONV 0
+    #else
+      #define HAVE_PTHREAD_CANCEL 1
+      #define HAVE_SYMVER 1
+      #define HAVE_SYS_SOUNDCARD_H 1
+      #define HAVE_GLOB 1
+      #define CONFIG_ICONV 1
+    #endif
   #endif
 #endif
 
@@ -328,7 +339,11 @@
 #define HAVE_THREADS 1
 #define HAVE_ACCESS 1
 #define HAVE_ISATTY 1
+#if defined(__APPLE__)
+#define HAVE_MALLOC_H 0
+#else
 #define HAVE_MALLOC_H 1
+#endif
 #define HAVE_PRAGMA_DEPRECATED 1
 
 /* Math functions */
@@ -417,5 +432,15 @@
 
 /* Enabled bitstream filters */
 #define CONFIG_NULL_BSF 1
+
+/*
+ * ffmpeg-xenia premake currently doesn't compile AArch64-specific sources for
+ * macOS targets; keep generic C dispatch until macOS-specific source filters
+ * are added.
+ */
+#if defined(__APPLE__) && defined(__aarch64__)
+#undef ARCH_AARCH64
+#define ARCH_AARCH64 0
+#endif
 
 #endif /* FFMPEG_CONFIG_H */
