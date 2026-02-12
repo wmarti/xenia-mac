@@ -124,62 +124,88 @@ void MetalPresenter::Shutdown() {
     shared_event_ = nullptr;
   }
   if (copy_texture_convert_pipeline_2d_) {
+    [copy_texture_convert_pipeline_2d_ release];
     copy_texture_convert_pipeline_2d_ = nullptr;
   }
   if (copy_texture_convert_pipeline_2d_array_) {
+    [copy_texture_convert_pipeline_2d_array_ release];
     copy_texture_convert_pipeline_2d_array_ = nullptr;
   }
   if (apply_gamma_table_pipeline_) {
+    [apply_gamma_table_pipeline_ release];
     apply_gamma_table_pipeline_ = nullptr;
   }
   if (apply_gamma_pwl_pipeline_) {
+    [apply_gamma_pwl_pipeline_ release];
     apply_gamma_pwl_pipeline_ = nullptr;
   }
   if (apply_gamma_debug_gradient_pipeline_) {
+    [apply_gamma_debug_gradient_pipeline_ release];
     apply_gamma_debug_gradient_pipeline_ = nullptr;
   }
   if (apply_gamma_debug_copy_pipeline_) {
+    [apply_gamma_debug_copy_pipeline_ release];
     apply_gamma_debug_copy_pipeline_ = nullptr;
   }
   if (apply_gamma_debug_ramp_table_pipeline_) {
+    [apply_gamma_debug_ramp_table_pipeline_ release];
     apply_gamma_debug_ramp_table_pipeline_ = nullptr;
   }
   if (apply_gamma_debug_ramp_pwl_pipeline_) {
+    [apply_gamma_debug_ramp_pwl_pipeline_ release];
     apply_gamma_debug_ramp_pwl_pipeline_ = nullptr;
   }
   if (gamma_output_texture_) {
+    [gamma_output_texture_ release];
     gamma_output_texture_ = nullptr;
   }
   gamma_output_width_ = 0;
   gamma_output_height_ = 0;
   if (gamma_ramp_table_texture_) {
+    [gamma_ramp_table_texture_ release];
     gamma_ramp_table_texture_ = nullptr;
   }
   if (gamma_ramp_pwl_texture_) {
+    [gamma_ramp_pwl_texture_ release];
     gamma_ramp_pwl_texture_ = nullptr;
   }
   if (gamma_ramp_buffer_) {
+    [gamma_ramp_buffer_ release];
     gamma_ramp_buffer_ = nullptr;
   }
   gamma_ramp_buffer_size_ = 0;
   gamma_ramp_table_valid_ = false;
   gamma_ramp_pwl_valid_ = false;
   if (guest_output_pipeline_bilinear_) {
+    [guest_output_pipeline_bilinear_ release];
     guest_output_pipeline_bilinear_ = nullptr;
   }
   if (guest_output_pipeline_bilinear_dither_) {
+    [guest_output_pipeline_bilinear_dither_ release];
     guest_output_pipeline_bilinear_dither_ = nullptr;
   }
   if (guest_output_sampler_) {
+    [guest_output_sampler_ release];
     guest_output_sampler_ = nullptr;
   }
   guest_output_pipeline_format_ = 0;
   if (metalfx_scaler_) {
+    [metalfx_scaler_ release];
     metalfx_scaler_ = nullptr;
   }
   if (metalfx_output_texture_) {
+    [metalfx_output_texture_ release];
     metalfx_output_texture_ = nullptr;
   }
+  for (id& guest_output_texture : guest_output_textures_) {
+    if (guest_output_texture) {
+      [guest_output_texture release];
+      guest_output_texture = nil;
+    }
+  }
+  guest_output_submissions_.fill(0);
+  last_guest_output_mailbox_index_.store(UINT32_MAX, std::memory_order_relaxed);
+  guest_output_submission_counter_.store(0, std::memory_order_relaxed);
   metalfx_input_width_ = 0;
   metalfx_input_height_ = 0;
   metalfx_output_width_ = 0;
@@ -597,8 +623,14 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
                               metalfx_color_format_ != uint32_t(color_format) ||
                               metalfx_color_processing_mode_ != uint32_t(color_processing_mode);
               if (recreate) {
-                metalfx_scaler_ = nullptr;
-                metalfx_output_texture_ = nullptr;
+                if (metalfx_scaler_) {
+                  [metalfx_scaler_ release];
+                  metalfx_scaler_ = nullptr;
+                }
+                if (metalfx_output_texture_) {
+                  [metalfx_output_texture_ release];
+                  metalfx_output_texture_ = nullptr;
+                }
                 metalfx_input_width_ = input_width;
                 metalfx_input_height_ = input_height;
                 metalfx_output_width_ = target_width;
@@ -844,9 +876,15 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   if (surface_scale <= 0.0) {
     surface_scale = 1.0;
   }
+#if XE_PLATFORM_IOS
+  // iOS always renders at logical surface size (points), not Retina backing
+  // scale, to keep GPU load bounded and behavior consistent across devices.
+  surface_scale = 1.0;
+#else
   if (!cvars::metal_presenter_use_backing_scale) {
     surface_scale = 1.0;
   }
+#endif
   surface_scale_ = static_cast<float>(surface_scale);
   surface_width_in_points_ = new_surface_width;
   surface_height_in_points_ = new_surface_height;
@@ -895,6 +933,7 @@ bool MetalPresenter::RefreshGuestOutputImpl(
   // Check if we need to create or recreate the texture
   if (!guest_output_texture || guest_output_texture.width != frontbuffer_width ||
       guest_output_texture.height != frontbuffer_height) {
+    id<MTLTexture> previous_texture = guest_output_texture;
     MTLPixelFormat guest_output_format = ::cvars::metal_presenter_force_10bpc
                                              ? MTLPixelFormatRGB10A2Unorm
                                              : MTLPixelFormatRGBA8Unorm;
@@ -914,6 +953,10 @@ bool MetalPresenter::RefreshGuestOutputImpl(
       XELOGE("Metal RefreshGuestOutputImpl: Failed to create guest output texture");
       is_8bpc_out_ref = false;
       return false;
+    }
+
+    if (previous_texture && previous_texture != guest_output_texture) {
+      [previous_texture release];
     }
 
     // Store in mailbox
@@ -951,6 +994,18 @@ bool MetalPresenter::UpdateGammaRamp(const void* table_data, size_t table_bytes,
 
   size_t total_bytes = table_bytes + pwl_bytes;
   if (!gamma_ramp_buffer_ || gamma_ramp_buffer_size_ < total_bytes) {
+    if (gamma_ramp_table_texture_) {
+      [gamma_ramp_table_texture_ release];
+      gamma_ramp_table_texture_ = nullptr;
+    }
+    if (gamma_ramp_pwl_texture_) {
+      [gamma_ramp_pwl_texture_ release];
+      gamma_ramp_pwl_texture_ = nullptr;
+    }
+    if (gamma_ramp_buffer_) {
+      [gamma_ramp_buffer_ release];
+      gamma_ramp_buffer_ = nullptr;
+    }
     gamma_ramp_buffer_ = [mtl_device newBufferWithLength:total_bytes
                                                  options:MTLResourceStorageModeShared];
     if (!gamma_ramp_buffer_) {
@@ -1416,9 +1471,18 @@ bool MetalPresenter::EnsureGuestOutputPaintResources(uint32_t pixel_format) {
     return true;
   }
 
-  guest_output_pipeline_bilinear_ = nullptr;
-  guest_output_pipeline_bilinear_dither_ = nullptr;
-  guest_output_sampler_ = nullptr;
+  if (guest_output_pipeline_bilinear_) {
+    [guest_output_pipeline_bilinear_ release];
+    guest_output_pipeline_bilinear_ = nullptr;
+  }
+  if (guest_output_pipeline_bilinear_dither_) {
+    [guest_output_pipeline_bilinear_dither_ release];
+    guest_output_pipeline_bilinear_dither_ = nullptr;
+  }
+  if (guest_output_sampler_) {
+    [guest_output_sampler_ release];
+    guest_output_sampler_ = nullptr;
+  }
   guest_output_pipeline_format_ = pixel_format;
 
   id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device_;
@@ -1800,6 +1864,10 @@ bool MetalPresenter::CopyTextureToGuestOutput(MTL::Texture* source_texture, id d
     if (!is_rgb10a2_format(dst_format)) {
       if (!gamma_output_texture_ || gamma_output_width_ != copy_width ||
           gamma_output_height_ != copy_height) {
+        if (gamma_output_texture_) {
+          [gamma_output_texture_ release];
+          gamma_output_texture_ = nullptr;
+        }
         MTLTextureDescriptor* gamma_desc =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGB10A2Unorm
                                                                width:copy_width

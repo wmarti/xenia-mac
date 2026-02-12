@@ -580,8 +580,6 @@ std::vector<IOSConfigSection> BuildIOSConfigSections() {
   AddChoiceSetting(graphics.items, IOSConfigControlType::kChoiceInt32, "present_safe_area_y",
                    "Safe Area (Vertical)", "How much height is kept before cropping.", 100,
                    {{"90%", 90}, {"95%", 95}, {"100%", 100}});
-  AddBoolSetting(graphics.items, "metal_presenter_use_backing_scale", "Retina Backing Scale",
-                 "When off, render at logical size to reduce GPU load.", false);
   AddChoiceSetting(graphics.items, IOSConfigControlType::kChoiceInt32, "anisotropic_override",
                    "Anisotropic Filtering", "Texture filtering override level.", -1,
                    {{"Auto", -1}, {"Off", 0}, {"2x", 2}, {"4x", 4}, {"8x", 8}, {"16x", 16}});
