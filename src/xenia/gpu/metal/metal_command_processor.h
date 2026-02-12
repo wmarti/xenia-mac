@@ -91,6 +91,8 @@ class MetalCommandProcessor : public CommandProcessor {
     return current_command_buffer_;
   }
   uint32_t current_draw_index() const { return current_draw_index_; }
+  uint64_t GetCurrentSubmission() const;
+  uint64_t GetCompletedSubmission() const;
   MTL::CommandBuffer* EnsureCommandBuffer();
   void EndRenderEncoder();
   void ResetRenderEncoderResourceUsage();
@@ -164,6 +166,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // Command buffer management
   void BeginCommandBuffer();
   void EndCommandBuffer();
+  void WaitForPendingCompletionHandlers();
   void ProcessCompletedSubmissions();
   void EnsureDrawRingCapacity();
   void UseRenderEncoderAttachmentHeaps(MTL::RenderPassDescriptor* descriptor);
@@ -654,6 +657,7 @@ class MetalCommandProcessor : public CommandProcessor {
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   std::atomic<uint64_t> completed_command_buffers_{0};
+  std::atomic<uint32_t> pending_completion_handlers_{0};
   uint64_t submission_current_ = 0;
   uint64_t submission_completed_processed_ = 0;
 

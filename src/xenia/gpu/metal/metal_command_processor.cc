@@ -482,6 +482,7 @@ MetalCommandProcessor::~MetalCommandProcessor() {
     current_command_buffer_->release();
     current_command_buffer_ = nullptr;
   }
+  WaitForPendingCompletionHandlers();
   ShutdownMslAsyncCompilation();
   if (render_pass_descriptor_) {
     render_pass_descriptor_->release();
@@ -1044,6 +1045,14 @@ ui::metal::MetalProvider& MetalCommandProcessor::GetMetalProvider() const {
   return *static_cast<ui::metal::MetalProvider*>(graphics_system_->provider());
 }
 
+uint64_t MetalCommandProcessor::GetCurrentSubmission() const {
+  return submission_current_ ? submission_current_ : 1;
+}
+
+uint64_t MetalCommandProcessor::GetCompletedSubmission() const {
+  return completed_command_buffers_.load(std::memory_order_relaxed);
+}
+
 void MetalCommandProcessor::MarkResolvedMemory(uint32_t base_ptr,
                                                uint32_t length) {
   if (length == 0) return;
@@ -1544,6 +1553,21 @@ void MetalCommandProcessor::PrepareForWait() {
   CommandProcessor::PrepareForWait();
 }
 
+void MetalCommandProcessor::WaitForPendingCompletionHandlers() {
+  constexpr auto kMaxWait = std::chrono::seconds(5);
+  const auto wait_start = std::chrono::steady_clock::now();
+  while (pending_completion_handlers_.load(std::memory_order_acquire) != 0) {
+    if (std::chrono::steady_clock::now() - wait_start >= kMaxWait) {
+      XELOGW(
+          "MetalCommandProcessor: timed out waiting for {} completion "
+          "handler(s) during shutdown",
+          pending_completion_handlers_.load(std::memory_order_relaxed));
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
 void MetalCommandProcessor::ShutdownContext() {
   // End any active render encoder before shutdown
   if (current_render_encoder_) {
@@ -1604,6 +1628,8 @@ void MetalCommandProcessor::ShutdownContext() {
     }
     pool->release();
   }
+
+  WaitForPendingCompletionHandlers();
 
   // Now safe to release encoder and command buffer
   if (current_render_encoder_) {
@@ -4851,8 +4877,10 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
 #endif  // !METAL_SHADER_CONVERTER_AVAILABLE
 
   ++submission_current_;
+  pending_completion_handlers_.fetch_add(1, std::memory_order_relaxed);
   current_command_buffer_->addCompletedHandler([this](MTL::CommandBuffer*) {
     completed_command_buffers_.fetch_add(1, std::memory_order_relaxed);
+    pending_completion_handlers_.fetch_sub(1, std::memory_order_relaxed);
   });
 
   if (primitive_processor_) {
@@ -5292,6 +5320,7 @@ void MetalCommandProcessor::ScheduleSpirvUniformBufferRelease(
     return;
   }
 
+  pending_completion_handlers_.fetch_add(1, std::memory_order_relaxed);
   command_buffer->addCompletedHandler(
       [this, submitted_uniforms = std::move(submitted_uniforms)](
           MTL::CommandBuffer*) mutable {
@@ -5311,6 +5340,7 @@ void MetalCommandProcessor::ScheduleSpirvUniformBufferRelease(
             dispatch_semaphore_signal(spirv_uniforms_available_semaphore_);
           }
         }
+        pending_completion_handlers_.fetch_sub(1, std::memory_order_relaxed);
       });
 }
 #endif  // !METAL_SHADER_CONVERTER_AVAILABLE
@@ -5607,9 +5637,19 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreatePipelineState(
   if (!pass_descriptor) {
     pass_descriptor = render_pass_descriptor_;
   }
-  PopulatePipelineFormatsFromRenderPassDescriptor(
-      pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
-      &sample_count);
+  if (pass_descriptor) {
+    // Rebuild strictly from the active encoder descriptor to prevent stale
+    // formats from cache-derived fallback state.
+    sample_count = 1;
+    for (uint32_t i = 0; i < 4; ++i) {
+      color_formats[i] = MTL::PixelFormatInvalid;
+    }
+    depth_format = MTL::PixelFormatInvalid;
+    stencil_format = MTL::PixelFormatInvalid;
+    PopulatePipelineFormatsFromRenderPassDescriptor(
+        pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
+        &sample_count);
+  }
 
   struct PipelineKey {
     const void* vs;
@@ -5985,9 +6025,17 @@ MetalCommandProcessor::GetOrCreateGeometryPipelineState(
   if (!pass_descriptor) {
     pass_descriptor = render_pass_descriptor_;
   }
-  PopulatePipelineFormatsFromRenderPassDescriptor(
-      pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
-      &sample_count);
+  if (pass_descriptor) {
+    sample_count = 1;
+    for (uint32_t i = 0; i < 4; ++i) {
+      color_formats[i] = MTL::PixelFormatInvalid;
+    }
+    depth_format = MTL::PixelFormatInvalid;
+    stencil_format = MTL::PixelFormatInvalid;
+    PopulatePipelineFormatsFromRenderPassDescriptor(
+        pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
+        &sample_count);
+  }
 
   struct GeometryPipelineKey {
     const void* vs;
@@ -6578,9 +6626,17 @@ MetalCommandProcessor::GetOrCreateTessellationPipelineState(
   if (!pass_descriptor) {
     pass_descriptor = render_pass_descriptor_;
   }
-  PopulatePipelineFormatsFromRenderPassDescriptor(
-      pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
-      &sample_count);
+  if (pass_descriptor) {
+    sample_count = 1;
+    for (uint32_t i = 0; i < 4; ++i) {
+      color_formats[i] = MTL::PixelFormatInvalid;
+    }
+    depth_format = MTL::PixelFormatInvalid;
+    stencil_format = MTL::PixelFormatInvalid;
+    PopulatePipelineFormatsFromRenderPassDescriptor(
+        pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
+        &sample_count);
+  }
 
   struct TessellationPipelineKey {
     const void* ds;
@@ -7503,17 +7559,20 @@ void MetalCommandProcessor::ScheduleDrawRingRelease(
     }
   }
   if (add_handler) {
+    pending_completion_handlers_.fetch_add(1, std::memory_order_relaxed);
     command_buffer->addCompletedHandler(
         [this](MTL::CommandBuffer* completed_cmd) {
           std::lock_guard<std::mutex> lock(draw_ring_mutex_);
           auto it = pending_draw_ring_releases_.find(completed_cmd);
           if (it == pending_draw_ring_releases_.end()) {
+            pending_completion_handlers_.fetch_sub(1, std::memory_order_relaxed);
             return;
           }
           for (auto& ring : it->second) {
             draw_ring_pool_.push_back(std::move(ring));
           }
           pending_draw_ring_releases_.erase(it);
+          pending_completion_handlers_.fetch_sub(1, std::memory_order_relaxed);
         });
   }
 }
@@ -7898,6 +7957,24 @@ MetalCommandProcessor::GetOrCreateMslTessPipelineState(
     }
   }
 
+  // Keep tessellation PSO attachment formats/sample count in sync with the
+  // active render pass descriptor to satisfy Metal validation.
+  MTL::RenderPassDescriptor* pass_descriptor = current_render_pass_descriptor_;
+  if (!pass_descriptor) {
+    pass_descriptor = render_pass_descriptor_;
+  }
+  if (pass_descriptor) {
+    sample_count = 1;
+    for (uint32_t i = 0; i < 4; ++i) {
+      color_formats[i] = MTL::PixelFormatInvalid;
+    }
+    depth_format = MTL::PixelFormatInvalid;
+    stencil_format = MTL::PixelFormatInvalid;
+    PopulatePipelineFormatsFromRenderPassDescriptor(
+        pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
+        &sample_count);
+  }
+
   // Build cache key incorporating RT formats, tessellation mode, and blend
   // state (same blend fields as GetOrCreateMslPipelineState).
   auto tess_mode = regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
@@ -8237,6 +8314,25 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateMslPipelineState(
             sample_count, static_cast<uint32_t>(depth_tex->sampleCount()));
       }
     }
+  }
+
+  // Match the active render pass attachments exactly to avoid
+  // setRenderPipelineState validation failures when the pass descriptor differs
+  // from the cache snapshot (for instance, after attachment reconfiguration).
+  MTL::RenderPassDescriptor* pass_descriptor = current_render_pass_descriptor_;
+  if (!pass_descriptor) {
+    pass_descriptor = render_pass_descriptor_;
+  }
+  if (pass_descriptor) {
+    sample_count = 1;
+    for (uint32_t i = 0; i < 4; ++i) {
+      color_formats[i] = MTL::PixelFormatInvalid;
+    }
+    depth_format = MTL::PixelFormatInvalid;
+    stencil_format = MTL::PixelFormatInvalid;
+    PopulatePipelineFormatsFromRenderPassDescriptor(
+        pass_descriptor, color_formats, 4, &depth_format, &stencil_format,
+        &sample_count);
   }
 
   // Build pipeline cache key.
