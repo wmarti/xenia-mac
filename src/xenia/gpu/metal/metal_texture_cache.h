@@ -218,6 +218,7 @@ class MetalTextureCache : public TextureCache {
   struct RetiredScaledResolveBuffer {
     MTL::Buffer* buffer = nullptr;
     uint64_t submission_id = 0;
+    uint64_t length_scaled = 0;
   };
 
   bool GetScaledResolveRange(uint32_t start_unscaled, uint32_t length_unscaled,
@@ -256,6 +257,7 @@ class MetalTextureCache : public TextureCache {
 
   std::vector<ScaledResolveBuffer> scaled_resolve_buffers_;
   std::vector<RetiredScaledResolveBuffer> scaled_resolve_retired_buffers_;
+  uint64_t scaled_resolve_retired_bytes_ = 0;
   size_t scaled_resolve_current_buffer_index_ = size_t(-1);
   uint64_t scaled_resolve_current_range_start_scaled_ = 0;
   uint64_t scaled_resolve_current_range_length_scaled_ = 0;

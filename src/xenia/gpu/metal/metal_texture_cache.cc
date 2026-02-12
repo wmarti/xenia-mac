@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -101,6 +102,14 @@ namespace xe {
 namespace gpu {
 namespace metal {
 namespace {
+
+#if XE_PLATFORM_IOS
+constexpr uint64_t kUploadBufferPoolMaxBytes = 128ull * 1024ull * 1024ull;
+constexpr uint64_t kScaledResolveRetiredMaxBytes = 64ull * 1024ull * 1024ull;
+#else
+constexpr uint64_t kUploadBufferPoolMaxBytes = 512ull * 1024ull * 1024ull;
+constexpr uint64_t kScaledResolveRetiredMaxBytes = 256ull * 1024ull * 1024ull;
+#endif
 
 struct MetalLoadConstants {
   uint32_t is_tiled_3d_endian_scale;
@@ -264,37 +273,52 @@ MTL::TextureSwizzleChannels ToMetalTextureSwizzle(uint32_t xenos_swizzle) {
 class MetalTextureCache::UploadBufferPool
     : public std::enable_shared_from_this<UploadBufferPool> {
  public:
-  explicit UploadBufferPool(MTL::Device* device) : device_(device) {}
+  explicit UploadBufferPool(MTL::Device* device, uint64_t max_pooled_bytes)
+      : device_(device), max_pooled_bytes_(max_pooled_bytes) {}
 
   MTL::Buffer* Acquire(size_t size) {
     if (!device_) {
       return nullptr;
     }
     size = xe::round_up(size, size_t(256));
-    std::lock_guard<std::mutex> lock(mutex_);
-    size_t best_index = entries_.size();
-    size_t best_size = std::numeric_limits<size_t>::max();
-    for (size_t i = 0; i < entries_.size(); ++i) {
-      Entry& entry = entries_[i];
-      if (entry.in_use || entry.size < size) {
-        continue;
+    bool can_pool = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++usage_tick_;
+      size_t best_index = entries_.size();
+      size_t best_size = std::numeric_limits<size_t>::max();
+      for (size_t i = 0; i < entries_.size(); ++i) {
+        Entry& entry = entries_[i];
+        if (entry.in_use || entry.size < size) {
+          continue;
+        }
+        if (entry.size < best_size) {
+          best_index = i;
+          best_size = entry.size;
+        }
       }
-      if (entry.size < best_size) {
-        best_index = i;
-        best_size = entry.size;
+      if (best_index < entries_.size()) {
+        entries_[best_index].in_use = true;
+        entries_[best_index].last_used_tick = usage_tick_;
+        return entries_[best_index].buffer;
       }
+      can_pool = pooled_bytes_ + size <= max_pooled_bytes_;
     }
-    if (best_index < entries_.size()) {
-      entries_[best_index].in_use = true;
-      return entries_[best_index].buffer;
-    }
-
     MTL::Buffer* buffer =
         device_->newBuffer(size, MTL::ResourceStorageModeShared);
     if (!buffer) {
       return nullptr;
     }
-    entries_.push_back({buffer, size, true});
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++usage_tick_;
+      if (can_pool && pooled_bytes_ + size <= max_pooled_bytes_) {
+        pooled_bytes_ += size;
+        entries_.push_back({buffer, size, true, true, usage_tick_});
+        return buffer;
+      }
+      ++transient_allocations_;
+    }
     return buffer;
   }
 
@@ -302,12 +326,21 @@ class MetalTextureCache::UploadBufferPool
     if (!buffer) {
       return;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (Entry& entry : entries_) {
-      if (entry.buffer == buffer) {
-        entry.in_use = false;
-        return;
+    bool release_transient = true;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++usage_tick_;
+      for (Entry& entry : entries_) {
+        if (entry.buffer == buffer) {
+          entry.in_use = false;
+          entry.last_used_tick = usage_tick_;
+          release_transient = false;
+          break;
+        }
       }
+    }
+    if (release_transient) {
+      buffer->release();
     }
   }
 
@@ -341,6 +374,7 @@ class MetalTextureCache::UploadBufferPool
         entry.buffer = nullptr;
       }
     }
+    pooled_bytes_ = 0;
     entries_.clear();
   }
 
@@ -351,18 +385,16 @@ class MetalTextureCache::UploadBufferPool
 
   uint64_t GetTotalBytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    uint64_t total = 0;
-    for (const Entry& entry : entries_) {
-      total += entry.size;
-    }
-    return total;
+    return pooled_bytes_;
   }
 
  private:
   struct Entry {
     MTL::Buffer* buffer = nullptr;
     size_t size = 0;
+    bool pooled = false;
     bool in_use = false;
+    uint64_t last_used_tick = 0;
   };
 
   struct PendingRelease {
@@ -378,6 +410,10 @@ class MetalTextureCache::UploadBufferPool
   mutable std::mutex mutex_;
   std::vector<Entry> entries_;
   MTL::Device* device_ = nullptr;
+  uint64_t max_pooled_bytes_ = 0;
+  uint64_t pooled_bytes_ = 0;
+  uint64_t usage_tick_ = 0;
+  uint64_t transient_allocations_ = 0;
 };
 
 std::mutex MetalTextureCache::UploadBufferPool::pending_releases_mutex_;
@@ -1389,7 +1425,8 @@ bool MetalTextureCache::Initialize() {
 
   {
     std::lock_guard<std::mutex> lock(upload_buffer_pool_mutex_);
-    upload_buffer_pool_ = std::make_shared<UploadBufferPool>(device);
+    upload_buffer_pool_ =
+        std::make_shared<UploadBufferPool>(device, kUploadBufferPoolMaxBytes);
   }
   if (::cvars::metal_use_heaps) {
     size_t min_heap_bytes = std::max<int32_t>(0, ::cvars::metal_heap_min_bytes);
@@ -1751,6 +1788,7 @@ void MetalTextureCache::ClearScaledResolveBuffers() {
     }
   }
   scaled_resolve_retired_buffers_.clear();
+  scaled_resolve_retired_bytes_ = 0;
   scaled_resolve_current_buffer_index_ = size_t(-1);
   scaled_resolve_current_range_start_scaled_ = 0;
   scaled_resolve_current_range_length_scaled_ = 0;
@@ -1768,6 +1806,10 @@ void MetalTextureCache::CompletedSubmissionUpdated(
       if (it->buffer) {
         it->buffer->release();
       }
+      scaled_resolve_retired_bytes_ =
+          scaled_resolve_retired_bytes_ > it->length_scaled
+              ? (scaled_resolve_retired_bytes_ - it->length_scaled)
+              : 0;
       it = scaled_resolve_retired_buffers_.erase(it);
     } else {
       ++it;
@@ -2824,15 +2866,30 @@ bool MetalTextureCache::EnsureScaledResolveBufferRange(uint64_t start_scaled,
   new_buffer->setLabel(
       NS::String::string("XeniaScaledResolveBuffer", NS::UTF8StringEncoding));
 
+  uint64_t overlap_total_bytes = 0;
+  for (size_t overlap_index : overlap_indices) {
+    overlap_total_bytes += scaled_resolve_buffers_[overlap_index].length_scaled;
+  }
+  MTL::CommandBuffer* current_cmd = command_processor_->GetCurrentCommandBuffer();
+  bool retain_overlaps = current_cmd != nullptr;
+  if (retain_overlaps) {
+    bool exceeds_retired_budget =
+        overlap_total_bytes > kScaledResolveRetiredMaxBytes ||
+        scaled_resolve_retired_bytes_ >
+            (kScaledResolveRetiredMaxBytes - overlap_total_bytes);
+    if (exceeds_retired_budget) {
+      retain_overlaps = false;
+    }
+  }
+
   if (!overlap_indices.empty()) {
-    MTL::CommandBuffer* cmd = command_processor_->GetCurrentCommandBuffer();
+    MTL::CommandBuffer* cmd = retain_overlaps ? current_cmd : nullptr;
     if (!cmd) {
       MTL::CommandQueue* queue = command_processor_->GetMetalCommandQueue();
       if (!queue) {
         new_buffer->release();
         return false;
       }
-      ScopedAutoreleasePool autorelease_pool;
       cmd = queue->commandBuffer();
       if (!cmd) {
         new_buffer->release();
@@ -2857,15 +2914,13 @@ bool MetalTextureCache::EnsureScaledResolveBufferRange(uint64_t start_scaled,
     }
 
     blit->endEncoding();
-    if (cmd != command_processor_->GetCurrentCommandBuffer()) {
+    if (cmd != current_cmd) {
       cmd->commit();
       cmd->waitUntilCompleted();
     }
   }
 
   std::vector<ScaledResolveBuffer> new_buffers;
-  bool retain_overlaps =
-      command_processor_->GetCurrentCommandBuffer() != nullptr;
   new_buffers.reserve(scaled_resolve_buffers_.size() - overlap_indices.size() +
                       1);
   for (size_t i = 0; i < scaled_resolve_buffers_.size(); ++i) {
@@ -2881,7 +2936,14 @@ bool MetalTextureCache::EnsureScaledResolveBufferRange(uint64_t start_scaled,
         RetiredScaledResolveBuffer retired;
         retired.buffer = scaled_resolve_buffers_[i].buffer;
         retired.submission_id = command_processor_->GetCurrentSubmission();
+        retired.length_scaled = scaled_resolve_buffers_[i].length_scaled;
         scaled_resolve_retired_buffers_.push_back(retired);
+        if (std::numeric_limits<uint64_t>::max() - scaled_resolve_retired_bytes_ <
+            retired.length_scaled) {
+          scaled_resolve_retired_bytes_ = std::numeric_limits<uint64_t>::max();
+        } else {
+          scaled_resolve_retired_bytes_ += retired.length_scaled;
+        }
       } else if (scaled_resolve_buffers_[i].buffer) {
         scaled_resolve_buffers_[i].buffer->release();
       }
