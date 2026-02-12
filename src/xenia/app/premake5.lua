@@ -359,6 +359,86 @@ project("xenia-app")
     local app_frameworks = app_contents .. "/Frameworks"
     local app_macos = app_contents .. "/MacOS"
     local app_executable = app_macos .. "/xenia_edge"
+    local macdeployqt_command =
+        'app_arch="$(lipo -archs "' .. app_executable .. '" | awk \'{print $1}\')"; '
+            .. 'qt_dir="${QT_DIR:-}"; '
+            .. 'qtcore_dep="$(otool -L "' .. app_executable
+            .. '" | grep "QtCore.framework" | awk \'{print $1}\' | head -n 1)"; '
+            .. 'if [ -z "$qt_dir" ] && [ -n "$qtcore_dep" ] && [ "${qtcore_dep#/}" != "$qtcore_dep" ]; then '
+            .. 'qt_dir="${qtcore_dep%%/lib/QtCore.framework/*}"; fi; '
+            .. 'if [ -z "$qt_dir" ] && command -v brew >/dev/null 2>&1; then '
+            .. 'for qt_prefix in "$(brew --prefix qtbase 2>/dev/null)" "$(brew --prefix qt@6 2>/dev/null)" "$(brew --prefix qt 2>/dev/null)"; do '
+            .. 'if [ -n "$qt_prefix" ] && [ -f "$qt_prefix/lib/QtCore.framework/QtCore" ] && '
+            .. 'lipo -archs "$qt_prefix/lib/QtCore.framework/QtCore" | tr " " "\\n" | grep -qx "$app_arch"; then '
+            .. 'qt_dir="$qt_prefix"; break; fi; done; '
+            .. 'if [ -z "$qt_dir" ] && [ "$(uname -m)" = "arm64" ] && command -v arch >/dev/null 2>&1; then '
+            .. 'for qt_prefix in "$(arch -x86_64 brew --prefix qtbase 2>/dev/null || true)" "$(arch -x86_64 brew --prefix qt@6 2>/dev/null || true)" "$(arch -x86_64 brew --prefix qt 2>/dev/null || true)"; do '
+            .. 'if [ -n "$qt_prefix" ] && [ -f "$qt_prefix/lib/QtCore.framework/QtCore" ] && '
+            .. 'lipo -archs "$qt_prefix/lib/QtCore.framework/QtCore" | tr " " "\\n" | grep -qx "$app_arch"; then '
+            .. 'qt_dir="$qt_prefix"; break; fi; done; fi; '
+            .. 'fi; '
+            .. 'if [ -n "$qt_dir" ] && [ -x "$qt_dir/bin/macdeployqt" ]; then '
+            .. '"$qt_dir/bin/macdeployqt" "' .. app_bundle .. '"; '
+            .. 'elif command -v macdeployqt >/dev/null 2>&1; then '
+            .. 'macdeployqt "' .. app_bundle .. '"; '
+            .. 'else '
+            .. 'echo "warning: macdeployqt not found; Qt frameworks/plugins are not bundled" >&2; '
+            .. 'fi'
+    local bundle_sdl_command =
+        'app_arch="$(lipo -archs "' .. app_executable .. '" | awk \'{print $1}\')"; '
+            .. 'sdl_dep="$(otool -L "' .. app_executable
+            .. '" | grep "libSDL2-2.0.0.dylib" | awk \'{print $1}\' | head -n 1)"; '
+            .. 'bundle_sdl="' .. app_frameworks .. '/libSDL2-2.0.0.dylib"; '
+            .. 'rm -f "$bundle_sdl"; '
+            .. 'sdl_src=""; '
+            .. 'if [ -n "$sdl_dep" ] && [ "${sdl_dep#/}" != "$sdl_dep" ] && [ -f "$sdl_dep" ] && '
+            .. 'lipo -archs "$sdl_dep" | tr " " "\\n" | grep -qx "$app_arch"; then sdl_src="$sdl_dep"; fi; '
+            .. 'if [ -z "$sdl_src" ] && [ -n "${SDL2_DIR:-}" ] && [ -f "${SDL2_DIR}/lib/libSDL2-2.0.0.dylib" ] && '
+            .. 'lipo -archs "${SDL2_DIR}/lib/libSDL2-2.0.0.dylib" | tr " " "\\n" | grep -qx "$app_arch"; then '
+            .. 'sdl_src="${SDL2_DIR}/lib/libSDL2-2.0.0.dylib"; fi; '
+            .. 'if [ -z "$sdl_src" ] && command -v brew >/dev/null 2>&1; then '
+            .. 'for sdl_prefix in "$(brew --prefix sdl2 2>/dev/null)"; do '
+            .. 'if [ -n "$sdl_prefix" ] && [ -f "$sdl_prefix/lib/libSDL2-2.0.0.dylib" ] && '
+            .. 'lipo -archs "$sdl_prefix/lib/libSDL2-2.0.0.dylib" | tr " " "\\n" | grep -qx "$app_arch"; then '
+            .. 'sdl_src="$sdl_prefix/lib/libSDL2-2.0.0.dylib"; break; fi; done; '
+            .. 'if [ -z "$sdl_src" ] && [ "$(uname -m)" = "arm64" ] && command -v arch >/dev/null 2>&1; then '
+            .. 'for sdl_prefix in "$(arch -x86_64 brew --prefix sdl2 2>/dev/null || true)"; do '
+            .. 'if [ -n "$sdl_prefix" ] && [ -f "$sdl_prefix/lib/libSDL2-2.0.0.dylib" ] && '
+            .. 'lipo -archs "$sdl_prefix/lib/libSDL2-2.0.0.dylib" | tr " " "\\n" | grep -qx "$app_arch"; then '
+            .. 'sdl_src="$sdl_prefix/lib/libSDL2-2.0.0.dylib"; break; fi; done; fi; '
+            .. 'fi; '
+            .. 'if [ -z "$sdl_src" ]; then '
+            .. 'for brew_bin in /usr/local/bin/brew /opt/homebrew/bin/brew; do '
+            .. 'if [ -x "$brew_bin" ]; then '
+            .. 'sdl_prefix="$("$brew_bin" --prefix sdl2 2>/dev/null || true)"; '
+            .. 'if [ -n "$sdl_prefix" ] && [ -f "$sdl_prefix/lib/libSDL2-2.0.0.dylib" ] && '
+            .. 'lipo -archs "$sdl_prefix/lib/libSDL2-2.0.0.dylib" | tr " " "\\n" | grep -qx "$app_arch"; then '
+            .. 'sdl_src="$sdl_prefix/lib/libSDL2-2.0.0.dylib"; break; fi; '
+            .. 'fi; '
+            .. 'done; '
+            .. 'fi; '
+            .. 'if [ -z "$sdl_src" ]; then '
+            .. 'for sdl_prefix in /usr/local/opt/sdl2 /opt/homebrew/opt/sdl2; do '
+            .. 'if [ -f "$sdl_prefix/lib/libSDL2-2.0.0.dylib" ] && '
+            .. 'lipo -archs "$sdl_prefix/lib/libSDL2-2.0.0.dylib" | tr " " "\\n" | grep -qx "$app_arch"; then '
+            .. 'sdl_src="$sdl_prefix/lib/libSDL2-2.0.0.dylib"; break; fi; '
+            .. 'done; '
+            .. 'fi; '
+            .. 'if [ -n "$sdl_src" ]; then '
+            .. 'cp -f "$sdl_src" "$bundle_sdl"; '
+            .. 'install_name_tool -id "@rpath/libSDL2-2.0.0.dylib" "'
+            .. app_frameworks .. '/libSDL2-2.0.0.dylib"; '
+            .. 'elif [ -n "$sdl_dep" ]; then '
+            .. 'echo "error: compatible SDL2 dylib not found for app architecture $app_arch" >&2; exit 1; '
+            .. 'fi'
+    local relink_sdl_command =
+        'sdl_dep="$(otool -L "' .. app_executable
+            .. '" | grep "libSDL2-2.0.0.dylib" | awk \'{print $1}\' | head -n 1)"; '
+            .. 'if [ -n "$sdl_dep" ] && [ "$sdl_dep" != "@rpath/libSDL2-2.0.0.dylib" ] && [ -f "'
+            .. app_frameworks .. '/libSDL2-2.0.0.dylib" ]; then '
+            .. 'install_name_tool -change "$sdl_dep" "@rpath/libSDL2-2.0.0.dylib" "'
+            .. app_executable .. '"; '
+            .. 'fi'
     files({
       "Info.plist",
       project_root.."/xenia.entitlements",
@@ -404,6 +484,7 @@ project("xenia-app")
           .. app_macos .. '/assets/font/"; fi; true',
       'cp -f "' .. path.join(metal_converter_libdir, "libmetalirconverter.dylib")
           .. '" "' .. app_frameworks .. '/"',
+      bundle_sdl_command,
       'if ! otool -l "' .. app_executable
           .. '" | grep -q "@executable_path/../Frameworks"; then '
           .. 'install_name_tool -add_rpath "@executable_path/../Frameworks" "'
@@ -412,16 +493,14 @@ project("xenia-app")
           .. '" | grep -q "@loader_path/../Frameworks"; then '
           .. 'install_name_tool -add_rpath "@loader_path/../Frameworks" "'
           .. app_executable .. '"; fi',
-      'if otool -l "' .. app_executable
-          .. '" | grep -q "/opt/homebrew/opt/qt/lib"; then '
-          .. 'install_name_tool -delete_rpath "/opt/homebrew/opt/qt/lib" "'
-          .. app_executable .. '"; fi',
-      'if otool -l "' .. app_executable
-          .. '" | grep -q "/usr/local/opt/qt/lib"; then '
-          .. 'install_name_tool -delete_rpath "/usr/local/opt/qt/lib" "'
-          .. app_executable .. '"; fi',
+      macdeployqt_command,
+      relink_sdl_command,
       'codesign --force --sign - "' .. app_frameworks
           .. '/libmetalirconverter.dylib"',
+      'if [ -f "' .. app_frameworks .. '/libSDL2-2.0.0.dylib" ]; then '
+          .. 'codesign --force --sign - "'
+          .. app_frameworks .. '/libSDL2-2.0.0.dylib"; fi',
+      'rm -f "' .. app_macos .. '"/*.log',
       'codesign --force --deep --sign - --entitlements "'
           .. entitlements_path .. '" "' .. app_bundle .. '"',
     })

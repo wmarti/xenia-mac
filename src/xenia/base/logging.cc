@@ -454,9 +454,27 @@ void InitializeLogging(const std::string_view app_name, bool is_game_process) {
     // Use append mode for title-to-title launches to preserve log history
     const char* file_mode = cvars::log_append ? "at" : "wt";
     if (cvars::log_file.empty()) {
-      // Default log file name for game process
+      // Default log file name for game process.
       std::string file_name = fmt::format("{}.log", app_name);
-      auto file_path = xe::filesystem::GetExecutableFolder() / file_name;
+      std::filesystem::path file_path;
+#if XE_PLATFORM_APPLE && !XE_PLATFORM_IOS
+      auto executable_folder = xe::filesystem::GetExecutableFolder();
+      // Writing inside Contents/MacOS mutates signed app bundles and breaks
+      // signature validation on subsequent launches.
+      bool in_signed_bundle =
+          executable_folder.filename() == "MacOS" &&
+          executable_folder.parent_path().filename() == "Contents" &&
+          executable_folder.parent_path().parent_path().extension() == ".app";
+      if (in_signed_bundle) {
+        file_path =
+            xe::filesystem::GetUserFolder() / "Xenia" / "logs" / file_name;
+      } else {
+        file_path = executable_folder / file_name;
+      }
+#else
+      file_path = xe::filesystem::GetExecutableFolder() / file_name;
+#endif
+      xe::filesystem::CreateParentFolder(file_path);
       log_file = xe::filesystem::OpenFile(file_path, file_mode);
     } else {
       // User specified log file - use as-is for game process
