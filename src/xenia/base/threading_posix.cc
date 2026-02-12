@@ -22,6 +22,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstring>
 #include <ctime>
 #include <limits>
 
@@ -625,30 +626,80 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   bool Initialize(Thread::CreationParameters params,
                   ThreadStartData* start_data) {
     start_data->create_suspended = params.create_suspended;
-    pthread_attr_t attr;
-    if (pthread_attr_init(&attr) != 0) return false;
-    if (pthread_attr_setstacksize(&attr, params.stack_size) != 0) {
-      pthread_attr_destroy(&attr);
-      return false;
-    }
-    if (params.initial_priority != 0) {
-      sched_param sched{};
-      sched.sched_priority = params.initial_priority + 1;
-      if (pthread_attr_setschedpolicy(&attr, SCHED_FIFO) != 0) {
-        pthread_attr_destroy(&attr);
-        return false;
+
+    auto attempt_create = [&](size_t stack_size, bool use_custom_stack_size) {
+      pthread_attr_t attr;
+      int result = pthread_attr_init(&attr);
+      if (result != 0) {
+        return result;
       }
-      if (pthread_attr_setschedparam(&attr, &sched) != 0) {
-        pthread_attr_destroy(&attr);
-        return false;
+
+      if (use_custom_stack_size) {
+        result = pthread_attr_setstacksize(&attr, stack_size);
+        if (result != 0) {
+          pthread_attr_destroy(&attr);
+          return result;
+        }
       }
-    }
-    if (pthread_create(&thread_, &attr, ThreadStartRoutine, start_data) != 0) {
+
+      if (params.initial_priority != 0) {
+        sched_param sched{};
+        sched.sched_priority = params.initial_priority + 1;
+        result = pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
+        if (result != 0) {
+          pthread_attr_destroy(&attr);
+          return result;
+        }
+        result = pthread_attr_setschedparam(&attr, &sched);
+        if (result != 0) {
+          pthread_attr_destroy(&attr);
+          return result;
+        }
+      }
+
+      result = pthread_create(&thread_, &attr, ThreadStartRoutine, start_data);
       pthread_attr_destroy(&attr);
-      return false;
+      return result;
+    };
+
+    int result = attempt_create(params.stack_size, true);
+    if (result == 0) {
+      return true;
     }
-    pthread_attr_destroy(&attr);
-    return true;
+
+#if XE_PLATFORM_IOS
+    XELOGW(
+        "pthread_create failed (stack=0x{:X}, err={} '{}'); "
+        "retrying with smaller stack",
+        static_cast<uint32_t>(params.stack_size), result, std::strerror(result));
+    // iOS can fail thread creation under memory pressure if requested stack size
+    // is too large. Retry with progressively smaller stacks before giving up.
+    size_t retry_stack_size = params.stack_size / 2;
+    constexpr size_t kMinRetryStackSize = size_t(1) * 1024 * 1024;
+    while (retry_stack_size >= kMinRetryStackSize) {
+      result = attempt_create(retry_stack_size, true);
+      if (result == 0) {
+        XELOGW("pthread_create succeeded with fallback stack size 0x{:X}",
+               static_cast<uint32_t>(retry_stack_size));
+        return true;
+      }
+      retry_stack_size /= 2;
+    }
+
+    // Final attempt using platform default stack size.
+    result = attempt_create(0, false);
+    if (result == 0) {
+      XELOGW(
+          "pthread_create succeeded using platform default stack size after "
+          "fallback retries");
+      return true;
+    }
+#endif
+
+    XELOGE("pthread_create failed (stack=0x{:X}, err={} '{}')",
+           static_cast<uint32_t>(params.stack_size), result,
+           std::strerror(result));
+    return false;
   }
 
   /// Constructor for existing thread. This should only happen once called by
@@ -1216,7 +1267,11 @@ class PosixThread final : public PosixConditionHandle<Thread> {
                   std::function<void()> start_routine) {
     auto start_data =
         new ThreadStartData({std::move(start_routine), false, this});
-    return handle_.Initialize(params, start_data);
+    if (!handle_.Initialize(params, start_data)) {
+      delete start_data;
+      return false;
+    }
+    return true;
   }
 
   void set_name(std::string name) override {

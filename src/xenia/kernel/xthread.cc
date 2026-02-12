@@ -41,6 +41,18 @@ const uint32_t XAPC::kDummyRundownRoutine;
 
 using namespace xe::literals;
 
+namespace {
+size_t GuestHostThreadStackSize() {
+#if XE_PLATFORM_IOS
+  // iOS is memory-constrained; a 16 MiB host pthread stack per guest thread
+  // can cause in-game thread creation failures under load.
+  return 4_MiB;
+#else
+  return 16_MiB;
+#endif
+}
+}  // namespace
+
 uint32_t next_xthread_id_ = 0;
 
 XThread::XThread(KernelState* kernel_state)
@@ -400,8 +412,7 @@ X_STATUS XThread::Create() {
   xe::threading::Thread::CreationParameters params;
 
   params.create_suspended = true;
-
-  params.stack_size = 16_MiB;  // Allocate a big host stack.
+  params.stack_size = GuestHostThreadStackSize();
   thread_ = xe::threading::Thread::Create(params, [this]() {
     // Set thread ID override. This is used by logging.
     xe::threading::set_current_thread_id(handle());
@@ -430,7 +441,10 @@ X_STATUS XThread::Create() {
 
   if (!thread_) {
     // TODO(benvanik): translate error?
-    XELOGE("CreateThread failed");
+    XELOGE("CreateThread failed (guest_stack=0x{:X}, host_stack=0x{:X}, "
+           "creation_flags=0x{:X}, start=0x{:X})",
+           creation_params_.stack_size, static_cast<uint32_t>(params.stack_size),
+           creation_params_.creation_flags, creation_params_.start_address);
     return X_STATUS_NO_MEMORY;
   }
 
@@ -1008,7 +1022,7 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
 
     xe::threading::Thread::CreationParameters params;
     params.create_suspended = true;  // Not done restoring yet.
-    params.stack_size = 16_MiB;
+    params.stack_size = GuestHostThreadStackSize();
     thread->thread_ = xe::threading::Thread::Create(params, [thread, state]() {
       // Set thread ID override. This is used by logging.
       xe::threading::set_current_thread_id(thread->handle());
@@ -1044,6 +1058,10 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       thread->OnHostThreadExitCleanup();
 #endif
     });
+    if (!thread->thread_) {
+      XELOGE("Restore thread create failed (host_stack=0x{:X}, state_pc=0x{:X})",
+             static_cast<uint32_t>(params.stack_size), state.context.pc);
+    }
     assert_not_null(thread->thread_);
 
     // Notify processor we were recreated.
