@@ -159,6 +159,18 @@ void LogMetalErrorDetails(const char* label, NS::Error* error) {
 
 constexpr int64_t kMslAsyncLogIntervalNs =
     int64_t(std::chrono::nanoseconds(std::chrono::seconds(1)).count());
+#if METAL_SHADER_CONVERTER_AVAILABLE
+#if XE_PLATFORM_IOS
+constexpr uint64_t kDefaultDrawRingPoolMaxBytes = 256ull * 1024ull * 1024ull;
+#else
+constexpr uint64_t kDefaultDrawRingPoolMaxBytes = 1024ull * 1024ull * 1024ull;
+#endif
+constexpr uint32_t kDrawRingPoolPrewarmCount = 2;
+constexpr uint32_t kDrawRingPoolWaitTimeoutMs = 8;
+constexpr int64_t kDrawRingPoolLogIntervalNs =
+    int64_t(std::chrono::nanoseconds(std::chrono::seconds(2)).count());
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
+constexpr size_t kResolvedMemoryRangesMax = 8192;
 
 int64_t GetSteadyTimeNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -553,10 +565,16 @@ MetalCommandProcessor::~MetalCommandProcessor() {
 #if METAL_SHADER_CONVERTER_AVAILABLE
   {
     std::lock_guard<std::mutex> lock(draw_ring_mutex_);
+    FlushPendingDrawRingReleasesLocked();
     active_draw_ring_.reset();
     draw_ring_pool_.clear();
     command_buffer_draw_rings_.clear();
+    draw_ring_pool_total_bytes_ = 0;
+    draw_ring_pool_in_use_count_ = 0;
+    draw_ring_pool_wait_count_ = 0;
+    draw_ring_pool_timeout_count_ = 0;
   }
+  draw_ring_pool_cv_.notify_all();
   res_heap_ab_ = nullptr;
   smp_heap_ab_ = nullptr;
   cbv_heap_ab_ = nullptr;
@@ -1020,6 +1038,9 @@ void MetalCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
         "cache initialization");
     return;
   }
+  // Trace playback frame boundary: drop resolve-write tracking from previous
+  // frame before restoring a new snapshot.
+  ClearResolvedMemory();
   render_target_cache_->RestoreEdramSnapshot(snapshot);
 }
 
@@ -1054,17 +1075,98 @@ uint64_t MetalCommandProcessor::GetCompletedSubmission() const {
 
 void MetalCommandProcessor::MarkResolvedMemory(uint32_t base_ptr,
                                                uint32_t length) {
-  if (length == 0) return;
-  resolved_memory_ranges_.push_back({base_ptr, length});
+  if (length == 0) {
+    return;
+  }
+  constexpr uint64_t kAddressLimit =
+      uint64_t(std::numeric_limits<uint32_t>::max()) + 1ull;
+  uint64_t merged_base = base_ptr;
+  uint64_t merged_end =
+      std::min<uint64_t>(merged_base + uint64_t(length), kAddressLimit);
+  if (merged_end <= merged_base) {
+    return;
+  }
+
+  for (size_t i = 0; i < resolved_memory_ranges_.size();) {
+    const auto& range = resolved_memory_ranges_[i];
+    const uint64_t range_base = range.base;
+    const uint64_t range_end =
+        std::min<uint64_t>(range_base + uint64_t(range.length), kAddressLimit);
+    // Merge overlapping or adjacent ranges.
+    if (merged_end + 1 < range_base || range_end + 1 < merged_base) {
+      ++i;
+      continue;
+    }
+    merged_base = std::min(merged_base, range_base);
+    merged_end = std::max(merged_end, range_end);
+    resolved_memory_ranges_.erase(resolved_memory_ranges_.begin() + i);
+  }
+
+  const uint64_t merged_length_64 =
+      std::min<uint64_t>(merged_end - merged_base, kAddressLimit - merged_base);
+  if (!merged_length_64) {
+    return;
+  }
+  ResolvedRange merged_range = {uint32_t(merged_base), uint32_t(merged_length_64)};
+  auto insert_it = std::lower_bound(
+      resolved_memory_ranges_.begin(), resolved_memory_ranges_.end(),
+      merged_range, [](const ResolvedRange& lhs, const ResolvedRange& rhs) {
+        return lhs.base < rhs.base;
+      });
+  resolved_memory_ranges_.insert(insert_it, merged_range);
+
+  if (resolved_memory_ranges_.size() <= kResolvedMemoryRangesMax) {
+    return;
+  }
+
+  std::sort(resolved_memory_ranges_.begin(), resolved_memory_ranges_.end(),
+            [](const ResolvedRange& lhs, const ResolvedRange& rhs) {
+              return lhs.base < rhs.base;
+            });
+  while (resolved_memory_ranges_.size() > kResolvedMemoryRangesMax) {
+    size_t best_index = std::numeric_limits<size_t>::max();
+    uint64_t best_gap = std::numeric_limits<uint64_t>::max();
+    for (size_t i = 0; i + 1 < resolved_memory_ranges_.size(); ++i) {
+      const auto& left = resolved_memory_ranges_[i];
+      const auto& right = resolved_memory_ranges_[i + 1];
+      const uint64_t left_end = uint64_t(left.base) + uint64_t(left.length);
+      const uint64_t right_base = uint64_t(right.base);
+      const uint64_t gap = right_base > left_end ? right_base - left_end : 0;
+      if (gap < best_gap) {
+        best_gap = gap;
+        best_index = i;
+        if (!gap) {
+          break;
+        }
+      }
+    }
+    if (best_index == std::numeric_limits<size_t>::max()) {
+      break;
+    }
+    auto& left = resolved_memory_ranges_[best_index];
+    const auto& right = resolved_memory_ranges_[best_index + 1];
+    const uint64_t merged_base_64 =
+        std::min<uint64_t>(left.base, uint64_t(right.base));
+    const uint64_t merged_end_64 = std::max<uint64_t>(
+        uint64_t(left.base) + uint64_t(left.length),
+        uint64_t(right.base) + uint64_t(right.length));
+    const uint64_t merged_len_64 =
+        std::min<uint64_t>(merged_end_64 - merged_base_64,
+                           kAddressLimit - merged_base_64);
+    left.base = uint32_t(merged_base_64);
+    left.length = uint32_t(std::max<uint64_t>(1, merged_len_64));
+    resolved_memory_ranges_.erase(resolved_memory_ranges_.begin() + best_index +
+                                  1);
+  }
 }
 
 bool MetalCommandProcessor::IsResolvedMemory(uint32_t base_ptr,
                                              uint32_t length) const {
-  uint32_t end_ptr = base_ptr + length;
+  const uint64_t end_ptr = uint64_t(base_ptr) + uint64_t(length);
   for (const auto& range : resolved_memory_ranges_) {
-    uint32_t range_end = range.base + range.length;
+    const uint64_t range_end = uint64_t(range.base) + uint64_t(range.length);
     // Check if ranges overlap
-    if (base_ptr < range_end && end_ptr > range.base) {
+    if (uint64_t(base_ptr) < range_end && end_ptr > uint64_t(range.base)) {
       return true;
     }
   }
@@ -1159,6 +1261,15 @@ bool MetalCommandProcessor::SetupContext() {
     draw_ring_count_ = kMaxIosSpirvRingPages;
   }
 #endif
+#if METAL_SHADER_CONVERTER_AVAILABLE
+  draw_ring_pool_max_bytes_ =
+      std::max<uint64_t>(kDefaultDrawRingPoolMaxBytes,
+                         GetDrawRingAllocationSizeBytes());
+  draw_ring_pool_total_bytes_ = 0;
+  draw_ring_pool_in_use_count_ = 0;
+  draw_ring_pool_wait_count_ = 0;
+  draw_ring_pool_timeout_count_ = 0;
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   // Initialize shared memory
   shared_memory_ = std::make_unique<MetalSharedMemory>(*this, *memory_);
@@ -1338,8 +1449,25 @@ bool MetalCommandProcessor::SetupContext() {
   }
 
 #if METAL_SHADER_CONVERTER_AVAILABLE
-  auto ring = CreateDrawRingBuffers();
+  for (uint32_t i = 0; i < kDrawRingPoolPrewarmCount; ++i) {
+    auto pooled_ring = CreateDrawRingBuffers();
+    if (!pooled_ring) {
+      break;
+    }
+    std::lock_guard<std::mutex> lock(draw_ring_mutex_);
+    const uint64_t ring_bytes =
+        pooled_ring->total_bytes ? pooled_ring->total_bytes
+                                 : GetDrawRingAllocationSizeBytes();
+    if (draw_ring_pool_total_bytes_ + ring_bytes > draw_ring_pool_max_bytes_) {
+      break;
+    }
+    draw_ring_pool_total_bytes_ += ring_bytes;
+    draw_ring_pool_.push_back(std::move(pooled_ring));
+  }
+
+  auto ring = AcquireDrawRingBuffers();
   if (!ring) {
+    XELOGE("MetalCommandProcessor: failed to acquire initial draw ring");
     return false;
   }
   SetActiveDrawRing(ring);
@@ -1644,10 +1772,16 @@ void MetalCommandProcessor::ShutdownContext() {
 #if METAL_SHADER_CONVERTER_AVAILABLE
   {
     std::lock_guard<std::mutex> lock(draw_ring_mutex_);
+    FlushPendingDrawRingReleasesLocked();
     active_draw_ring_.reset();
     draw_ring_pool_.clear();
     command_buffer_draw_rings_.clear();
+    draw_ring_pool_total_bytes_ = 0;
+    draw_ring_pool_in_use_count_ = 0;
+    draw_ring_pool_wait_count_ = 0;
+    draw_ring_pool_timeout_count_ = 0;
   }
+  draw_ring_pool_cv_.notify_all();
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   if (texture_cache_) {
@@ -2232,6 +2366,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     primitive_processor_->EndFrame();
     frame_open_ = false;
   }
+  // Frame boundary reached - resolved memory tracking is only needed within a
+  // frame when trace playback writes memory.
+  ClearResolvedMemory();
   if (shared_memory_ && ::cvars::clear_memory_page_state) {
     shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
   }
@@ -2536,7 +2673,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     return cvars::metal_use_spirvcross;
   }
 #if METAL_SHADER_CONVERTER_AVAILABLE
-  EnsureDrawRingCapacity();
+  if (!EnsureDrawRingCapacity()) {
+    static std::atomic<int64_t> draw_ring_exhaustion_last_log_ns{0};
+    if (ShouldLogRateLimited(draw_ring_exhaustion_last_log_ns,
+                             kDrawRingPoolLogIntervalNs)) {
+      XELOGW("IssueDraw: skipping draw due to draw-ring pool exhaustion");
+    }
+    return true;
+  }
 #else
   if (cvars::metal_use_spirvcross && !EnsureSpirvUniformBufferCapacity()) {
     XELOGE(
@@ -5095,20 +5239,35 @@ void MetalCommandProcessor::BeginCommandBuffer() {
 }
 
 #if METAL_SHADER_CONVERTER_AVAILABLE
-void MetalCommandProcessor::EnsureDrawRingCapacity() {
-  if (current_draw_index_ < draw_ring_count_) {
-    return;
+bool MetalCommandProcessor::EnsureDrawRingCapacity() {
+  if (current_draw_index_ < draw_ring_count_ && active_draw_ring_) {
+    return true;
   }
 
   auto ring = AcquireDrawRingBuffers();
   if (!ring) {
-    XELOGE("Metal draw ring exhausted but failed to allocate a new ring");
-    return;
+    // If the pool is bounded and exhausted, split work into a new command
+    // buffer so completed submissions can recycle rings.
+    EndCommandBuffer();
+    BeginCommandBuffer();
+    if (!current_command_buffer_ || !current_render_encoder_) {
+      XELOGE("Metal draw ring exhausted and failed to begin a new command buffer");
+      return false;
+    }
+    if (current_draw_index_ < draw_ring_count_ && active_draw_ring_) {
+      return true;
+    }
+    ring = AcquireDrawRingBuffers();
+    if (!ring) {
+      XELOGE("Metal draw ring exhausted after command-buffer split");
+      return false;
+    }
   }
 
   SetActiveDrawRing(ring);
   command_buffer_draw_rings_.push_back(ring);
   current_draw_index_ = 0;
+  return true;
 }
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
@@ -7375,6 +7534,31 @@ bool MetalCommandProcessor::CreateIRConverterBuffers() {
   return res_heap_ab_ && smp_heap_ab_ && uniforms_buffer_;
 }
 
+uint64_t MetalCommandProcessor::GetDrawRingAllocationSizeBytes() const {
+  const uint64_t descriptor_table_count =
+      uint64_t(kStageCount) * uint64_t(std::max<size_t>(1, draw_ring_count_));
+  const uint64_t resource_heap_slots =
+      uint64_t(kResourceHeapSlotsPerTable) * descriptor_table_count;
+  const uint64_t resource_heap_slots_total = resource_heap_slots * 2;
+  const uint64_t resource_heap_bytes =
+      resource_heap_slots_total * uint64_t(sizeof(IRDescriptorTableEntry));
+  const uint64_t sampler_heap_slots =
+      uint64_t(kSamplerHeapSlotsPerTable) * descriptor_table_count;
+  const uint64_t sampler_heap_bytes =
+      sampler_heap_slots * uint64_t(sizeof(IRDescriptorTableEntry));
+  const uint64_t uniforms_buffer_size =
+      uint64_t(kUniformsBytesPerTable) * descriptor_table_count;
+  const uint64_t top_level_ab_total_bytes =
+      uint64_t(kTopLevelABBytesPerTable) * descriptor_table_count;
+  const uint64_t draw_args_size = 64;
+  const uint64_t cbv_heap_slots =
+      uint64_t(kCbvHeapSlotsPerTable) * descriptor_table_count;
+  const uint64_t cbv_heap_bytes =
+      cbv_heap_slots * uint64_t(sizeof(IRDescriptorTableEntry));
+  return resource_heap_bytes + sampler_heap_bytes + uniforms_buffer_size +
+         top_level_ab_total_bytes + draw_args_size + cbv_heap_bytes;
+}
+
 std::shared_ptr<MetalCommandProcessor::DrawRingBuffers>
 MetalCommandProcessor::CreateDrawRingBuffers() {
   if (!device_) {
@@ -7407,6 +7591,7 @@ MetalCommandProcessor::CreateDrawRingBuffers() {
   const size_t kDrawArgsSize = 64;  // Enough for draw arguments struct
   const size_t kCBVHeapSlots = kCbvHeapSlotsPerTable * kDescriptorTableCount;
   const size_t kCBVHeapBytes = kCBVHeapSlots * sizeof(IRDescriptorTableEntry);
+  ring->total_bytes = GetDrawRingAllocationSizeBytes();
 
   ring->res_heap_ab =
       device_->newBuffer(kResourceHeapBytes, MTL::ResourceStorageModeShared);
@@ -7506,13 +7691,64 @@ MetalCommandProcessor::CreateDrawRingBuffers() {
 
 std::shared_ptr<MetalCommandProcessor::DrawRingBuffers>
 MetalCommandProcessor::AcquireDrawRingBuffers() {
-  std::lock_guard<std::mutex> lock(draw_ring_mutex_);
-  if (!draw_ring_pool_.empty()) {
-    auto ring = draw_ring_pool_.back();
-    draw_ring_pool_.pop_back();
+  const uint64_t ring_bytes = GetDrawRingAllocationSizeBytes();
+  if (!ring_bytes) {
+    return nullptr;
+  }
+
+  for (;;) {
+    bool reserve_allocation = false;
+    {
+      std::unique_lock<std::mutex> lock(draw_ring_mutex_);
+      if (!draw_ring_pool_.empty()) {
+        auto ring = draw_ring_pool_.back();
+        draw_ring_pool_.pop_back();
+        ++draw_ring_pool_in_use_count_;
+        return ring;
+      }
+      if (draw_ring_pool_total_bytes_ + ring_bytes <= draw_ring_pool_max_bytes_) {
+        draw_ring_pool_total_bytes_ += ring_bytes;
+        reserve_allocation = true;
+      } else {
+        ++draw_ring_pool_wait_count_;
+        if (!draw_ring_pool_cv_.wait_for(
+                lock, std::chrono::milliseconds(kDrawRingPoolWaitTimeoutMs),
+                [&]() { return !draw_ring_pool_.empty(); })) {
+          ++draw_ring_pool_timeout_count_;
+          if (ShouldLogRateLimited(draw_ring_pool_last_log_ns_,
+                                   kDrawRingPoolLogIntervalNs)) {
+            XELOGW(
+                "Metal draw-ring pool timed out (limit={} MiB, total={} MiB, "
+                "in_use={}, waits={}, timeouts={})",
+                draw_ring_pool_max_bytes_ / (1024ull * 1024ull),
+                draw_ring_pool_total_bytes_ / (1024ull * 1024ull),
+                draw_ring_pool_in_use_count_, draw_ring_pool_wait_count_,
+                draw_ring_pool_timeout_count_);
+          }
+          return nullptr;
+        }
+      }
+    }
+
+    if (!reserve_allocation) {
+      continue;
+    }
+    auto ring = CreateDrawRingBuffers();
+    if (!ring) {
+      std::lock_guard<std::mutex> lock(draw_ring_mutex_);
+      draw_ring_pool_total_bytes_ -= ring_bytes;
+      draw_ring_pool_cv_.notify_all();
+      return nullptr;
+    }
+    if (!ring->total_bytes) {
+      ring->total_bytes = ring_bytes;
+    }
+    {
+      std::lock_guard<std::mutex> lock(draw_ring_mutex_);
+      ++draw_ring_pool_in_use_count_;
+    }
     return ring;
   }
-  return CreateDrawRingBuffers();
 }
 
 void MetalCommandProcessor::SetActiveDrawRing(
@@ -7540,6 +7776,20 @@ void MetalCommandProcessor::EnsureActiveDrawRing() {
   }
 }
 
+void MetalCommandProcessor::FlushPendingDrawRingReleasesLocked() {
+  for (auto& [command_buffer, rings] : pending_draw_ring_releases_) {
+    if (draw_ring_pool_in_use_count_ >= rings.size()) {
+      draw_ring_pool_in_use_count_ -= uint32_t(rings.size());
+    } else {
+      draw_ring_pool_in_use_count_ = 0;
+    }
+    for (auto& ring : rings) {
+      draw_ring_pool_.push_back(std::move(ring));
+    }
+  }
+  pending_draw_ring_releases_.clear();
+}
+
 void MetalCommandProcessor::ScheduleDrawRingRelease(
     MTL::CommandBuffer* command_buffer) {
   if (!command_buffer || command_buffer_draw_rings_.empty()) {
@@ -7561,16 +7811,26 @@ void MetalCommandProcessor::ScheduleDrawRingRelease(
     pending_completion_handlers_.fetch_add(1, std::memory_order_relaxed);
     command_buffer->addCompletedHandler(
         [this](MTL::CommandBuffer* completed_cmd) {
-          std::lock_guard<std::mutex> lock(draw_ring_mutex_);
-          auto it = pending_draw_ring_releases_.find(completed_cmd);
-          if (it == pending_draw_ring_releases_.end()) {
-            pending_completion_handlers_.fetch_sub(1, std::memory_order_relaxed);
-            return;
+          bool notify_waiters = false;
+          {
+            std::lock_guard<std::mutex> lock(draw_ring_mutex_);
+            auto it = pending_draw_ring_releases_.find(completed_cmd);
+            if (it != pending_draw_ring_releases_.end()) {
+              if (draw_ring_pool_in_use_count_ >= it->second.size()) {
+                draw_ring_pool_in_use_count_ -= uint32_t(it->second.size());
+              } else {
+                draw_ring_pool_in_use_count_ = 0;
+              }
+              for (auto& ring : it->second) {
+                draw_ring_pool_.push_back(std::move(ring));
+              }
+              pending_draw_ring_releases_.erase(it);
+              notify_waiters = true;
+            }
           }
-          for (auto& ring : it->second) {
-            draw_ring_pool_.push_back(std::move(ring));
+          if (notify_waiters) {
+            draw_ring_pool_cv_.notify_all();
           }
-          pending_draw_ring_releases_.erase(it);
           pending_completion_handlers_.fetch_sub(1, std::memory_order_relaxed);
         });
   }

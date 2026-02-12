@@ -168,7 +168,7 @@ class MetalCommandProcessor : public CommandProcessor {
   void EndCommandBuffer();
   void WaitForPendingCompletionHandlers();
   void ProcessCompletedSubmissions();
-  void EnsureDrawRingCapacity();
+  bool EnsureDrawRingCapacity();
   void UseRenderEncoderAttachmentHeaps(MTL::RenderPassDescriptor* descriptor);
   void UseRenderEncoderHeap(MTL::Heap* heap);
 #if !METAL_SHADER_CONVERTER_AVAILABLE
@@ -238,6 +238,7 @@ class MetalCommandProcessor : public CommandProcessor {
     MTL::Buffer* uniforms_buffer = nullptr;
     MTL::Buffer* top_level_ab = nullptr;
     MTL::Buffer* draw_args_buffer = nullptr;
+    uint64_t total_bytes = 0;
 
     ~DrawRingBuffers();
   };
@@ -322,10 +323,12 @@ class MetalCommandProcessor : public CommandProcessor {
   bool CreateIRConverterBuffers();
   void PopulateIRConverterBuffers();
   std::shared_ptr<DrawRingBuffers> CreateDrawRingBuffers();
+  uint64_t GetDrawRingAllocationSizeBytes() const;
   std::shared_ptr<DrawRingBuffers> AcquireDrawRingBuffers();
   void SetActiveDrawRing(const std::shared_ptr<DrawRingBuffers>& ring);
   void EnsureActiveDrawRing();
   void ScheduleDrawRingRelease(MTL::CommandBuffer* command_buffer);
+  void FlushPendingDrawRingReleasesLocked();
 
   // System constants population (mirrors D3D12 implementation)
   void UpdateSystemConstantValues(bool shared_memory_is_uav,
@@ -619,6 +622,13 @@ class MetalCommandProcessor : public CommandProcessor {
                      std::vector<std::shared_ptr<DrawRingBuffers>>>
       pending_draw_ring_releases_;
   std::mutex draw_ring_mutex_;
+  std::condition_variable draw_ring_pool_cv_;
+  uint64_t draw_ring_pool_max_bytes_ = 0;
+  uint64_t draw_ring_pool_total_bytes_ = 0;
+  uint32_t draw_ring_pool_in_use_count_ = 0;
+  uint64_t draw_ring_pool_wait_count_ = 0;
+  uint64_t draw_ring_pool_timeout_count_ = 0;
+  std::atomic<int64_t> draw_ring_pool_last_log_ns_{0};
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   MTL::Library* depth_only_pixel_library_ = nullptr;
