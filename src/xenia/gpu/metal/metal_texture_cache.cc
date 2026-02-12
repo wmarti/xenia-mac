@@ -1009,8 +1009,30 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
 
   bool use_upload_batch =
       use_blit_upload && upload_batch_command_buffer_ &&
-      !texture_resolution_scaled &&
       command_processor_ && !command_processor_->GetCurrentCommandBuffer();
+  if (use_upload_batch && texture_resolution_scaled) {
+    bool needs_base_scaled_range = false;
+    bool needs_mips_scaled_range = false;
+    for (const StoredLevelHostLayout& stored_level : stored_levels) {
+      if (stored_level.is_base) {
+        needs_base_scaled_range = true;
+      } else {
+        needs_mips_scaled_range = true;
+      }
+    }
+    if (needs_base_scaled_range &&
+        !IsScaledResolveRangeResident(base_guest_address,
+                                      texture.GetGuestBaseSize(),
+                                      load_shader_info.source_bpe_log2)) {
+      use_upload_batch = false;
+    }
+    if (use_upload_batch && needs_mips_scaled_range &&
+        !IsScaledResolveRangeResident(mips_guest_address,
+                                      texture.GetGuestMipsSize(),
+                                      load_shader_info.source_bpe_log2)) {
+      use_upload_batch = false;
+    }
+  }
 
   ScopedAutoreleasePool autorelease_pool;
   MTL::CommandBuffer* cmd =
@@ -2896,6 +2918,39 @@ bool MetalTextureCache::GetScaledResolveRange(
   start_scaled_out = start_scaled;
   length_scaled_out = end_scaled - start_scaled + 1;
   return true;
+}
+
+bool MetalTextureCache::IsScaledResolveRangeResident(
+    uint32_t start_unscaled, uint32_t length_unscaled,
+    uint32_t length_scaled_alignment_log2) const {
+  if (!IsDrawResolutionScaled() || !length_unscaled) {
+    return false;
+  }
+
+  uint64_t start_scaled = 0;
+  uint64_t length_scaled = 0;
+  if (!GetScaledResolveRange(start_unscaled, length_unscaled,
+                             length_scaled_alignment_log2, start_scaled,
+                             length_scaled) ||
+      !length_scaled) {
+    return false;
+  }
+
+  for (const ScaledResolveBuffer& buffer : scaled_resolve_buffers_) {
+    if (!buffer.buffer || !buffer.length_scaled ||
+        start_scaled < buffer.base_scaled) {
+      continue;
+    }
+    uint64_t buffer_offset = start_scaled - buffer.base_scaled;
+    if (buffer_offset > buffer.length_scaled) {
+      continue;
+    }
+    uint64_t buffer_remaining = buffer.length_scaled - buffer_offset;
+    if (length_scaled <= buffer_remaining) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool MetalTextureCache::EnsureScaledResolveBufferRange(uint64_t start_scaled,

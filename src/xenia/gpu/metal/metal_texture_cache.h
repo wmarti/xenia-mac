@@ -228,6 +228,9 @@ class MetalTextureCache : public TextureCache {
                              uint32_t length_scaled_alignment_log2,
                              uint64_t& start_scaled_out,
                              uint64_t& length_scaled_out) const;
+  bool IsScaledResolveRangeResident(
+      uint32_t start_unscaled, uint32_t length_unscaled,
+      uint32_t length_scaled_alignment_log2) const;
   bool EnsureScaledResolveBufferRange(uint64_t start_scaled,
                                       uint64_t length_scaled);
   void ClearScaledResolveBuffers();
