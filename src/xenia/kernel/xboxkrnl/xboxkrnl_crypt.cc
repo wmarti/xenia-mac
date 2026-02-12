@@ -419,10 +419,9 @@ dword_result_t XeCryptBnQwNeRsaPubCrypt_entry(pointer_t<uint64_t> qw_a,
                                               pointer_t<XECRYPT_RSA> rsa) {
   // 0 indicates failure (but not a BOOL return value)
 #ifndef XE_PLATFORM_WIN32
-  XELOGE(
+  XELOGW(
       "XeCryptBnQwNeRsaPubCrypt called but no implementation available for "
       "this platform!");
-  assert_always();
   return 1;
 #else
   uint32_t modulus_size = rsa->size * 8;
