@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <dispatch/dispatch.h>
@@ -32,6 +33,7 @@
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
+#include "xenia/gpu/metal/msl_bindings.h"
 #include "xenia/gpu/metal/msl_shader.h"
 #include "xenia/gpu/spirv_shader_translator.h"
 #if METAL_SHADER_CONVERTER_AVAILABLE
@@ -650,6 +652,32 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t msl_bound_pixel_texture_count_ = 0;
   uint32_t msl_bound_vertex_sampler_count_ = 0;
   uint32_t msl_bound_pixel_sampler_count_ = 0;
+  std::array<MTL::Texture*, MslTextureIndex::kMaxPerStage>
+      msl_bound_vertex_textures_{};
+  std::array<MTL::Texture*, MslTextureIndex::kMaxPerStage>
+      msl_bound_pixel_textures_{};
+  std::array<MTL::SamplerState*, MslSamplerIndex::kMaxPerStage>
+      msl_bound_vertex_samplers_{};
+  std::array<MTL::SamplerState*, MslSamplerIndex::kMaxPerStage>
+      msl_bound_pixel_samplers_{};
+  MTL::Buffer* msl_bound_shared_memory_buffer_ = nullptr;
+  MTL::Buffer* msl_bound_null_buffer_ = nullptr;
+  MTL::RenderPipelineState* msl_bound_pipeline_state_ = nullptr;
+  bool msl_viewport_valid_ = false;
+  MTL::Viewport msl_viewport_ = {};
+  bool msl_scissor_valid_ = false;
+  MTL::ScissorRect msl_scissor_ = {};
+  bool msl_rasterizer_state_valid_ = false;
+  MTL::CullMode msl_cull_mode_ = MTL::CullModeNone;
+  MTL::Winding msl_winding_ = MTL::WindingClockwise;
+  MTL::TriangleFillMode msl_fill_mode_ = MTL::TriangleFillModeFill;
+  float msl_depth_bias_constant_ = 0.0f;
+  float msl_depth_bias_slope_ = 0.0f;
+  float msl_depth_bias_clamp_ = 0.0f;
+  MTL::DepthClipMode msl_depth_clip_mode_ = MTL::DepthClipModeClip;
+  MTL::DepthStencilState* msl_depth_stencil_state_ = nullptr;
+  bool msl_stencil_reference_valid_ = false;
+  uint32_t msl_stencil_reference_ = 0;
 
   // Fixed-function dynamic state cached per render encoder.
   float ff_blend_factor_[4] = {0.0f, 0.0f, 0.0f, 0.0f};

@@ -876,6 +876,21 @@ MTL::RenderPipelineState* MetalCommandProcessor::CreateMslPipelineState(
     }
   }
 
+#if METAL_SHADER_CONVERTER_AVAILABLE
+  if (pipeline_binary_archive_) {
+    NS::Array* archives = NS::Array::array(pipeline_binary_archive_);
+    desc->setBinaryArchives(archives);
+    NS::Error* archive_error = nullptr;
+    if (pipeline_binary_archive_->addRenderPipelineFunctions(desc,
+                                                             &archive_error)) {
+      pipeline_binary_archive_dirty_ = true;
+    } else if (archive_error && archive_error->localizedDescription()) {
+      XELOGW("SPIRV-Cross: binary archive registration failed: {}",
+             archive_error->localizedDescription()->utf8String());
+    }
+  }
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
+
   NS::Error* error = nullptr;
   MTL::RenderPipelineState* pipeline =
       device_->newRenderPipelineState(desc, &error);
@@ -4226,11 +4241,21 @@ bool MetalCommandProcessor::IssueDrawMsl(
     mtl_scissor.y = scissor.offset[1];
     mtl_scissor.width = scissor.extent[0];
     mtl_scissor.height = scissor.extent[1];
-    current_render_encoder_->setScissorRect(mtl_scissor);
+    if (!msl_scissor_valid_ || msl_scissor_.x != mtl_scissor.x ||
+        msl_scissor_.y != mtl_scissor.y ||
+        msl_scissor_.width != mtl_scissor.width ||
+        msl_scissor_.height != mtl_scissor.height) {
+      current_render_encoder_->setScissorRect(mtl_scissor);
+      msl_scissor_ = mtl_scissor;
+      msl_scissor_valid_ = true;
+    }
   }
 
   // Apply fixed-function state.
-  current_render_encoder_->setRenderPipelineState(pipeline);
+  if (msl_bound_pipeline_state_ != pipeline) {
+    current_render_encoder_->setRenderPipelineState(pipeline);
+    msl_bound_pipeline_state_ = pipeline;
+  }
   ApplyRasterizerState(primitive_polygonal);
   ApplyDepthStencilState(primitive_polygonal, normalized_depth_control);
 
@@ -4272,17 +4297,25 @@ bool MetalCommandProcessor::IssueDrawMsl(
       uniforms_base + table_index_vertex * kUniformsBytesPerTable;
   uint8_t* uniforms_pixel =
       uniforms_base + table_index_pixel * kUniformsBytesPerTable;
+  auto copy_uniform_block_if_changed = [](void* dst, const void* src,
+                                          size_t size) {
+    if (std::memcmp(dst, src, size) != 0) {
+      std::memcpy(dst, src, size);
+    }
+  };
 
   // b0 (msl_buffer 1): System constants.
-  std::memcpy(uniforms_vertex, &spirv_system_constants_,
-              sizeof(SpirvShaderTranslator::SystemConstants));
-  std::memcpy(uniforms_pixel, &spirv_system_constants_,
-              sizeof(SpirvShaderTranslator::SystemConstants));
+  copy_uniform_block_if_changed(
+      uniforms_vertex, &spirv_system_constants_,
+      sizeof(SpirvShaderTranslator::SystemConstants));
+  copy_uniform_block_if_changed(
+      uniforms_pixel, &spirv_system_constants_,
+      sizeof(SpirvShaderTranslator::SystemConstants));
 
   // b1 (msl_buffer 2/3): Float constants.
   // SpirvShaderTranslator uses packed float constants like Vulkan.
   const size_t kFloatConstantOffset = 1 * kCBVSize;
-  auto write_packed_float_constants = [&](uint8_t* dst, const Shader& shader,
+  auto build_packed_float_constants = [&](uint8_t* dst, const Shader& shader,
                                           uint32_t regs_base) {
     std::memset(dst, 0, kCBVSize);
     const Shader::ConstantRegisterMap& map = shader.constant_register_map();
@@ -4305,51 +4338,63 @@ bool MetalCommandProcessor::IssueDrawMsl(
       }
     }
   };
-  write_packed_float_constants(uniforms_vertex + kFloatConstantOffset,
-                               *msl_vertex_shader,
+  std::array<uint8_t, kCBVSize> float_constants_vertex = {};
+  build_packed_float_constants(float_constants_vertex.data(), *msl_vertex_shader,
                                XE_GPU_REG_SHADER_CONSTANT_000_X);
+  copy_uniform_block_if_changed(uniforms_vertex + kFloatConstantOffset,
+                                float_constants_vertex.data(), kCBVSize);
   if (msl_pixel_shader) {
-    write_packed_float_constants(uniforms_pixel + kFloatConstantOffset,
-                                 *msl_pixel_shader,
+    std::array<uint8_t, kCBVSize> float_constants_pixel = {};
+    build_packed_float_constants(float_constants_pixel.data(), *msl_pixel_shader,
                                  XE_GPU_REG_SHADER_CONSTANT_256_X);
+    copy_uniform_block_if_changed(uniforms_pixel + kFloatConstantOffset,
+                                  float_constants_pixel.data(), kCBVSize);
   } else {
-    std::memset(uniforms_pixel + kFloatConstantOffset, 0, kCBVSize);
+    std::array<uint8_t, kCBVSize> float_constants_pixel = {};
+    copy_uniform_block_if_changed(uniforms_pixel + kFloatConstantOffset,
+                                  float_constants_pixel.data(), kCBVSize);
   }
 
   // b2 (msl_buffer 4): Bool/loop constants.
   const size_t kBoolLoopConstantOffset = 2 * kCBVSize;
   constexpr size_t kBoolLoopConstantsSize = (8 + 32) * sizeof(uint32_t);
-  std::memcpy(uniforms_vertex + kBoolLoopConstantOffset,
-              &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
-              kBoolLoopConstantsSize);
-  std::memcpy(uniforms_pixel + kBoolLoopConstantOffset,
-              &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
-              kBoolLoopConstantsSize);
+  copy_uniform_block_if_changed(
+      uniforms_vertex + kBoolLoopConstantOffset,
+      &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
+      kBoolLoopConstantsSize);
+  copy_uniform_block_if_changed(
+      uniforms_pixel + kBoolLoopConstantOffset,
+      &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
+      kBoolLoopConstantsSize);
 
   // b3 (msl_buffer 5): Fetch constants.
   const size_t kFetchConstantOffset = 3 * kCBVSize;
   const size_t kFetchConstantCount = xenos::kTextureFetchConstantCount * 6;
-  std::memcpy(uniforms_vertex + kFetchConstantOffset,
-              &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
-              kFetchConstantCount * sizeof(uint32_t));
-  std::memcpy(uniforms_pixel + kFetchConstantOffset,
-              &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
-              kFetchConstantCount * sizeof(uint32_t));
+  copy_uniform_block_if_changed(
+      uniforms_vertex + kFetchConstantOffset,
+      &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
+      kFetchConstantCount * sizeof(uint32_t));
+  copy_uniform_block_if_changed(
+      uniforms_pixel + kFetchConstantOffset,
+      &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
+      kFetchConstantCount * sizeof(uint32_t));
 
   // b5 (msl_buffer 6): Clip plane constants (separate buffer for SPIR-V path).
   const size_t kClipPlaneConstantOffset = 4 * kCBVSize;
-  std::memcpy(uniforms_vertex + kClipPlaneConstantOffset,
-              &spirv_clip_plane_constants_,
-              sizeof(SpirvShaderTranslator::ClipPlaneConstants));
+  copy_uniform_block_if_changed(
+      uniforms_vertex + kClipPlaneConstantOffset, &spirv_clip_plane_constants_,
+      sizeof(SpirvShaderTranslator::ClipPlaneConstants));
 
   // b6 (msl_buffer 7): Tessellation constants.
   const size_t kTessellationConstantOffset = 5 * kCBVSize;
-  std::memcpy(uniforms_vertex + kTessellationConstantOffset,
-              &spirv_tessellation_constants_,
-              sizeof(SpirvShaderTranslator::TessellationConstants));
-  std::memcpy(uniforms_pixel + kTessellationConstantOffset,
-              &spirv_tessellation_constants_,
-              sizeof(SpirvShaderTranslator::TessellationConstants));
+  copy_uniform_block_if_changed(
+      uniforms_vertex + kTessellationConstantOffset,
+      &spirv_tessellation_constants_,
+      sizeof(SpirvShaderTranslator::TessellationConstants));
+  copy_uniform_block_if_changed(
+      uniforms_pixel + kTessellationConstantOffset,
+      &spirv_tessellation_constants_,
+      sizeof(SpirvShaderTranslator::TessellationConstants));
 
   // Bind shared memory buffer at msl_buffer 0.
   MTL::Buffer* shared_mem_buffer =
@@ -4357,11 +4402,20 @@ bool MetalCommandProcessor::IssueDrawMsl(
   MTL::ResourceUsage shared_memory_usage =
       MTL::ResourceUsageRead | MTL::ResourceUsageWrite;
   if (shared_mem_buffer) {
-    current_render_encoder_->setVertexBuffer(shared_mem_buffer, 0,
-                                             MslBufferIndex::kSharedMemory);
-    current_render_encoder_->setFragmentBuffer(shared_mem_buffer, 0,
+    if (msl_bound_shared_memory_buffer_ != shared_mem_buffer) {
+      current_render_encoder_->setVertexBuffer(shared_mem_buffer, 0,
                                                MslBufferIndex::kSharedMemory);
+      current_render_encoder_->setFragmentBuffer(shared_mem_buffer, 0,
+                                                 MslBufferIndex::kSharedMemory);
+      msl_bound_shared_memory_buffer_ = shared_mem_buffer;
+    }
     UseRenderEncoderResource(shared_mem_buffer, shared_memory_usage);
+  } else if (msl_bound_shared_memory_buffer_) {
+    current_render_encoder_->setVertexBuffer(nullptr, 0,
+                                             MslBufferIndex::kSharedMemory);
+    current_render_encoder_->setFragmentBuffer(nullptr, 0,
+                                               MslBufferIndex::kSharedMemory);
+    msl_bound_shared_memory_buffer_ = nullptr;
   }
 
   // Bind a null buffer at the EDRAM slot (msl_buffer 30) as a safety measure.
@@ -4369,7 +4423,13 @@ bool MetalCommandProcessor::IssueDrawMsl(
   // false), so no shader should reference it, but binding a dummy prevents
   // GPU faults if any code path unexpectedly accesses buffer(30).
   if (null_buffer_) {
-    current_render_encoder_->setFragmentBuffer(null_buffer_, 0, 30);
+    if (msl_bound_null_buffer_ != null_buffer_) {
+      current_render_encoder_->setFragmentBuffer(null_buffer_, 0, 30);
+      msl_bound_null_buffer_ = null_buffer_;
+    }
+  } else if (msl_bound_null_buffer_) {
+    current_render_encoder_->setFragmentBuffer(nullptr, 0, 30);
+    msl_bound_null_buffer_ = nullptr;
   }
 
   // Bind uniforms buffer at the appropriate indices.
@@ -4438,13 +4498,25 @@ bool MetalCommandProcessor::IssueDrawMsl(
     };
     auto clear_slots_from = [&](uint32_t start, uint32_t end_exclusive) {
       for (uint32_t slot = start; slot < end_exclusive; ++slot) {
-        bind_texture_slot(slot, nullptr);
+        if (is_pixel_stage) {
+          if (msl_bound_pixel_textures_[slot] != nullptr) {
+            bind_texture_slot(slot, nullptr);
+            msl_bound_pixel_textures_[slot] = nullptr;
+          }
+        } else {
+          if (msl_bound_vertex_textures_[slot] != nullptr) {
+            bind_texture_slot(slot, nullptr);
+            msl_bound_vertex_textures_[slot] = nullptr;
+          }
+        }
       }
     };
 
     uint32_t* previous_bound_count = is_pixel_stage
                                          ? &msl_bound_pixel_texture_count_
                                          : &msl_bound_vertex_texture_count_;
+    auto& bound_textures = is_pixel_stage ? msl_bound_pixel_textures_
+                                          : msl_bound_vertex_textures_;
 
     if (!shader || !translation || !texture_cache_) {
       clear_slots_from(0, *previous_bound_count);
@@ -4457,10 +4529,10 @@ bool MetalCommandProcessor::IssueDrawMsl(
         translation->texture_binding_indices_for_msl_slots();
     uint32_t bound_count = std::min(uint32_t(texture_binding_indices.size()),
                                     MslTextureIndex::kMaxPerStage);
+    uint32_t previous_bound_count_value = *previous_bound_count;
     if (*previous_bound_count > bound_count) {
       clear_slots_from(bound_count, *previous_bound_count);
     }
-    *previous_bound_count = bound_count;
 
     MetalTextureCache* metal_texture_cache = texture_cache_.get();
     for (uint32_t slot = 0; slot < bound_count; ++slot) {
@@ -4488,11 +4560,15 @@ bool MetalCommandProcessor::IssueDrawMsl(
       } else {
         texture = metal_texture_cache->GetNullTexture2D();
       }
-      bind_texture_slot(tex_index, texture);
+      if (slot >= previous_bound_count_value || bound_textures[slot] != texture) {
+        bind_texture_slot(tex_index, texture);
+        bound_textures[slot] = texture;
+      }
       if (texture) {
         UseRenderEncoderResource(texture, MTL::ResourceUsageRead);
       }
     }
+    *previous_bound_count = bound_count;
   };
 
   auto bind_msl_samplers = [&](MslShader* shader,
@@ -4509,10 +4585,15 @@ bool MetalCommandProcessor::IssueDrawMsl(
     uint32_t* previous_bound_count = is_pixel_stage
                                          ? &msl_bound_pixel_sampler_count_
                                          : &msl_bound_vertex_sampler_count_;
+    auto& bound_samplers = is_pixel_stage ? msl_bound_pixel_samplers_
+                                          : msl_bound_vertex_samplers_;
 
     if (!shader || !translation || !texture_cache_) {
       for (uint32_t slot = 0; slot < *previous_bound_count; ++slot) {
-        bind_sampler_slot(slot, null_sampler_);
+        if (bound_samplers[slot] != null_sampler_) {
+          bind_sampler_slot(slot, null_sampler_);
+          bound_samplers[slot] = null_sampler_;
+        }
       }
       *previous_bound_count = 0;
       return;
@@ -4526,12 +4607,15 @@ bool MetalCommandProcessor::IssueDrawMsl(
         translation->sampler_binding_indices_for_msl_slots();
     uint32_t bound_count = std::min(uint32_t(sampler_binding_indices.size()),
                                     MslSamplerIndex::kMaxPerStage);
+    uint32_t previous_bound_count_value = *previous_bound_count;
     if (*previous_bound_count > bound_count) {
       for (uint32_t slot = bound_count; slot < *previous_bound_count; ++slot) {
-        bind_sampler_slot(slot, null_sampler_);
+        if (bound_samplers[slot] != null_sampler_) {
+          bind_sampler_slot(slot, null_sampler_);
+          bound_samplers[slot] = null_sampler_;
+        }
       }
     }
-    *previous_bound_count = bound_count;
 
     for (uint32_t smp_index = 0; smp_index < bound_count; ++smp_index) {
       MTL::SamplerState* sampler_state = null_sampler_;
@@ -4544,8 +4628,13 @@ bool MetalCommandProcessor::IssueDrawMsl(
           sampler_state = null_sampler_;
         }
       }
-      bind_sampler_slot(smp_index, sampler_state);
+      if (smp_index >= previous_bound_count_value ||
+          bound_samplers[smp_index] != sampler_state) {
+        bind_sampler_slot(smp_index, sampler_state);
+        bound_samplers[smp_index] = sampler_state;
+      }
     }
+    *previous_bound_count = bound_count;
   };
 
   bind_msl_textures(msl_vertex_shader, vertex_translation, false);
@@ -5141,6 +5230,19 @@ void MetalCommandProcessor::EndRenderEncoder() {
   msl_bound_pixel_texture_count_ = 0;
   msl_bound_vertex_sampler_count_ = 0;
   msl_bound_pixel_sampler_count_ = 0;
+  msl_bound_vertex_textures_.fill(nullptr);
+  msl_bound_pixel_textures_.fill(nullptr);
+  msl_bound_vertex_samplers_.fill(nullptr);
+  msl_bound_pixel_samplers_.fill(nullptr);
+  msl_bound_shared_memory_buffer_ = nullptr;
+  msl_bound_null_buffer_ = nullptr;
+  msl_bound_pipeline_state_ = nullptr;
+  msl_viewport_valid_ = false;
+  msl_scissor_valid_ = false;
+  msl_rasterizer_state_valid_ = false;
+  msl_depth_stencil_state_ = nullptr;
+  msl_stencil_reference_valid_ = false;
+  msl_stencil_reference_ = 0;
   ResetRenderEncoderResourceUsage();
 }
 
@@ -5694,7 +5796,10 @@ void MetalCommandProcessor::ApplyDepthStencilState(
     depth_stencil_state_cache_.emplace(key, state);
   }
 
-  current_render_encoder_->setDepthStencilState(state);
+  if (msl_depth_stencil_state_ != state) {
+    current_render_encoder_->setDepthStencilState(state);
+    msl_depth_stencil_state_ = state;
+  }
 
   if (depth_control.stencil_enable) {
     uint32_t ref_front = stencil_ref_mask_front.stencilref;
@@ -5716,7 +5821,14 @@ void MetalCommandProcessor::ApplyDepthStencilState(
             ref_front, ref_back);
       }
     }
-    current_render_encoder_->setStencilReferenceValue(ref);
+    if (!msl_stencil_reference_valid_ || msl_stencil_reference_ != ref) {
+      current_render_encoder_->setStencilReferenceValue(ref);
+      msl_stencil_reference_ = ref;
+      msl_stencil_reference_valid_ = true;
+    }
+  } else {
+    msl_stencil_reference_valid_ = false;
+    msl_stencil_reference_ = 0;
   }
 }
 
@@ -5739,11 +5851,17 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
       cull_mode = MTL::CullModeBack;
     }
   }
-  current_render_encoder_->setCullMode(cull_mode);
+  if (!msl_rasterizer_state_valid_ || msl_cull_mode_ != cull_mode) {
+    current_render_encoder_->setCullMode(cull_mode);
+    msl_cull_mode_ = cull_mode;
+  }
 
-  current_render_encoder_->setFrontFacingWinding(
-      pa_su_sc_mode_cntl.face ? MTL::WindingClockwise
-                              : MTL::WindingCounterClockwise);
+  MTL::Winding winding = pa_su_sc_mode_cntl.face ? MTL::WindingClockwise
+                                                 : MTL::WindingCounterClockwise;
+  if (!msl_rasterizer_state_valid_ || msl_winding_ != winding) {
+    current_render_encoder_->setFrontFacingWinding(winding);
+    msl_winding_ = winding;
+  }
 
   MTL::TriangleFillMode fill_mode = MTL::TriangleFillModeFill;
   if (primitive_polygonal &&
@@ -5761,7 +5879,10 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
       fill_mode = MTL::TriangleFillModeLines;
     }
   }
-  current_render_encoder_->setTriangleFillMode(fill_mode);
+  if (!msl_rasterizer_state_valid_ || msl_fill_mode_ != fill_mode) {
+    current_render_encoder_->setTriangleFillMode(fill_mode);
+    msl_fill_mode_ = fill_mode;
+  }
 
   float polygon_offset_scale = 0.0f;
   float polygon_offset = 0.0f;
@@ -5776,12 +5897,25 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
       polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit *
       float(std::max(render_target_cache_->draw_resolution_scale_x(),
                      render_target_cache_->draw_resolution_scale_y()));
-  current_render_encoder_->setDepthBias(depth_bias_constant, depth_bias_slope,
-                                        0.0f);
+  if (!msl_rasterizer_state_valid_ ||
+      msl_depth_bias_constant_ != depth_bias_constant ||
+      msl_depth_bias_slope_ != depth_bias_slope || msl_depth_bias_clamp_ != 0.0f) {
+    current_render_encoder_->setDepthBias(depth_bias_constant, depth_bias_slope,
+                                          0.0f);
+    msl_depth_bias_constant_ = depth_bias_constant;
+    msl_depth_bias_slope_ = depth_bias_slope;
+    msl_depth_bias_clamp_ = 0.0f;
+  }
 
-  current_render_encoder_->setDepthClipMode(pa_cl_clip_cntl.clip_disable
-                                                ? MTL::DepthClipModeClamp
-                                                : MTL::DepthClipModeClip);
+  MTL::DepthClipMode depth_clip_mode = pa_cl_clip_cntl.clip_disable
+                                           ? MTL::DepthClipModeClamp
+                                           : MTL::DepthClipModeClip;
+  if (!msl_rasterizer_state_valid_ ||
+      msl_depth_clip_mode_ != depth_clip_mode) {
+    current_render_encoder_->setDepthClipMode(depth_clip_mode);
+    msl_depth_clip_mode_ = depth_clip_mode;
+  }
+  msl_rasterizer_state_valid_ = true;
 }
 
 MTL::RenderPassDescriptor*
