@@ -7,6 +7,12 @@ local dxilconv_libdir_arm64 =
 local dxilconv_libdir_x86_64 =
     path.getabsolute(path.join(project_root,
                                "third_party/DirectXShaderCompiler/build_dxilconv_macos_x86_64/lib"))
+local metal_converter_dylib =
+    path.join(metal_converter_libdir, "libmetalirconverter.dylib")
+local dxilconv_dylib_arm64 =
+    path.join(dxilconv_libdir_arm64, "libdxilconv.dylib")
+local dxilconv_dylib_x86_64 =
+    path.join(dxilconv_libdir_x86_64, "libdxilconv.dylib")
 include(project_root.."/tools/build")
 
 group("src")
@@ -186,6 +192,20 @@ project("xenia-app")
     libdirs({ dxilconv_libdir_x86_64 })
   filter({})
 
+  filter("system:macosx")
+    postbuildcommands({
+      'mkdir -p "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Frameworks"',
+      '{COPYFILE} "' .. metal_converter_dylib .. '" "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Frameworks/libmetalirconverter.dylib"',
+    })
+  filter({"system:macosx", "architecture:arm64"})
+    postbuildcommands({
+      '{COPYFILE} "' .. dxilconv_dylib_arm64 .. '" "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Frameworks/libdxilconv.dylib"',
+    })
+  filter({"system:macosx", "architecture:x86_64"})
+    postbuildcommands({
+      '{COPYFILE} "' .. dxilconv_dylib_x86_64 .. '" "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Frameworks/libdxilconv.dylib"',
+    })
+  filter({})
   if enableMiscSubprojects then
     filter({"platforms:Windows-*", SINGLE_LIBRARY_FILTER})
       links({
