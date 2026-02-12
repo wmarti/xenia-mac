@@ -514,8 +514,12 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
     if (guest_output_mailbox_index != UINT32_MAX) {
       uint64_t await_submission = guest_output_submissions_[guest_output_mailbox_index];
       if (await_submission && shared_event_) {
-        [command_buffer encodeWaitForEvent:(id<MTLSharedEvent>)shared_event_
-                                     value:await_submission];
+        id<MTLSharedEvent> shared_event = (id<MTLSharedEvent>)shared_event_;
+        uint64_t completed_submission = [shared_event signaledValue];
+        if (await_submission > completed_submission) {
+          [command_buffer encodeWaitForEvent:shared_event
+                                       value:await_submission];
+        }
       }
       guest_output_texture = guest_output_textures_[guest_output_mailbox_index];
     }
