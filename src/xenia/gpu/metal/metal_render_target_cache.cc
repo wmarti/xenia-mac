@@ -3658,30 +3658,28 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
       }
     }
 
-    uint64_t dummy_key = 0;
-    if (current_depth_target_) {
-      dummy_key = 0x100000000ull | uint64_t(current_depth_target_->key().key);
-    } else if (last_real_color_targets_[0]) {
-      dummy_key =
-          0x200000000ull | uint64_t(last_real_color_targets_[0]->key().key);
-    } else if (last_real_depth_target_) {
-      dummy_key = 0x300000000ull | uint64_t(last_real_depth_target_->key().key);
-    } else {
-      dummy_key = uint64_t(width) | (uint64_t(height) << 20) |
-                  (uint64_t(samples) << 40);
-    }
+    uint32_t dummy_sample_count =
+        samples >= 4u ? 4u : (samples == 2u ? 2u : 1u);
+    // Cache dummy color targets by shape/format only so depth-only passes with
+    // changing EDRAM bases can reuse the same transient attachment.
+    uint64_t dummy_key = uint64_t(width & 0xFFFFu) |
+                         (uint64_t(height & 0xFFFFu) << 16) |
+                         (uint64_t(dummy_sample_count & 0xFFu) << 32) |
+                         (uint64_t(uint32_t(fmt) & 0xFFFFu) << 40);
     auto& entry = dummy_color_targets_[dummy_key];
     if (!entry.target || !entry.target->texture()) {
       RenderTargetKey dummy_rt_key;
       dummy_rt_key.key = 0;
       dummy_rt_key.is_depth = 0;
       dummy_rt_key.resource_format = uint32_t(fmt);
-      dummy_rt_key.msaa_samples = (samples >= 4u)   ? xenos::MsaaSamples::k4X
-                                  : (samples == 2u) ? xenos::MsaaSamples::k2X
-                                                    : xenos::MsaaSamples::k1X;
+      dummy_rt_key.msaa_samples =
+          dummy_sample_count >= 4u   ? xenos::MsaaSamples::k4X
+          : dummy_sample_count == 2u ? xenos::MsaaSamples::k2X
+                                     : xenos::MsaaSamples::k1X;
       entry.target = std::make_unique<MetalRenderTarget>(dummy_rt_key);
       entry.last_cleared_frame = frame_id_ - 1;
-      MTL::Texture* tex = CreateColorTexture(width, height, fmt, samples);
+      MTL::Texture* tex =
+          CreateColorTexture(width, height, fmt, dummy_sample_count);
       entry.target->SetTexture(tex);
       if (tex) {
         MTL::PixelFormat resource_format = GetColorResourcePixelFormat(fmt);
@@ -3703,7 +3701,12 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
     entry.last_used_frame = frame_id_;
     dummy_color_target_ = entry.target.get();
 
-    constexpr size_t kMaxDummyColorTargets = 64;
+    // Keep this cache small - dummy targets are transient fallback attachments.
+#if XE_PLATFORM_IOS
+    constexpr size_t kMaxDummyColorTargets = 4;
+#else
+    constexpr size_t kMaxDummyColorTargets = 8;
+#endif
     if (dummy_color_targets_.size() > kMaxDummyColorTargets) {
       uint64_t oldest_key = 0;
       uint64_t oldest_frame = frame_id_;
