@@ -3218,7 +3218,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     mtl_viewport.height = static_cast<double>(viewport_info.xy_extent[1]);
     mtl_viewport.znear = viewport_info.z_min;
     mtl_viewport.zfar = viewport_info.z_max;
-    current_render_encoder_->setViewport(mtl_viewport);
+    if (!msl_viewport_valid_ || msl_viewport_.originX != mtl_viewport.originX ||
+        msl_viewport_.originY != mtl_viewport.originY ||
+        msl_viewport_.width != mtl_viewport.width ||
+        msl_viewport_.height != mtl_viewport.height ||
+        msl_viewport_.znear != mtl_viewport.znear ||
+        msl_viewport_.zfar != mtl_viewport.zfar) {
+      current_render_encoder_->setViewport(mtl_viewport);
+      msl_viewport_ = mtl_viewport;
+      msl_viewport_valid_ = true;
+    }
 
     MTL::ScissorRect mtl_scissor;
     mtl_scissor.x = scissor.offset[0];
@@ -4338,7 +4347,10 @@ bool MetalCommandProcessor::IssueDrawMsl(
   }
 
   // Apply fixed-function state.
-  current_render_encoder_->setRenderPipelineState(pipeline);
+  if (msl_bound_pipeline_state_ != pipeline) {
+    current_render_encoder_->setRenderPipelineState(pipeline);
+    msl_bound_pipeline_state_ = pipeline;
+  }
   ApplyRasterizerState(primitive_polygonal);
   ApplyDepthStencilState(primitive_polygonal, normalized_depth_control);
 
@@ -5101,14 +5113,14 @@ bool MetalCommandProcessor::IssueCopy() {
   // Any cached views of this memory (especially textures sourced from it)
   // must be invalidated, otherwise subsequent render-to-texture / postprocess
   // passes will sample stale host textures and produce corrupted output.
-  //   if (shared_memory_) {
-  //     shared_memory_->MemoryInvalidationCallback(written_address,
-  //     written_length, true);
-  //   }
-  //   if (primitive_processor_) {
-  //     primitive_processor_->MemoryInvalidationCallback(written_address,
-  //     written_length, true);
-  //   }
+  if (shared_memory_) {
+    shared_memory_->MemoryInvalidationCallback(written_address,
+                                               written_length, true);
+  }
+  if (primitive_processor_) {
+    primitive_processor_->MemoryInvalidationCallback(written_address,
+                                                     written_length, true);
+  }
 
   // Copy-only resolve bursts can stay open and be coalesced until a draw,
   // primary-buffer end, swap, or explicit synchronization point.
@@ -5429,10 +5441,14 @@ void MetalCommandProcessor::BeginCommandBuffer() {
       0.0, 0.0, static_cast<double>(rt_width), static_cast<double>(rt_height),
       0.0, 1.0};
   current_render_encoder_->setViewport(viewport);
+  msl_viewport_ = viewport;
+  msl_viewport_valid_ = true;
 
   // Set scissor (must not exceed render pass dimensions)
   MTL::ScissorRect scissor = {0, 0, rt_width, rt_height};
   current_render_encoder_->setScissorRect(scissor);
+  msl_scissor_ = scissor;
+  msl_scissor_valid_ = true;
 }
 
 #if METAL_SHADER_CONVERTER_AVAILABLE
@@ -5835,7 +5851,10 @@ void MetalCommandProcessor::ApplyDepthStencilState(
     depth_stencil_state_cache_.emplace(key, state);
   }
 
-  current_render_encoder_->setDepthStencilState(state);
+  if (msl_depth_stencil_state_ != state) {
+    current_render_encoder_->setDepthStencilState(state);
+    msl_depth_stencil_state_ = state;
+  }
 
   if (depth_control.stencil_enable) {
     uint32_t ref_front = stencil_ref_mask_front.stencilref;
@@ -5857,7 +5876,13 @@ void MetalCommandProcessor::ApplyDepthStencilState(
             ref_front, ref_back);
       }
     }
-    current_render_encoder_->setStencilReferenceValue(ref);
+    if (!msl_stencil_reference_valid_ || msl_stencil_reference_ != ref) {
+      current_render_encoder_->setStencilReferenceValue(ref);
+      msl_stencil_reference_ = ref;
+      msl_stencil_reference_valid_ = true;
+    }
+  } else {
+    msl_stencil_reference_valid_ = false;
   }
 }
 
@@ -5880,11 +5905,17 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
       cull_mode = MTL::CullModeBack;
     }
   }
-  current_render_encoder_->setCullMode(cull_mode);
+  if (!msl_rasterizer_state_valid_ || msl_cull_mode_ != cull_mode) {
+    current_render_encoder_->setCullMode(cull_mode);
+    msl_cull_mode_ = cull_mode;
+  }
 
-  current_render_encoder_->setFrontFacingWinding(
-      pa_su_sc_mode_cntl.face ? MTL::WindingClockwise
-                              : MTL::WindingCounterClockwise);
+  MTL::Winding winding = pa_su_sc_mode_cntl.face ? MTL::WindingClockwise
+                                                 : MTL::WindingCounterClockwise;
+  if (!msl_rasterizer_state_valid_ || msl_winding_ != winding) {
+    current_render_encoder_->setFrontFacingWinding(winding);
+    msl_winding_ = winding;
+  }
 
   MTL::TriangleFillMode fill_mode = MTL::TriangleFillModeFill;
   if (primitive_polygonal &&
@@ -5902,7 +5933,10 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
       fill_mode = MTL::TriangleFillModeLines;
     }
   }
-  current_render_encoder_->setTriangleFillMode(fill_mode);
+  if (!msl_rasterizer_state_valid_ || msl_fill_mode_ != fill_mode) {
+    current_render_encoder_->setTriangleFillMode(fill_mode);
+    msl_fill_mode_ = fill_mode;
+  }
 
   float polygon_offset_scale = 0.0f;
   float polygon_offset = 0.0f;
@@ -5917,12 +5951,27 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
       polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit *
       float(std::max(render_target_cache_->draw_resolution_scale_x(),
                      render_target_cache_->draw_resolution_scale_y()));
-  current_render_encoder_->setDepthBias(depth_bias_constant, depth_bias_slope,
-                                        0.0f);
+  constexpr float kDepthBiasClamp = 0.0f;
+  if (!msl_rasterizer_state_valid_ ||
+      msl_depth_bias_constant_ != depth_bias_constant ||
+      msl_depth_bias_slope_ != depth_bias_slope ||
+      msl_depth_bias_clamp_ != kDepthBiasClamp) {
+    current_render_encoder_->setDepthBias(depth_bias_constant, depth_bias_slope,
+                                          kDepthBiasClamp);
+    msl_depth_bias_constant_ = depth_bias_constant;
+    msl_depth_bias_slope_ = depth_bias_slope;
+    msl_depth_bias_clamp_ = kDepthBiasClamp;
+  }
 
-  current_render_encoder_->setDepthClipMode(pa_cl_clip_cntl.clip_disable
-                                                ? MTL::DepthClipModeClamp
-                                                : MTL::DepthClipModeClip);
+  MTL::DepthClipMode depth_clip_mode =
+      pa_cl_clip_cntl.clip_disable ? MTL::DepthClipModeClamp
+                                   : MTL::DepthClipModeClip;
+  if (!msl_rasterizer_state_valid_ ||
+      msl_depth_clip_mode_ != depth_clip_mode) {
+    current_render_encoder_->setDepthClipMode(depth_clip_mode);
+    msl_depth_clip_mode_ = depth_clip_mode;
+  }
+  msl_rasterizer_state_valid_ = true;
 }
 
 MTL::RenderPassDescriptor*
