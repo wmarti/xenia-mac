@@ -4329,7 +4329,16 @@ bool MetalCommandProcessor::IssueDrawMsl(
     mtl_viewport.height = static_cast<double>(viewport_info.xy_extent[1]);
     mtl_viewport.znear = viewport_info.z_min;
     mtl_viewport.zfar = viewport_info.z_max;
-    current_render_encoder_->setViewport(mtl_viewport);
+    if (!msl_viewport_valid_ || msl_viewport_.originX != mtl_viewport.originX ||
+        msl_viewport_.originY != mtl_viewport.originY ||
+        msl_viewport_.width != mtl_viewport.width ||
+        msl_viewport_.height != mtl_viewport.height ||
+        msl_viewport_.znear != mtl_viewport.znear ||
+        msl_viewport_.zfar != mtl_viewport.zfar) {
+      current_render_encoder_->setViewport(mtl_viewport);
+      msl_viewport_ = mtl_viewport;
+      msl_viewport_valid_ = true;
+    }
 
     MTL::ScissorRect mtl_scissor;
     mtl_scissor.x = scissor.offset[0];
