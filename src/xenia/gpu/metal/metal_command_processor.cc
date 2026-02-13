@@ -4497,11 +4497,20 @@ bool MetalCommandProcessor::IssueDrawMsl(
   MTL::ResourceUsage shared_memory_usage =
       MTL::ResourceUsageRead | MTL::ResourceUsageWrite;
   if (shared_mem_buffer) {
-    current_render_encoder_->setVertexBuffer(shared_mem_buffer, 0,
-                                             MslBufferIndex::kSharedMemory);
-    current_render_encoder_->setFragmentBuffer(shared_mem_buffer, 0,
+    if (msl_bound_shared_memory_buffer_ != shared_mem_buffer) {
+      current_render_encoder_->setVertexBuffer(shared_mem_buffer, 0,
                                                MslBufferIndex::kSharedMemory);
+      current_render_encoder_->setFragmentBuffer(shared_mem_buffer, 0,
+                                                 MslBufferIndex::kSharedMemory);
+      msl_bound_shared_memory_buffer_ = shared_mem_buffer;
+    }
     UseRenderEncoderResource(shared_mem_buffer, shared_memory_usage);
+  } else if (msl_bound_shared_memory_buffer_) {
+    current_render_encoder_->setVertexBuffer(nullptr, 0,
+                                             MslBufferIndex::kSharedMemory);
+    current_render_encoder_->setFragmentBuffer(nullptr, 0,
+                                               MslBufferIndex::kSharedMemory);
+    msl_bound_shared_memory_buffer_ = nullptr;
   }
 
   // Bind a null buffer at the EDRAM slot (msl_buffer 30) as a safety measure.
@@ -4509,61 +4518,75 @@ bool MetalCommandProcessor::IssueDrawMsl(
   // false), so no shader should reference it, but binding a dummy prevents
   // GPU faults if any code path unexpectedly accesses buffer(30).
   if (null_buffer_) {
-    current_render_encoder_->setFragmentBuffer(null_buffer_, 0, 30);
+    if (msl_bound_null_buffer_ != null_buffer_) {
+      current_render_encoder_->setFragmentBuffer(null_buffer_, 0, 30);
+      msl_bound_null_buffer_ = null_buffer_;
+    }
+  } else if (msl_bound_null_buffer_) {
+    current_render_encoder_->setFragmentBuffer(nullptr, 0, 30);
+    msl_bound_null_buffer_ = nullptr;
   }
 
   // Bind uniforms buffer at the appropriate indices.
   NS::UInteger vs_base_offset = table_index_vertex * kUniformsBytesPerTable;
   NS::UInteger ps_base_offset = table_index_pixel * kUniformsBytesPerTable;
 
-  // System constants (msl_buffer 1).
-  current_render_encoder_->setVertexBuffer(uniforms_buffer_,
-                                           vs_base_offset + 0 * kCBVSize,
-                                           MslBufferIndex::kSystemConstants);
-  current_render_encoder_->setFragmentBuffer(uniforms_buffer_,
-                                             ps_base_offset + 0 * kCBVSize,
+  if (!msl_bound_uniforms_valid_ || msl_bound_uniforms_buffer_ != uniforms_buffer_ ||
+      msl_bound_uniforms_vs_base_offset_ != vs_base_offset ||
+      msl_bound_uniforms_ps_base_offset_ != ps_base_offset) {
+    // System constants (msl_buffer 1).
+    current_render_encoder_->setVertexBuffer(uniforms_buffer_,
+                                             vs_base_offset + 0 * kCBVSize,
                                              MslBufferIndex::kSystemConstants);
+    current_render_encoder_->setFragmentBuffer(uniforms_buffer_,
+                                               ps_base_offset + 0 * kCBVSize,
+                                               MslBufferIndex::kSystemConstants);
 
-  // Float constants vertex (msl_buffer 2).
-  current_render_encoder_->setVertexBuffer(
-      uniforms_buffer_, vs_base_offset + 1 * kCBVSize,
-      MslBufferIndex::kFloatConstantsVertex);
-  // Float constants pixel (msl_buffer 3).
-  current_render_encoder_->setFragmentBuffer(
-      uniforms_buffer_, ps_base_offset + 1 * kCBVSize,
-      MslBufferIndex::kFloatConstantsPixel);
+    // Float constants vertex (msl_buffer 2).
+    current_render_encoder_->setVertexBuffer(
+        uniforms_buffer_, vs_base_offset + 1 * kCBVSize,
+        MslBufferIndex::kFloatConstantsVertex);
+    // Float constants pixel (msl_buffer 3).
+    current_render_encoder_->setFragmentBuffer(
+        uniforms_buffer_, ps_base_offset + 1 * kCBVSize,
+        MslBufferIndex::kFloatConstantsPixel);
 
-  // Bool/loop constants (msl_buffer 4).
-  current_render_encoder_->setVertexBuffer(uniforms_buffer_,
-                                           vs_base_offset + 2 * kCBVSize,
-                                           MslBufferIndex::kBoolLoopConstants);
-  current_render_encoder_->setFragmentBuffer(
-      uniforms_buffer_, ps_base_offset + 2 * kCBVSize,
-      MslBufferIndex::kBoolLoopConstants);
+    // Bool/loop constants (msl_buffer 4).
+    current_render_encoder_->setVertexBuffer(
+        uniforms_buffer_, vs_base_offset + 2 * kCBVSize,
+        MslBufferIndex::kBoolLoopConstants);
+    current_render_encoder_->setFragmentBuffer(
+        uniforms_buffer_, ps_base_offset + 2 * kCBVSize,
+        MslBufferIndex::kBoolLoopConstants);
 
-  // Fetch constants (msl_buffer 5).
-  current_render_encoder_->setVertexBuffer(uniforms_buffer_,
-                                           vs_base_offset + 3 * kCBVSize,
-                                           MslBufferIndex::kFetchConstants);
-  current_render_encoder_->setFragmentBuffer(uniforms_buffer_,
-                                             ps_base_offset + 3 * kCBVSize,
-                                             MslBufferIndex::kFetchConstants);
+    // Fetch constants (msl_buffer 5).
+    current_render_encoder_->setVertexBuffer(
+        uniforms_buffer_, vs_base_offset + 3 * kCBVSize,
+        MslBufferIndex::kFetchConstants);
+    current_render_encoder_->setFragmentBuffer(
+        uniforms_buffer_, ps_base_offset + 3 * kCBVSize,
+        MslBufferIndex::kFetchConstants);
 
-  // Clip plane constants (msl_buffer 6) — vertex shader only.
-  // The SPIR-V translator uses a separate constant buffer for clip planes.
-  current_render_encoder_->setVertexBuffer(uniforms_buffer_,
-                                           vs_base_offset + 4 * kCBVSize,
-                                           MslBufferIndex::kClipPlaneConstants);
+    // Clip plane constants (msl_buffer 6) — vertex shader only.
+    // The SPIR-V translator uses a separate constant buffer for clip planes.
+    current_render_encoder_->setVertexBuffer(
+        uniforms_buffer_, vs_base_offset + 4 * kCBVSize,
+        MslBufferIndex::kClipPlaneConstants);
 
-  // Tessellation constants (msl_buffer 7).
-  current_render_encoder_->setVertexBuffer(
-      uniforms_buffer_, vs_base_offset + 5 * kCBVSize,
-      MslBufferIndex::kTessellationConstants);
-  current_render_encoder_->setFragmentBuffer(
-      uniforms_buffer_, ps_base_offset + 5 * kCBVSize,
-      MslBufferIndex::kTessellationConstants);
+    // Tessellation constants (msl_buffer 7).
+    current_render_encoder_->setVertexBuffer(
+        uniforms_buffer_, vs_base_offset + 5 * kCBVSize,
+        MslBufferIndex::kTessellationConstants);
+    current_render_encoder_->setFragmentBuffer(
+        uniforms_buffer_, ps_base_offset + 5 * kCBVSize,
+        MslBufferIndex::kTessellationConstants);
 
-  UseRenderEncoderResource(uniforms_buffer_, MTL::ResourceUsageRead);
+    msl_bound_uniforms_buffer_ = uniforms_buffer_;
+    msl_bound_uniforms_vs_base_offset_ = vs_base_offset;
+    msl_bound_uniforms_ps_base_offset_ = ps_base_offset;
+    msl_bound_uniforms_valid_ = true;
+    UseRenderEncoderResource(uniforms_buffer_, MTL::ResourceUsageRead);
+  }
 
   // Bind textures and samplers directly.
   auto bind_msl_textures = [&](MslShader* shader,
@@ -5306,6 +5329,10 @@ void MetalCommandProcessor::EndRenderEncoder() {
   msl_bound_pixel_samplers_.fill(nullptr);
   msl_bound_shared_memory_buffer_ = nullptr;
   msl_bound_null_buffer_ = nullptr;
+  msl_bound_uniforms_buffer_ = nullptr;
+  msl_bound_uniforms_vs_base_offset_ = 0;
+  msl_bound_uniforms_ps_base_offset_ = 0;
+  msl_bound_uniforms_valid_ = false;
   msl_bound_pipeline_state_ = nullptr;
   msl_viewport_valid_ = false;
   msl_scissor_valid_ = false;

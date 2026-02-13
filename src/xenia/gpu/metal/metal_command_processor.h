@@ -663,6 +663,10 @@ class MetalCommandProcessor : public CommandProcessor {
       msl_bound_pixel_samplers_{};
   MTL::Buffer* msl_bound_shared_memory_buffer_ = nullptr;
   MTL::Buffer* msl_bound_null_buffer_ = nullptr;
+  MTL::Buffer* msl_bound_uniforms_buffer_ = nullptr;
+  NS::UInteger msl_bound_uniforms_vs_base_offset_ = 0;
+  NS::UInteger msl_bound_uniforms_ps_base_offset_ = 0;
+  bool msl_bound_uniforms_valid_ = false;
   MTL::RenderPipelineState* msl_bound_pipeline_state_ = nullptr;
   bool msl_viewport_valid_ = false;
   MTL::Viewport msl_viewport_ = {};
