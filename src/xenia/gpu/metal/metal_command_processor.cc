@@ -2629,7 +2629,20 @@ void MetalCommandProcessor::OnPrimaryBufferEnd() {
   if (!cvars::submit_on_primary_buffer_end || !current_command_buffer_) {
     return;
   }
-  if (!copy_resolve_writes_pending_ && !CanEndSubmissionImmediately()) {
+  // Preserve copy/resolve visibility across primary buffers, but avoid
+  // fragmenting draw-heavy workloads into tiny submissions.
+  if (copy_resolve_writes_pending_) {
+    EndCommandBuffer();
+    return;
+  }
+  if (!CanEndSubmissionImmediately()) {
+    return;
+  }
+  // Batch multiple primary buffers together to reduce command buffer /
+  // render encoder CPU overhead from frequent commit/restart cycles.
+  uint32_t min_draws_to_submit =
+      std::max(1u, std::min(16u, uint32_t(std::max<size_t>(draw_ring_count_, 1))));
+  if (current_draw_index_ < min_draws_to_submit) {
     return;
   }
   EndCommandBuffer();
