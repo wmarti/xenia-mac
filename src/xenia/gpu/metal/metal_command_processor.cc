@@ -1884,6 +1884,8 @@ void MetalCommandProcessor::ShutdownContext() {
     wait_shared_event_ = nullptr;
   }
 
+  ClearMslShaderSourceCacheDirectory();
+
 #if METAL_SHADER_CONVERTER_AVAILABLE
   ShutdownShaderStorage();
 #endif
@@ -1937,6 +1939,9 @@ void MetalCommandProcessor::InitializeShaderStorage(
            shader_storage_title_root.string(), ec.message());
   } else if (::cvars::metal_shader_disk_cache && g_metal_shader_cache) {
     g_metal_shader_cache->Initialize(shader_storage_title_root / "metallib");
+    SetMslShaderSourceCacheDirectory(shader_storage_title_root / "msl_source");
+  } else {
+    SetMslShaderSourceCacheDirectory(shader_storage_title_root / "msl_source");
   }
 
   if (completion_callback) {
@@ -1968,6 +1973,7 @@ bool MetalCommandProcessor::InitializeShaderStorageInternal(
            shader_storage_title_root_.string(), ec.message());
     return false;
   }
+  SetMslShaderSourceCacheDirectory(shader_storage_title_root_ / "msl_source");
 
   metallib_cache_dir_ = shader_storage_title_root_ / "metallib";
   if (::cvars::metal_shader_disk_cache && g_metal_shader_cache) {

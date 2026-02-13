@@ -12,13 +12,18 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <regex>
 #include <sstream>
+#include <string_view>
 #include <stdexcept>
 
 #include "spirv_msl.hpp"
+#include "third_party/xxhash/xxhash.h"
 #include "third_party/fmt/include/fmt/format.h"
 
 #include "xenia/base/assert.h"
@@ -30,6 +35,152 @@
 namespace xe {
 namespace gpu {
 namespace metal {
+
+namespace {
+
+constexpr uint32_t kMslSourceCacheMagic = 0x5843534D;  // 'MSCX'
+constexpr uint32_t kMslSourceCacheVersion = 1;
+constexpr uint32_t kMslSourceCacheMaxBytes = 16 * 1024 * 1024;
+
+std::mutex g_msl_source_cache_mutex;
+std::filesystem::path g_msl_source_cache_directory;
+
+std::filesystem::path GetMslSourceCachePathLocked(uint64_t cache_key) {
+  char name[32];
+  std::snprintf(name, sizeof(name), "%016llX.mslsrcache",
+                static_cast<unsigned long long>(cache_key));
+  return g_msl_source_cache_directory / name;
+}
+
+bool LoadCachedMslSource(uint64_t cache_key, std::string* source_out) {
+  if (!source_out) {
+    return false;
+  }
+  std::filesystem::path path;
+  {
+    std::lock_guard<std::mutex> lock(g_msl_source_cache_mutex);
+    if (g_msl_source_cache_directory.empty()) {
+      return false;
+    }
+    path = GetMslSourceCachePathLocked(cache_key);
+  }
+
+  std::ifstream file(path, std::ios::binary);
+  if (!file.is_open()) {
+    return false;
+  }
+
+  uint32_t magic = 0;
+  uint32_t version = 0;
+  uint64_t key = 0;
+  uint32_t source_size = 0;
+  file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+  file.read(reinterpret_cast<char*>(&version), sizeof(version));
+  file.read(reinterpret_cast<char*>(&key), sizeof(key));
+  file.read(reinterpret_cast<char*>(&source_size), sizeof(source_size));
+  if (!file || magic != kMslSourceCacheMagic ||
+      version != kMslSourceCacheVersion || key != cache_key ||
+      source_size > kMslSourceCacheMaxBytes) {
+    return false;
+  }
+
+  source_out->resize(source_size);
+  file.read(source_out->data(), source_size);
+  return bool(file);
+}
+
+bool StoreCachedMslSource(uint64_t cache_key, std::string_view source) {
+  if (source.empty() || source.size() > kMslSourceCacheMaxBytes) {
+    return false;
+  }
+
+  std::filesystem::path path;
+  {
+    std::lock_guard<std::mutex> lock(g_msl_source_cache_mutex);
+    if (g_msl_source_cache_directory.empty()) {
+      return false;
+    }
+    path = GetMslSourceCachePathLocked(cache_key);
+  }
+  std::filesystem::path tmp_path = path;
+  tmp_path += ".tmp";
+
+  std::ofstream file(tmp_path, std::ios::binary | std::ios::trunc);
+  if (!file.is_open()) {
+    return false;
+  }
+  uint32_t magic = kMslSourceCacheMagic;
+  uint32_t version = kMslSourceCacheVersion;
+  uint64_t key = cache_key;
+  uint32_t source_size = static_cast<uint32_t>(source.size());
+  file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+  file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+  file.write(reinterpret_cast<const char*>(&key), sizeof(key));
+  file.write(reinterpret_cast<const char*>(&source_size), sizeof(source_size));
+  file.write(source.data(), source.size());
+  file.close();
+
+  std::error_code ec;
+  std::filesystem::rename(tmp_path, path, ec);
+  if (ec) {
+    std::filesystem::remove(tmp_path, ec);
+    return false;
+  }
+  return true;
+}
+
+uint64_t GetMslSourceCacheKey(const MslShader::MslTranslation& translation,
+                              bool is_ios, uint32_t msl_major,
+                              uint32_t msl_minor,
+                              bool ios_support_base_vertex_instance,
+                              bool emulate_cube_array,
+                              bool ios_use_simdgroup_functions) {
+  struct KeyData {
+    uint64_t shader_hash;
+    uint64_t modification;
+    uint32_t stage;
+    uint8_t is_ios;
+    uint8_t msl_major;
+    uint8_t msl_minor;
+    uint8_t ios_support_base_vertex_instance;
+    uint8_t emulate_cube_array;
+    uint8_t ios_use_simdgroup_functions;
+    uint16_t reserved;
+  } key_data = {};
+  key_data.shader_hash = translation.shader().ucode_data_hash();
+  key_data.modification = translation.modification();
+  key_data.stage = static_cast<uint32_t>(translation.shader().type());
+  key_data.is_ios = is_ios ? 1 : 0;
+  key_data.msl_major = static_cast<uint8_t>(msl_major);
+  key_data.msl_minor = static_cast<uint8_t>(msl_minor);
+  key_data.ios_support_base_vertex_instance =
+      ios_support_base_vertex_instance ? 1 : 0;
+  key_data.emulate_cube_array = emulate_cube_array ? 1 : 0;
+  key_data.ios_use_simdgroup_functions = ios_use_simdgroup_functions ? 1 : 0;
+  return XXH3_64bits(&key_data, sizeof(key_data));
+}
+
+}  // namespace
+
+void SetMslShaderSourceCacheDirectory(const std::filesystem::path& cache_dir) {
+  std::lock_guard<std::mutex> lock(g_msl_source_cache_mutex);
+  g_msl_source_cache_directory = cache_dir;
+  if (g_msl_source_cache_directory.empty()) {
+    return;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(g_msl_source_cache_directory, ec);
+  if (ec) {
+    XELOGW("MslShader: Failed to create source cache directory {}: {}",
+           g_msl_source_cache_directory.string(), ec.message());
+    g_msl_source_cache_directory.clear();
+  }
+}
+
+void ClearMslShaderSourceCacheDirectory() {
+  std::lock_guard<std::mutex> lock(g_msl_source_cache_mutex);
+  g_msl_source_cache_directory.clear();
+}
 
 // SPIR-V descriptor set indices matching SpirvShaderTranslator's layout.
 // These values must stay in sync with the enum in spirv_shader_translator.h.
@@ -490,16 +641,22 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   opts.argument_buffers = false;
   // Match iOS feature toggles to documented GPU-family availability.
   opts.ios_support_base_vertex_instance = ios_supports_base_vertex_instance;
-  opts.emulate_cube_array = is_ios && !ios_supports_cube_array;
+  const bool emulate_cube_array = is_ios && !ios_supports_cube_array;
+  opts.emulate_cube_array = emulate_cube_array;
   // Keep iOS aligned with the conservative cross-platform path by default.
   // Enabling simdgroup translation on some iOS shader/compiler combinations can
   // yield libraries with no exported stage entry points (`functionNames=[]`).
-  opts.ios_use_simdgroup_functions = is_ios && ios_supports_simdgroup_scope_ops;
+  const bool ios_use_simdgroup_functions =
+      is_ios && ios_supports_simdgroup_scope_ops;
+  opts.ios_use_simdgroup_functions = ios_use_simdgroup_functions;
   // Force sample rate shading to be available if needed.
   opts.force_sample_rate_shading = false;
   // Keep native component counts for fragment outputs to preserve shader-
   // defined alpha semantics and avoid over-constraining RT writes.
   opts.pad_fragment_output_components = false;
+  const uint64_t msl_source_cache_key = GetMslSourceCacheKey(
+      *this, is_ios, msl_major, msl_minor, ios_supports_base_vertex_instance,
+      emulate_cube_array, ios_use_simdgroup_functions);
   compiler.set_msl_options(opts);
 
   // Remap SPIR-V descriptor sets/bindings to Metal buffer/texture/sampler
@@ -805,14 +962,27 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
 
   // Compile to MSL.  SPIRV-Cross throws on translation errors.
   const auto spirv_cross_begin = std::chrono::steady_clock::now();
-  try {
-    msl_source_ = compiler.compile();
-  } catch (const std::exception& e) {
-    XELOGE("MslShader: SPIRV-Cross compilation failed: {}", e.what());
-    return false;
+  bool loaded_source_from_cache = false;
+  if (cvars::metal_shader_disk_cache) {
+    loaded_source_from_cache =
+        LoadCachedMslSource(msl_source_cache_key, &msl_source_);
+    if (loaded_source_from_cache) {
+      XELOGD("MslShader: Loaded cached MSL source ({:016X})",
+             shader().ucode_data_hash());
+    }
   }
-  spirv_cross_ms =
-      to_ms(std::chrono::steady_clock::now() - spirv_cross_begin);
+  if (!loaded_source_from_cache) {
+    try {
+      msl_source_ = compiler.compile();
+    } catch (const std::exception& e) {
+      XELOGE("MslShader: SPIRV-Cross compilation failed: {}", e.what());
+      return false;
+    }
+    if (cvars::metal_shader_disk_cache) {
+      StoreCachedMslSource(msl_source_cache_key, msl_source_);
+    }
+  }
+  spirv_cross_ms = to_ms(std::chrono::steady_clock::now() - spirv_cross_begin);
   if (msl_source_.empty()) {
     XELOGE("MslShader: SPIRV-Cross compilation produced empty output");
     return false;

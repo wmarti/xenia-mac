@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_MSL_SHADER_H_
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,10 @@ class MslShader : public SpirvShader {
  protected:
   Translation* CreateTranslationInstance(uint64_t modification) override;
 };
+
+// MSL source cache root used by SPIRV-Cross translations.
+void SetMslShaderSourceCacheDirectory(const std::filesystem::path& cache_dir);
+void ClearMslShaderSourceCacheDirectory();
 
 }  // namespace metal
 }  // namespace gpu
