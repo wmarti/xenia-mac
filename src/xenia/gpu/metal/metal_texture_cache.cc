@@ -354,8 +354,8 @@ class MetalTextureCache::UploadBufferPool
     }
     bool add_handler = false;
     {
-      std::lock_guard<std::mutex> lock(pending_releases_mutex_);
-      auto& pending = pending_releases_[cmd];
+      std::lock_guard<std::mutex> lock(PendingReleasesMutex());
+      auto& pending = PendingReleasesMap()[cmd];
       add_handler = pending.empty();
       pending.push_back({shared_from_this(), buffer});
     }
@@ -402,10 +402,24 @@ class MetalTextureCache::UploadBufferPool
     MTL::Buffer* buffer = nullptr;
   };
 
+  using PendingReleasesByCommandBuffer =
+      std::unordered_map<MTL::CommandBuffer*, std::vector<PendingRelease>>;
+
+  static std::mutex& PendingReleasesMutex() {
+    // Heap-allocated and intentionally leaked to avoid static destruction order
+    // issues on macOS/POSIX where threads may outlive static destructors.
+    static std::mutex* pending_releases_mutex = new std::mutex();
+    return *pending_releases_mutex;
+  }
+
+  static PendingReleasesByCommandBuffer& PendingReleasesMap() {
+    // Heap-allocated and intentionally leaked for the same reason as the mutex.
+    static PendingReleasesByCommandBuffer* pending_releases =
+        new PendingReleasesByCommandBuffer();
+    return *pending_releases;
+  }
+
   static void HandleCommandBufferCompleted(MTL::CommandBuffer* cmd);
-  static std::mutex pending_releases_mutex_;
-  static std::unordered_map<MTL::CommandBuffer*, std::vector<PendingRelease>>
-      pending_releases_;
 
   mutable std::mutex mutex_;
   std::vector<Entry> entries_;
@@ -416,22 +430,18 @@ class MetalTextureCache::UploadBufferPool
   uint64_t transient_allocations_ = 0;
 };
 
-std::mutex MetalTextureCache::UploadBufferPool::pending_releases_mutex_;
-std::unordered_map<MTL::CommandBuffer*,
-                   std::vector<MetalTextureCache::UploadBufferPool::PendingRelease>>
-    MetalTextureCache::UploadBufferPool::pending_releases_;
-
 void MetalTextureCache::UploadBufferPool::HandleCommandBufferCompleted(
     MTL::CommandBuffer* cmd) {
   std::vector<PendingRelease> releases;
   {
-    std::lock_guard<std::mutex> lock(pending_releases_mutex_);
-    auto it = pending_releases_.find(cmd);
-    if (it == pending_releases_.end()) {
+    std::lock_guard<std::mutex> lock(PendingReleasesMutex());
+    auto& pending_releases = PendingReleasesMap();
+    auto it = pending_releases.find(cmd);
+    if (it == pending_releases.end()) {
       return;
     }
     releases = std::move(it->second);
-    pending_releases_.erase(it);
+    pending_releases.erase(it);
   }
   for (auto& release : releases) {
     release.pool->ReleaseImmediate(release.buffer);
