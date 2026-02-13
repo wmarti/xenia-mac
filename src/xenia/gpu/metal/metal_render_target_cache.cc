@@ -3535,28 +3535,32 @@ MTL::Texture* MetalRenderTargetCache::GetStencilTextureView(
 
 MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
     uint32_t expected_sample_count) {
-  if (!render_pass_descriptor_dirty_ && cached_render_pass_descriptor_ &&
-      cached_render_pass_descriptor_sample_count_ == expected_sample_count) {
-    return cached_render_pass_descriptor_;
-  }
-  if (cached_render_pass_descriptor_sample_count_ != expected_sample_count) {
+  bool sample_count_changed = cached_render_pass_descriptor_sample_count_ !=
+                              expected_sample_count;
+  if (sample_count_changed) {
     render_pass_descriptor_dirty_ = true;
   }
+  bool need_new_descriptor = sample_count_changed ||
+                             !cached_render_pass_descriptor_;
+  if (!render_pass_descriptor_dirty_ && !need_new_descriptor &&
+      cached_render_pass_descriptor_) {
+    return cached_render_pass_descriptor_;
+  }
 
-  // Release old descriptor
-  if (cached_render_pass_descriptor_) {
+  if (need_new_descriptor && cached_render_pass_descriptor_) {
     cached_render_pass_descriptor_->release();
     cached_render_pass_descriptor_ = nullptr;
   }
 
-  // Create new descriptor
-  cached_render_pass_descriptor_ =
-      MTL::RenderPassDescriptor::renderPassDescriptor();
   if (!cached_render_pass_descriptor_) {
-    XELOGE("MetalRenderTargetCache: Failed to create render pass descriptor");
-    return nullptr;
+    cached_render_pass_descriptor_ =
+        MTL::RenderPassDescriptor::renderPassDescriptor();
+    if (!cached_render_pass_descriptor_) {
+      XELOGE("MetalRenderTargetCache: Failed to create render pass descriptor");
+      return nullptr;
+    }
+    cached_render_pass_descriptor_->retain();
   }
-  cached_render_pass_descriptor_->retain();
   cached_render_pass_descriptor_sample_count_ = expected_sample_count;
 
   bool has_any_render_target = false;
