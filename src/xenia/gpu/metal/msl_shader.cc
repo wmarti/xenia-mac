@@ -41,6 +41,8 @@ namespace {
 constexpr uint32_t kMslSourceCacheMagic = 0x5843534D;  // 'MSCX'
 constexpr uint32_t kMslSourceCacheVersion = 1;
 constexpr uint32_t kMslSourceCacheMaxBytes = 16 * 1024 * 1024;
+// Bump when cache-key semantics change to force invalidation of stale entries.
+constexpr uint32_t kMslSourceCacheSchemaVersion = 3;
 
 std::mutex g_msl_source_cache_mutex;
 std::filesystem::path g_msl_source_cache_directory;
@@ -135,9 +137,17 @@ uint64_t GetMslSourceCacheKey(const MslShader::MslTranslation& translation,
                               bool ios_support_base_vertex_instance,
                               bool emulate_cube_array,
                               bool ios_use_simdgroup_functions) {
+  uint64_t translated_spirv_hash = 0;
+  const auto& translated_spirv = translation.translated_binary();
+  if (!translated_spirv.empty()) {
+    translated_spirv_hash =
+        XXH3_64bits(translated_spirv.data(), translated_spirv.size());
+  }
+
   struct KeyData {
     uint64_t shader_hash;
     uint64_t modification;
+    uint64_t translated_spirv_hash;
     uint32_t stage;
     uint8_t is_ios;
     uint8_t msl_major;
@@ -145,10 +155,13 @@ uint64_t GetMslSourceCacheKey(const MslShader::MslTranslation& translation,
     uint8_t ios_support_base_vertex_instance;
     uint8_t emulate_cube_array;
     uint8_t ios_use_simdgroup_functions;
-    uint16_t reserved;
+    uint8_t reserved0;
+    uint16_t reserved1;
+    uint32_t cache_schema_version;
   } key_data = {};
   key_data.shader_hash = translation.shader().ucode_data_hash();
   key_data.modification = translation.modification();
+  key_data.translated_spirv_hash = translated_spirv_hash;
   key_data.stage = static_cast<uint32_t>(translation.shader().type());
   key_data.is_ios = is_ios ? 1 : 0;
   key_data.msl_major = static_cast<uint8_t>(msl_major);
@@ -157,6 +170,7 @@ uint64_t GetMslSourceCacheKey(const MslShader::MslTranslation& translation,
       ios_support_base_vertex_instance ? 1 : 0;
   key_data.emulate_cube_array = emulate_cube_array ? 1 : 0;
   key_data.ios_use_simdgroup_functions = ios_use_simdgroup_functions ? 1 : 0;
+  key_data.cache_schema_version = kMslSourceCacheSchemaVersion;
   return XXH3_64bits(&key_data, sizeof(key_data));
 }
 
@@ -733,7 +747,6 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   const auto& shader_texture_bindings =
       msl_shader.GetTextureBindingsAfterTranslation();
   uint32_t max_texture_slot = 0;
-  size_t texture_mapped_count = 0;
   auto register_texture_binding =
       [&](const spirv_cross::Resource& resource) -> void {
     uint32_t set =
@@ -751,78 +764,17 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
           shader().ucode_data_hash());
       return;
     }
-
-    // Resolve the runtime texture binding index by reflected texture identity.
-    // SPIRV-Cross may drop/reorder resources relative to translator arrays.
-    int32_t runtime_binding_index = -1;
-    auto reflected_name = compiler.get_name(resource.id);
-    if (reflected_name.empty()) {
-      reflected_name = compiler.get_name(resource.base_type_id);
-    }
-    if (!reflected_name.empty()) {
-      // Expected translator naming: xe_texture{fetch}_{2d|3d|cube}_{u|s}
-      auto starts_with = [](const std::string& s, const char* prefix) {
-        return s.rfind(prefix, 0) == 0;
-      };
-      if (starts_with(reflected_name, "xe_texture")) {
-        const size_t prefix_len = std::strlen("xe_texture");
-        size_t pos = prefix_len;
-        uint32_t fetch_constant = 0;
-        while (pos < reflected_name.size() &&
-               std::isdigit(static_cast<unsigned char>(reflected_name[pos]))) {
-          fetch_constant =
-              fetch_constant * 10 + uint32_t(reflected_name[pos] - '0');
-          ++pos;
-        }
-        if (pos < reflected_name.size() && reflected_name[pos] == '_') {
-          ++pos;
-          size_t dim_end = reflected_name.find('_', pos);
-          if (dim_end != std::string::npos &&
-              dim_end + 1 < reflected_name.size()) {
-            xenos::FetchOpDimension dimension = xenos::FetchOpDimension::k2D;
-            bool dimension_valid = true;
-            std::string dim = reflected_name.substr(pos, dim_end - pos);
-            if (dim == "2d") {
-              dimension = xenos::FetchOpDimension::k2D;
-            } else if (dim == "3d") {
-              dimension = xenos::FetchOpDimension::k3DOrStacked;
-            } else if (dim == "cube") {
-              dimension = xenos::FetchOpDimension::kCube;
-            } else {
-              dimension_valid = false;
-            }
-            char sign_ch = reflected_name[dim_end + 1];
-            if (dimension_valid && (sign_ch == 'u' || sign_ch == 's')) {
-              bool is_signed = (sign_ch == 's');
-              for (size_t i = 0; i < shader_texture_bindings.size(); ++i) {
-                const auto& binding = shader_texture_bindings[i];
-                if (binding.fetch_constant == fetch_constant &&
-                    binding.dimension == dimension &&
-                    binding.is_signed == is_signed) {
-                  runtime_binding_index = int32_t(i);
-                  break;
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Fallback to binding index parity when identity parsing fails.
-    if (runtime_binding_index < 0 &&
-        spv_binding < shader_texture_bindings.size()) {
-      runtime_binding_index = int32_t(spv_binding);
-    }
-    if (runtime_binding_index < 0 ||
-        size_t(runtime_binding_index) >= shader_texture_bindings.size()) {
+    // SPIR-V translator emits texture decoration bindings matching runtime
+    // texture binding indices (vector order in GetTextureBindingsAfterTranslation).
+    if (spv_binding >= shader_texture_bindings.size()) {
       XELOGW(
-          "MslShader: Reflected texture binding {} ({}) could not be mapped to "
-          "runtime texture bindings {} shader={:016X}",
-          spv_binding, reflected_name.empty() ? "<unnamed>" : reflected_name,
-          shader_texture_bindings.size(), shader().ucode_data_hash());
+          "MslShader: Reflected texture binding {} is out of runtime range {} "
+          "shader={:016X}",
+          spv_binding, shader_texture_bindings.size(),
+          shader().ucode_data_hash());
       return;
     }
+    int32_t runtime_binding_index = int32_t(spv_binding);
 
     if (texture_binding_indices_for_msl_slots_.size() <= spv_binding) {
       texture_binding_indices_for_msl_slots_.resize(spv_binding + 1, -1);
@@ -830,7 +782,6 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
     int32_t& slot_binding = texture_binding_indices_for_msl_slots_[spv_binding];
     if (slot_binding == -1) {
       slot_binding = runtime_binding_index;
-      texture_mapped_count++;
       max_texture_slot = std::max(max_texture_slot, spv_binding);
     } else if (slot_binding != runtime_binding_index) {
       XELOGW(
@@ -846,23 +797,14 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   for (const auto& image : resources.sampled_images) {
     register_texture_binding(image);
   }
-  if (!shader_texture_bindings.empty() &&
-      texture_mapped_count != shader_texture_bindings.size()) {
-    // Fall back to translator order if reflection/remap was incomplete.
-    texture_binding_indices_for_msl_slots_.clear();
-    uint32_t fallback_count = uint32_t(std::min(
-        shader_texture_bindings.size(), size_t(MslTextureIndex::kMaxPerStage)));
-    texture_binding_indices_for_msl_slots_.reserve(fallback_count);
-    for (uint32_t i = 0; i < fallback_count; ++i) {
-      texture_binding_indices_for_msl_slots_.push_back(int32_t(i));
-    }
-    XELOGW(
-        "MslShader: Falling back to sequential texture binding order "
-        "shader={:016X} stage={} (reflected={} runtime={})",
-        shader().ucode_data_hash(), GetExecutionModelName(execution_model),
-        texture_mapped_count, shader_texture_bindings.size());
-  } else if (!texture_binding_indices_for_msl_slots_.empty()) {
+  if (!texture_binding_indices_for_msl_slots_.empty()) {
     texture_binding_indices_for_msl_slots_.resize(max_texture_slot + 1, -1);
+  } else if (!shader_texture_bindings.empty()) {
+    XELOGW(
+        "MslShader: No reflected texture bindings for shader={:016X} stage={} "
+        "(runtime={})",
+        shader().ucode_data_hash(), GetExecutionModelName(execution_model),
+        shader_texture_bindings.size());
   }
 
   // Build the runtime sampler binding lookup for Metal slots.
