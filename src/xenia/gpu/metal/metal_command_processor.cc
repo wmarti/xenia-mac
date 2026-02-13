@@ -2708,9 +2708,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   // Check for copy mode
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
   if (edram_mode != xenos::EdramMode::kCopy && copy_resolve_writes_pending_) {
-    // Preserve resolve write visibility when transitioning from copy-only
-    // bursts to regular draw work.
-    EndCommandBuffer();
+    // Copy/resolve work and draw reads are ordered within the same command
+    // buffer, so avoid forcing a submission split on every transition.
+    copy_resolve_writes_pending_ = false;
   }
   if (edram_mode == xenos::EdramMode::kCopy) {
     return IssueCopy();
@@ -5164,35 +5164,9 @@ bool MetalCommandProcessor::IssueCopy() {
                                                      written_length, true);
   }
 
-  // Copy-only resolve bursts can stay open and be coalesced until a draw,
-  // primary-buffer end, swap, or explicit synchronization point.
-  if (current_draw_index_ == 0
-#if METAL_SHADER_CONVERTER_AVAILABLE
-      && command_buffer_draw_rings_.empty()
-#endif
-  ) {
-    copy_resolve_writes_pending_ = true;
-    return true;
-  }
-
-  // Resolve touched guest memory in a draw-containing submission; commit now
-  // so following packets don't observe stale resolve results.
-#if METAL_SHADER_CONVERTER_AVAILABLE
-  ScheduleDrawRingRelease(copy_command_buffer);
-#else
-  if (UseSpirvCrossPath()) {
-    ScheduleSpirvUniformBufferRelease(copy_command_buffer);
-  }
-#endif
-  copy_command_buffer->commit();
-  copy_command_buffer->release();
-  current_command_buffer_ = nullptr;
-#if METAL_SHADER_CONVERTER_AVAILABLE
-  SetActiveDrawRing(nullptr);
-#endif
-  current_draw_index_ = 0;
-  copy_resolve_writes_pending_ = false;
-
+  // Keep resolve writes in the current submission and coalesce command buffers
+  // across copy/draw transitions. Visibility is preserved by in-order encoding.
+  copy_resolve_writes_pending_ = true;
   return true;
 }
 
