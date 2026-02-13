@@ -953,7 +953,6 @@ struct VECTOR_AVERAGE
                 e.URHADD(dest.B16(), src1.B16(), src2.B16());
               } else {
                 e.SRHADD(dest.B16(), src1.B16(), src2.B16());
-                assert_always();
               }
               break;
             case INT16_TYPE:
