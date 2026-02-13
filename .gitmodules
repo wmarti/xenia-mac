@@ -62,7 +62,7 @@
 	url = https://github.com/Cyan4973/xxHash.git
 [submodule "third_party/FFmpeg"]
 	path = third_party/FFmpeg
-	url = https://github.com/wmarti/FFmpeg.git
+	url = https://github.com/has207/FFmpeg.git
 	branch = macos-unified
 [submodule "third_party/premake-androidndk"]
 	path = third_party/premake-androidndk
