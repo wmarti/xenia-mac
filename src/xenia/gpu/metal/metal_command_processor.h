@@ -695,6 +695,7 @@ class MetalCommandProcessor : public CommandProcessor {
   FILE* pipeline_disk_cache_file_ = nullptr;
   MTL::BinaryArchive* pipeline_binary_archive_ = nullptr;
   bool pipeline_binary_archive_dirty_ = false;
+  std::mutex pipeline_binary_archive_mutex_;
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   std::atomic<uint64_t> completed_command_buffers_{0};
