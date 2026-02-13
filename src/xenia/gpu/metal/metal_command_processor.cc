@@ -9000,10 +9000,7 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
   if (primitive_polygonal) {
     flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
   }
-  if (vgt_draw_initiator.prim_type == xenos::PrimitiveType::kLineList ||
-      vgt_draw_initiator.prim_type == xenos::PrimitiveType::kLineStrip ||
-      vgt_draw_initiator.prim_type == xenos::PrimitiveType::kLineLoop ||
-      vgt_draw_initiator.prim_type == xenos::PrimitiveType::k2DLineStrip) {
+  if (draw_util::IsPrimitiveLine(regs)) {
     flags |= SpirvShaderTranslator::kSysFlag_PrimitiveLine;
   }
 
