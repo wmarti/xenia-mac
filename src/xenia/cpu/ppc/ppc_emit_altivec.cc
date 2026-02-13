@@ -2000,13 +2000,55 @@ int InstrEmit_vpkuwus128(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_vupkhpx(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  auto AndU32Vec = [&f](Value* input, uint32_t mask) {
+    return f.And(input, f.LoadConstantVec128(vec128i(mask)));
+  };
+  auto ShlU32Vec = [&f](Value* input, uint32_t shift) {
+    return f.VectorShl(input, f.LoadConstantVec128(vec128i(shift)), INT32_TYPE);
+  };
+  auto ShaU32Vec = [&f](Value* input, uint32_t shift) {
+    return f.VectorSha(input, f.LoadConstantVec128(vec128i(shift)), INT32_TYPE);
+  };
+
+  // Unpack high 4 packed ARGB1555 pixels to words:
+  // bit 15   -> sign-extended alpha byte.
+  // bits 10:14, 5:9, 0:4 -> red, green, blue low 5 bits in each byte.
+  Value* pixels = f.Unpack(f.LoadVR(i.VX.VB),
+                           PACK_TYPE_TO_HI | PACK_TYPE_16_IN_32 |
+                               PACK_TYPE_IN_SIGNED | PACK_TYPE_OUT_SIGNED);
+  pixels = AndU32Vec(pixels, 0x0000FFFFu);
+  Value* alpha = AndU32Vec(ShaU32Vec(ShlU32Vec(pixels, 16), 31), 0xFF000000u);
+  Value* red = AndU32Vec(ShlU32Vec(pixels, 6), 0x001F0000u);
+  Value* green = AndU32Vec(ShlU32Vec(pixels, 3), 0x00001F00u);
+  Value* blue = AndU32Vec(pixels, 0x0000001Fu);
+
+  f.StoreVR(i.VX.VD, f.Or(alpha, f.Or(red, f.Or(green, blue))));
+  return 0;
 }
 
 int InstrEmit_vupklpx(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  auto AndU32Vec = [&f](Value* input, uint32_t mask) {
+    return f.And(input, f.LoadConstantVec128(vec128i(mask)));
+  };
+  auto ShlU32Vec = [&f](Value* input, uint32_t shift) {
+    return f.VectorShl(input, f.LoadConstantVec128(vec128i(shift)), INT32_TYPE);
+  };
+  auto ShaU32Vec = [&f](Value* input, uint32_t shift) {
+    return f.VectorSha(input, f.LoadConstantVec128(vec128i(shift)), INT32_TYPE);
+  };
+
+  // Unpack low 4 packed ARGB1555 pixels to words.
+  Value* pixels = f.Unpack(f.LoadVR(i.VX.VB),
+                           PACK_TYPE_TO_LO | PACK_TYPE_16_IN_32 |
+                               PACK_TYPE_IN_SIGNED | PACK_TYPE_OUT_SIGNED);
+  pixels = AndU32Vec(pixels, 0x0000FFFFu);
+  Value* alpha = AndU32Vec(ShaU32Vec(ShlU32Vec(pixels, 16), 31), 0xFF000000u);
+  Value* red = AndU32Vec(ShlU32Vec(pixels, 6), 0x001F0000u);
+  Value* green = AndU32Vec(ShlU32Vec(pixels, 3), 0x00001F00u);
+  Value* blue = AndU32Vec(pixels, 0x0000001Fu);
+
+  f.StoreVR(i.VX.VD, f.Or(alpha, f.Or(red, f.Or(green, blue))));
+  return 0;
 }
 
 int InstrEmit_vupkhsh_(PPCHIRBuilder& f, uint32_t vd, uint32_t vb) {
