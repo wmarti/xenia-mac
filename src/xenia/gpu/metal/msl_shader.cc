@@ -746,6 +746,72 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   const MslShader& msl_shader = static_cast<const MslShader&>(shader());
   const auto& shader_texture_bindings =
       msl_shader.GetTextureBindingsAfterTranslation();
+  auto find_runtime_texture_binding_index =
+      [&](uint32_t fetch_constant, xenos::FetchOpDimension dimension,
+          bool is_signed) -> int32_t {
+    for (size_t i = 0; i < shader_texture_bindings.size(); ++i) {
+      const auto& binding = shader_texture_bindings[i];
+      if (binding.fetch_constant == fetch_constant &&
+          binding.dimension == dimension && binding.is_signed == is_signed) {
+        return int32_t(i);
+      }
+    }
+    return -1;
+  };
+  auto parse_texture_resource_name =
+      [](const std::string& name, uint32_t* fetch_constant_out,
+         xenos::FetchOpDimension* dimension_out,
+         bool* is_signed_out) -> bool {
+    static constexpr const char kPrefix[] = "xe_texture";
+    if (!fetch_constant_out || !dimension_out || !is_signed_out ||
+        name.size() <= sizeof(kPrefix) - 1 ||
+        name.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0) {
+      return false;
+    }
+    size_t offset = sizeof(kPrefix) - 1;
+    uint32_t fetch_constant = 0;
+    bool has_digit = false;
+    while (offset < name.size() &&
+           std::isdigit(static_cast<unsigned char>(name[offset]))) {
+      has_digit = true;
+      fetch_constant = fetch_constant * 10 + uint32_t(name[offset] - '0');
+      ++offset;
+    }
+    if (!has_digit || offset >= name.size() || name[offset] != '_') {
+      return false;
+    }
+    ++offset;
+
+    size_t dim_end = name.find('_', offset);
+    if (dim_end == std::string::npos || dim_end <= offset) {
+      return false;
+    }
+    std::string dim_token = name.substr(offset, dim_end - offset);
+    xenos::FetchOpDimension dimension = xenos::FetchOpDimension::k2D;
+    if (dim_token == "2d") {
+      dimension = xenos::FetchOpDimension::k2D;
+    } else if (dim_token == "3d") {
+      dimension = xenos::FetchOpDimension::k3DOrStacked;
+    } else if (dim_token == "cube") {
+      dimension = xenos::FetchOpDimension::kCube;
+    } else {
+      return false;
+    }
+
+    offset = dim_end + 1;
+    if (offset >= name.size()) {
+      return false;
+    }
+    char sign_char = name[offset];
+    if (sign_char != 's' && sign_char != 'u') {
+      return false;
+    }
+
+    *fetch_constant_out = fetch_constant;
+    *dimension_out = dimension;
+    *is_signed_out = sign_char == 's';
+    return true;
+  };
   texture_binding_indices_for_msl_slots_.reserve(std::min<size_t>(
       shader_texture_bindings.size(), MslTextureIndex::kMaxPerStage));
   for (uint32_t i = 0;
@@ -774,18 +840,35 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
           shader().ucode_data_hash());
       return;
     }
-    // SPIR-V translator emits texture decoration bindings matching runtime
-    // texture binding indices (vector order in GetTextureBindingsAfterTranslation).
-    if (spv_binding >= shader_texture_bindings.size()) {
-      XELOGW(
-          "MslShader: Reflected texture binding {} is out of runtime range {} "
-          "shader={:016X}",
-          spv_binding, shader_texture_bindings.size(),
-          shader().ucode_data_hash());
-      texture_reflection_incomplete = true;
-      return;
+    int32_t runtime_binding_index = -1;
+    uint32_t parsed_fetch_constant = 0;
+    xenos::FetchOpDimension parsed_dimension = xenos::FetchOpDimension::k2D;
+    bool parsed_is_signed = false;
+    if (parse_texture_resource_name(resource.name, &parsed_fetch_constant,
+                                    &parsed_dimension, &parsed_is_signed)) {
+      runtime_binding_index = find_runtime_texture_binding_index(
+          parsed_fetch_constant, parsed_dimension, parsed_is_signed);
+      if (runtime_binding_index < 0) {
+        XELOGW(
+            "MslShader: Unable to resolve texture resource '{}' in runtime "
+            "bindings shader={:016X}",
+            resource.name, shader().ucode_data_hash());
+      }
     }
-    int32_t runtime_binding_index = int32_t(spv_binding);
+    if (runtime_binding_index < 0) {
+      // Fall back to SPIR-V decoration binding index when reflection names are
+      // unavailable or don't match translator naming.
+      if (spv_binding >= shader_texture_bindings.size()) {
+        XELOGW(
+            "MslShader: Reflected texture binding {} is out of runtime range {} "
+            "shader={:016X}",
+            spv_binding, shader_texture_bindings.size(),
+            shader().ucode_data_hash());
+        texture_reflection_incomplete = true;
+        return;
+      }
+      runtime_binding_index = int32_t(spv_binding);
+    }
 
     if (texture_binding_indices_for_msl_slots_.size() <= spv_binding) {
       texture_binding_indices_for_msl_slots_.resize(spv_binding + 1, -1);
