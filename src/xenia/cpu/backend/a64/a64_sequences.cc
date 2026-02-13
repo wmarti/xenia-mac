@@ -25,6 +25,9 @@
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -2281,6 +2284,237 @@ EMITTER_OPCODE_TABLE(OPCODE_SQRT, SQRT_F32, SQRT_F64, SQRT_V128);
 // ============================================================================
 // OPCODE_RSQRT
 // ============================================================================
+inline uint32_t CountLeadingZeros32(uint32_t value) {
+  return value ? static_cast<uint32_t>(__builtin_clz(value)) : 32u;
+}
+
+inline uint32_t CountLeadingZeros64(uint64_t value) {
+  return value ? static_cast<uint32_t>(__builtin_clzll(value)) : 64u;
+}
+
+inline uint32_t FloatToBits(float value) {
+  uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+inline float BitsToFloat(uint32_t bits) {
+  float value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+inline uint64_t DoubleToBits(double value) {
+  uint64_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+inline double BitsToDouble(uint64_t bits) {
+  double value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+// Copied from x64 backend to match PPC estimate behavior.
+static constexpr uint32_t kVrsqrteTable[32] = {
+    0x0568B4FDu, 0x04F3AF97u, 0x048DAAA5u, 0x0435A618u, 0x03E7A1E4u,
+    0x03A29DFEu, 0x03659A5Cu, 0x032E96F8u, 0x02FC93CAu, 0x02D090CEu,
+    0x02A88DFEu, 0x02838B57u, 0x026188D4u, 0x02438673u, 0x02268431u,
+    0x020B820Bu, 0x03D27FFAu, 0x03807C29u, 0x033878AAu, 0x02F97572u,
+    0x02C27279u, 0x02926FB7u, 0x02666D26u, 0x023F6AC0u, 0x021D6881u,
+    0x01FD6665u, 0x01E16468u, 0x01C76287u, 0x01AF60C1u, 0x01995F12u,
+    0x01855D79u, 0x01735BF4u,
+};
+
+static constexpr uint8_t kFrsqrteTable[16] = {
+    241u, 216u, 192u, 168u, 152u, 136u, 128u, 112u,
+    96u,  76u,  60u,  48u,  32u,  24u,  16u,  8u,
+};
+
+inline uint32_t EmulateVrsqrteScalarBits(uint32_t src_bits,
+                                         bool njm_enabled = true) {
+  uint32_t r8d = src_bits;
+  float input = BitsToFloat(r8d);
+  uint32_t ecx = r8d & 0x7FFFFFu;
+  uint32_t edx = ecx;
+  int32_t eax = 0;
+  uint32_t r9d = 0;
+
+  if (r8d == 0xFF800000u) {
+    return 0x7FC00000u;
+  }
+
+  if ((r8d & 0x7F800000u) == 0 && ecx != 0) {
+    if (!njm_enabled) {
+      r9d = r8d & 0x7FFFFFFFu;
+      if (r9d == 0x00400000u) {
+        return ((~r8d >> 31) != 0) ? 0x5F34FD00u : 0x7FC00000u;
+      }
+      ecx = CountLeadingZeros32(ecx);
+      r9d = 9;
+      eax = -118;
+      edx = static_cast<uint32_t>(static_cast<int32_t>(ecx) - 8);
+      r9d -= ecx;
+      eax -= static_cast<int32_t>(ecx);
+      edx = r8d << edx;
+      edx &= 0x7FFFFEu;
+      goto compute_from_fields;
+    }
+    return ((~r8d >> 31) != 0) ? 0x7F800000u : 0xFF800000u;
+  }
+
+  r9d = (r8d >> 23) & 0xFFu;
+  eax = static_cast<int32_t>(r9d) - 127;
+  if (r9d == 255u) {
+    if (!(input < 0.0f || std::isnan(input))) {
+      if (ecx == 0) {
+        return 0u;
+      }
+    }
+    return r8d | 0x00400000u;
+  }
+
+compute_from_fields:
+  if (eax == 128) {
+    if (0.0f > input) {
+      if (edx == 0) {
+        return 0x7FC00000u;
+      }
+      return r8d | 0x00400000u;
+    }
+  }
+
+  if (edx == 0) {
+    if (r9d == 0u) {
+      return ((~r8d >> 31) != 0) ? 0x7F800000u : 0xFF800000u;
+    }
+  } else if (eax == 128) {
+    return r8d | 0x00400000u;
+  }
+
+  if (0.0f > input) {
+    return 0x7FC00000u;
+  }
+
+  ecx = 127;
+  eax <<= 4;
+  ecx -= static_cast<int32_t>(r9d);
+  r9d = edx;
+  eax &= 16;
+  edx >>= 9;
+  r9d >>= 19;
+  edx &= 1023;
+  ecx >>= 1;
+  eax |= static_cast<int32_t>(r9d);
+  eax ^= 16;
+
+  uint32_t table_entry = kVrsqrteTable[static_cast<uint32_t>(eax) & 31];
+  eax = static_cast<int32_t>(table_entry);
+  r9d = table_entry >> 16;
+  edx *= r9d;
+  eax <<= 10;
+  eax &= 0x3FFFC00;
+  eax -= static_cast<int32_t>(edx);
+  if (((static_cast<uint32_t>(eax) >> 25) & 1u) == 0) {
+    edx = static_cast<uint32_t>(eax) & 0x1FFFFFFu;
+    ecx += 6;
+    uint32_t lz = CountLeadingZeros32(edx);
+    r9d = lz - 6;
+    ecx -= static_cast<int32_t>(lz);
+    eax = static_cast<int32_t>(static_cast<uint32_t>(eax) << r9d);
+  }
+
+  if ((eax & 0x5) != 0 && (eax & 0x2) != 0) {
+    eax += 4;
+  }
+
+  ecx <<= 23;
+  r8d &= 0x80000000u;
+  eax = static_cast<int32_t>(static_cast<uint32_t>(eax) >> 2);
+  ecx += 0x3F800000;
+  eax &= 0x7FFFFF;
+  uint32_t out = static_cast<uint32_t>(ecx) | r8d | static_cast<uint32_t>(eax);
+  // Apply DAZ/FTZ behavior used by PPC estimate path.
+  if ((out & 0x7F800000u) == 0 && (out & 0x007FFFFFu) != 0) {
+    out &= 0x80000000u;
+  }
+  return out;
+}
+
+inline uint64_t EmulateFrsqrteBits(uint64_t src_bits,
+                                   bool non_ieee_mode = false) {
+  uint64_t rax = src_bits;
+  constexpr uint64_t kSignMask = 0x8000000000000000ULL;
+  constexpr uint64_t kExpMask = 0x7FF0000000000000ULL;
+
+  if (non_ieee_mode) {
+    uint64_t shifted = rax << 12;
+    if (shifted != 0 && (rax & kExpMask) == 0) {
+      return (rax & kSignMask) | kExpMask;
+    }
+  }
+
+  uint64_t rcx = rax + rax;
+  if (rcx == 0) {
+    return (rax & kSignMask) | kExpMask;
+  }
+
+  if (((~rax) & kExpMask) == 0) {
+    if (rax == kExpMask) {
+      return 0ULL;
+    }
+    uint64_t shifted = rax << 12;
+    if (shifted == 0 && BitsToDouble(rax) < 0.0) {
+      return 0x7FF8000000000000ULL;
+    }
+    return rax | 0x7FF8000000000000ULL;
+  }
+
+  if (0.0 > BitsToDouble(rax)) {
+    return 0x7FF8000000000000ULL;
+  }
+
+  uint64_t exponent = (rax >> 52) & 0x7FFULL;
+  uint64_t mantissa = rax & 0x000FFFFFFFFFFFFFULL;
+
+  if (mantissa != 0 && exponent == 0) {
+    uint32_t lz = CountLeadingZeros64(mantissa);
+    mantissa <<= static_cast<uint32_t>(static_cast<int32_t>(lz) - 11);
+    exponent = static_cast<uint64_t>(12 - static_cast<int32_t>(lz));
+  }
+
+  uint32_t edx = static_cast<uint32_t>(exponent * 8);
+  uint32_t eax = static_cast<uint32_t>(mantissa >> 49) & 7u;
+  int32_t exp_unbiased = static_cast<int32_t>(exponent) - 1023;
+  edx &= 8u;
+  exp_unbiased >>= 1;
+  eax |= edx;
+  edx = static_cast<uint32_t>(1022 - exp_unbiased);
+  eax ^= 8u;
+  uint64_t out = (static_cast<uint64_t>(edx) << 52) |
+                 (static_cast<uint64_t>(kFrsqrteTable[eax & 15u]) << 44);
+  return out;
+}
+
+inline float64x2_t EmulateRsqrtF64(void*, std::byte src[16]) {
+  uint64_t in_bits;
+  std::memcpy(&in_bits, src, sizeof(in_bits));
+  uint64_t out_bits = EmulateFrsqrteBits(in_bits);
+  uint64x2_t out = vdupq_n_u64(0);
+  out = vsetq_lane_u64(out_bits, out, 0);
+  return vreinterpretq_f64_u64(out);
+}
+
+inline float32x4_t EmulateRsqrtV128(void*, std::byte src[16]) {
+  alignas(16) uint32_t lanes[4];
+  std::memcpy(lanes, src, sizeof(lanes));
+  for (uint32_t& lane : lanes) {
+    lane = EmulateVrsqrteScalarBits(lane);
+  }
+  return vreinterpretq_f32_u32(vld1q_u32(lanes));
+}
+
 // Altivec guarantees an error of < 1/4096 for vrsqrtefp
 struct RSQRT_F32 : Sequence<RSQRT_F32, I<OPCODE_RSQRT, F32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
@@ -2295,25 +2529,24 @@ struct RSQRT_F32 : Sequence<RSQRT_F32, I<OPCODE_RSQRT, F32Op, F32Op>> {
 };
 struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    DReg src1 = D0;
     if (i.src1.is_constant) {
-      e.LoadConstantV(src1.toQ(), i.src1.constant());
+      e.ADD(e.GetNativeParam(0), SP, e.StashConstantV(0, i.src1.constant()));
     } else {
-      src1 = i.src1.reg();
+      e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1.reg().toQ()));
     }
-    e.FRSQRTE(i.dest, src1);
+    e.CallNativeSafe(reinterpret_cast<void*>(EmulateRsqrtF64));
+    e.FMOV(i.dest, D0);
   }
 };
 struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    EmitWithVmxFpcr(e, [&] {
-      if (i.src1.is_constant) {
-        e.LoadConstantV(Q0, i.src1.constant());
-        e.FRSQRTE(i.dest.reg().S4(), Q0.S4());
-      } else {
-        e.FRSQRTE(i.dest.reg().S4(), i.src1.reg().S4());
-      }
-    });
+    if (i.src1.is_constant) {
+      e.ADD(e.GetNativeParam(0), SP, e.StashConstantV(0, i.src1.constant()));
+    } else {
+      e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1.reg().toQ()));
+    }
+    e.CallNativeSafe(reinterpret_cast<void*>(EmulateRsqrtV128));
+    e.MOV(i.dest.reg().B16(), Q0.B16());
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RSQRT, RSQRT_F32, RSQRT_F64, RSQRT_V128);
@@ -2330,7 +2563,10 @@ struct RECIP_F32 : Sequence<RECIP_F32, I<OPCODE_RECIP, F32Op, F32Op>> {
     } else {
       src1 = i.src1.reg();
     }
-    e.FRECPE(i.dest, src1);
+    SReg one = src1.index() == 0 ? S1 : S0;
+    e.MOV(W2, 0x3F800000u);
+    e.FMOV(one, W2);
+    e.FDIV(i.dest, one, src1);
   }
 };
 struct RECIP_F64 : Sequence<RECIP_F64, I<OPCODE_RECIP, F64Op, F64Op>> {
@@ -2341,18 +2577,22 @@ struct RECIP_F64 : Sequence<RECIP_F64, I<OPCODE_RECIP, F64Op, F64Op>> {
     } else {
       src1 = i.src1.reg();
     }
-    e.FRECPE(i.dest, src1);
+    DReg one = src1.index() == 0 ? D1 : D0;
+    e.MOV(X2, 0x3FF0000000000000ULL);
+    e.FMOV(one, X2);
+    e.FDIV(i.dest, one, src1);
   }
 };
 struct RECIP_V128 : Sequence<RECIP_V128, I<OPCODE_RECIP, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     EmitWithVmxFpcr(e, [&] {
+      QReg src = i.src1.is_constant ? Q0 : i.src1.reg();
       if (i.src1.is_constant) {
-        e.LoadConstantV(Q0, i.src1.constant());
-        e.FRECPE(i.dest.reg().S4(), Q0.S4());
-      } else {
-        e.FRECPE(i.dest.reg().S4(), i.src1.reg().S4());
+        e.LoadConstantV(src, i.src1.constant());
       }
+      QReg one = src.index() == 0 ? Q1 : Q0;
+      e.FMOV(one.S4(), FImm8(0, 7, 0));
+      e.FDIV(i.dest.reg().S4(), one.S4(), src.S4());
     });
   }
 };
