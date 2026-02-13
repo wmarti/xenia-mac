@@ -3535,32 +3535,28 @@ MTL::Texture* MetalRenderTargetCache::GetStencilTextureView(
 
 MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
     uint32_t expected_sample_count) {
-  bool sample_count_changed = cached_render_pass_descriptor_sample_count_ !=
-                              expected_sample_count;
-  if (sample_count_changed) {
-    render_pass_descriptor_dirty_ = true;
-  }
-  bool need_new_descriptor = sample_count_changed ||
-                             !cached_render_pass_descriptor_;
-  if (!render_pass_descriptor_dirty_ && !need_new_descriptor &&
-      cached_render_pass_descriptor_) {
+  if (!render_pass_descriptor_dirty_ && cached_render_pass_descriptor_ &&
+      cached_render_pass_descriptor_sample_count_ == expected_sample_count) {
     return cached_render_pass_descriptor_;
   }
+  if (cached_render_pass_descriptor_sample_count_ != expected_sample_count) {
+    render_pass_descriptor_dirty_ = true;
+  }
 
-  if (need_new_descriptor && cached_render_pass_descriptor_) {
+  // Release old descriptor
+  if (cached_render_pass_descriptor_) {
     cached_render_pass_descriptor_->release();
     cached_render_pass_descriptor_ = nullptr;
   }
 
+  // Create new descriptor
+  cached_render_pass_descriptor_ =
+      MTL::RenderPassDescriptor::renderPassDescriptor();
   if (!cached_render_pass_descriptor_) {
-    cached_render_pass_descriptor_ =
-        MTL::RenderPassDescriptor::renderPassDescriptor();
-    if (!cached_render_pass_descriptor_) {
-      XELOGE("MetalRenderTargetCache: Failed to create render pass descriptor");
-      return nullptr;
-    }
-    cached_render_pass_descriptor_->retain();
+    XELOGE("MetalRenderTargetCache: Failed to create render pass descriptor");
+    return nullptr;
   }
+  cached_render_pass_descriptor_->retain();
   cached_render_pass_descriptor_sample_count_ = expected_sample_count;
 
   bool has_any_render_target = false;
@@ -3570,33 +3566,6 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
   uint32_t coverage_height = 0;
   uint32_t coverage_samples = std::max(1u, expected_sample_count);
 
-  // The cached descriptor object is reused across draws, so clear all
-  // attachment bindings first to avoid stale textures/actions leaking from the
-  // previous pass configuration.
-  auto* color_attachments = cached_render_pass_descriptor_->colorAttachments();
-  for (uint32_t i = 0; i < 8; ++i) {
-    auto* color_attachment = color_attachments->object(i);
-    if (!color_attachment) {
-      continue;
-    }
-    color_attachment->setTexture(nullptr);
-    color_attachment->setResolveTexture(nullptr);
-    color_attachment->setLoadAction(MTL::LoadActionDontCare);
-    color_attachment->setStoreAction(MTL::StoreActionDontCare);
-  }
-  auto* depth_attachment = cached_render_pass_descriptor_->depthAttachment();
-  if (depth_attachment) {
-    depth_attachment->setTexture(nullptr);
-    depth_attachment->setLoadAction(MTL::LoadActionDontCare);
-    depth_attachment->setStoreAction(MTL::StoreActionDontCare);
-  }
-  auto* stencil_attachment = cached_render_pass_descriptor_->stencilAttachment();
-  if (stencil_attachment) {
-    stencil_attachment->setTexture(nullptr);
-    stencil_attachment->setLoadAction(MTL::LoadActionDontCare);
-    stencil_attachment->setStoreAction(MTL::StoreActionDontCare);
-  }
-
   // Bind the actual render targets retrieved from base class in Update()
 
   // Bind depth target if present
@@ -3605,6 +3574,7 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
     depth_attachment->setTexture(current_depth_target_->draw_texture());
 
     // Clear on first bind to avoid synchronous clears at creation.
+    uint32_t depth_key = current_depth_target_->key().key;
     bool depth_needs_clear = current_depth_target_->needs_initial_clear();
     if (depth_needs_clear) {
       depth_attachment->setLoadAction(MTL::LoadActionClear);

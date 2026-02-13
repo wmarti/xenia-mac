@@ -42,7 +42,7 @@ constexpr uint32_t kMslSourceCacheMagic = 0x5843534D;  // 'MSCX'
 constexpr uint32_t kMslSourceCacheVersion = 1;
 constexpr uint32_t kMslSourceCacheMaxBytes = 16 * 1024 * 1024;
 // Bump when cache-key semantics change to force invalidation of stale entries.
-constexpr uint32_t kMslSourceCacheSchemaVersion = 4;
+constexpr uint32_t kMslSourceCacheSchemaVersion = 3;
 
 std::mutex g_msl_source_cache_mutex;
 std::filesystem::path g_msl_source_cache_directory;
