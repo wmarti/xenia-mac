@@ -202,6 +202,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // 16 bytes.
   struct SystemConstants {
     uint32_t flags;
+    uint32_t line_loop_closing_index;
     uint32_t vertex_index_load_address;
     xenos::Endian vertex_index_endian;
     int32_t vertex_base_index;
@@ -903,6 +904,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
 
   enum SystemConstantIndex : unsigned int {
     kSystemConstantFlags,
+    kSystemConstantLineLoopClosingIndex,
     kSystemConstantVertexIndexLoadAddress,
     kSystemConstantVertexIndexEndian,
     kSystemConstantVertexBaseIndex,

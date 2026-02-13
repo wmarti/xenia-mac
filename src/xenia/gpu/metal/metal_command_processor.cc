@@ -9051,6 +9051,7 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
   }
 
   consts.flags = flags;
+  consts.line_loop_closing_index = line_loop_closing_index;
 
   // Vertex index.
   consts.vertex_index_endian = index_endian;

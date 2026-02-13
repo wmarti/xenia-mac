@@ -5980,6 +5980,12 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   dirty |= system_constants_.flags != flags;
   system_constants_.flags = flags;
 
+  // Closing index for line loop expansion (0 means disabled/no remap).
+  dirty |= system_constants_.line_loop_closing_index !=
+           primitive_processing_result.line_loop_closing_index;
+  system_constants_.line_loop_closing_index =
+      primitive_processing_result.line_loop_closing_index;
+
   // Index buffer address for loading in the shaders.
   if (flags &
       (SpirvShaderTranslator::kSysFlag_VertexIndexLoad |

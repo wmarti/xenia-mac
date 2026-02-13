@@ -402,6 +402,8 @@ void SpirvShaderTranslator::StartTranslation() {
                           sizeof(float) * 4);
   const SystemConstant system_constants[] = {
       {"flags", offsetof(SystemConstants, flags), type_uint_},
+      {"line_loop_closing_index",
+       offsetof(SystemConstants, line_loop_closing_index), type_uint_},
       {"vertex_index_load_address",
        offsetof(SystemConstants, vertex_index_load_address), type_uint_},
       {"vertex_index_endian", offsetof(SystemConstants, vertex_index_endian),
@@ -2217,7 +2219,22 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
         vertex_index = load_vertex_index_if.createMergePhi(loaded_vertex_index,
                                                            vertex_index);
       } else {
-        // TODO(Triang3l): Close line loop primitive.
+        // Close line loop primitive by mapping the synthesized last index
+        // (host draw vertex count - 1) to the first vertex index.
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(kSystemConstantLineLoopClosingIndex));
+        vertex_index = builder_->createTriOp(
+            spv::OpSelect, type_uint_,
+            builder_->createBinOp(
+                spv::OpIEqual, type_bool_, vertex_index,
+                builder_->createLoad(
+                    builder_->createAccessChain(spv::StorageClassUniform,
+                                                uniform_system_constants_,
+                                                id_vector_temp_),
+                    spv::NoPrecision)),
+            const_uint_0_, vertex_index);
+
         // Load the unswapped index as uint for swapping, or for indirect
         // loading if needed.
         if (!features_.full_draw_index_uint32) {
