@@ -133,8 +133,13 @@ DEFINE_bool(metal_texture_upload_via_blit, true,
             "of CPU replaceRegion.",
             "GPU");
 
-// Default to SPIRV-Cross when Metal Shader Converter is not available (iOS).
-#if METAL_SHADER_CONVERTER_AVAILABLE
+// On iOS, Metal Shader Converter is unavailable, so use SPIRV-Cross.
+// On macOS, prefer the MSC path by default.
+#if XE_PLATFORM_IOS
+#define SPIRVCROSS_DEFAULT true
+#elif XE_PLATFORM_APPLE
+#define SPIRVCROSS_DEFAULT false
+#elif METAL_SHADER_CONVERTER_AVAILABLE
 #define SPIRVCROSS_DEFAULT false
 #else
 #define SPIRVCROSS_DEFAULT true
