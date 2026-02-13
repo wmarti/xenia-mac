@@ -52,6 +52,149 @@ using xe::cpu::hir::Instr;
 
 typedef bool (*SequenceSelectFn)(A64Emitter&, const Instr*);
 
+template <typename Fn>
+void EmitWithVmxFpcr(A64Emitter& e, Fn&& emit_op) {
+  // Altivec vector FP runs with non-IEEE flush-to-zero and round-to-nearest.
+  e.MRS(X13, SystemReg::FPCR);
+  e.MOV(X14, X13);
+  e.BFI(X14, XZR, 22, 2);
+  e.ORR(X14, X14, uint64_t(1) << 24);
+  e.MSR(SystemReg::FPCR, X14);
+  emit_op();
+  e.MSR(SystemReg::FPCR, X13);
+}
+
+inline bool IsMulAddOrMulSubDef(const Value* value) {
+  if (!value || !value->def || !value->def->opcode) {
+    return false;
+  }
+  const auto opcode = value->def->opcode->num;
+  return opcode == OPCODE_MUL_ADD || opcode == OPCODE_MUL_SUB;
+}
+
+inline void EmitPropagateInputNanF64Binary(A64Emitter& e, DReg dest, DReg src1,
+                                           DReg src2, oaknut::Label& no_nan,
+                                           oaknut::Label& done) {
+  constexpr uint64_t kF64QuietBit = uint64_t(1) << 51;
+  oaknut::Label check_src2;
+  oaknut::Label src1_qnan;
+  oaknut::Label src2_qnan;
+
+  e.FCMP(src1, src1);
+  e.B(Cond::VC, check_src2);
+  e.FMOV(X0, src1);
+  e.TST(X0, kF64QuietBit);
+  e.B(Cond::NE, src1_qnan);
+  e.ORR(X0, X0, kF64QuietBit);
+  e.FMOV(dest, X0);
+  e.B(done);
+  e.l(src1_qnan);
+  e.FMOV(dest, src1);
+  e.B(done);
+
+  e.l(check_src2);
+  e.FCMP(src2, src2);
+  e.B(Cond::VC, no_nan);
+  e.FMOV(X0, src2);
+  e.TST(X0, kF64QuietBit);
+  e.B(Cond::NE, src2_qnan);
+  e.ORR(X0, X0, kF64QuietBit);
+  e.FMOV(dest, X0);
+  e.B(done);
+  e.l(src2_qnan);
+  e.FMOV(dest, src2);
+  e.B(done);
+}
+
+inline void EmitPropagateInputNanF64Ternary(A64Emitter& e, DReg dest, DReg src1,
+                                            DReg src2, DReg src3,
+                                            oaknut::Label& no_nan,
+                                            oaknut::Label& done) {
+  constexpr uint64_t kF64QuietBit = uint64_t(1) << 51;
+
+  oaknut::Label check_src2;
+  oaknut::Label check_src3;
+  oaknut::Label src1_qnan;
+  oaknut::Label src2_qnan;
+  oaknut::Label src3_qnan;
+
+  e.FCMP(src1, src1);
+  e.B(Cond::VC, check_src2);
+  e.FMOV(X0, src1);
+  e.TST(X0, kF64QuietBit);
+  e.B(Cond::NE, src1_qnan);
+  e.ORR(X0, X0, kF64QuietBit);
+  e.FMOV(dest, X0);
+  e.B(done);
+  e.l(src1_qnan);
+  e.FMOV(dest, src1);
+  e.B(done);
+
+  e.l(check_src2);
+  e.FCMP(src2, src2);
+  e.B(Cond::VC, check_src3);
+  e.FMOV(X0, src2);
+  e.TST(X0, kF64QuietBit);
+  e.B(Cond::NE, src2_qnan);
+  e.ORR(X0, X0, kF64QuietBit);
+  e.FMOV(dest, X0);
+  e.B(done);
+  e.l(src2_qnan);
+  e.FMOV(dest, src2);
+  e.B(done);
+
+  e.l(check_src3);
+  e.FCMP(src3, src3);
+  e.B(Cond::VC, no_nan);
+  e.FMOV(X0, src3);
+  e.TST(X0, kF64QuietBit);
+  e.B(Cond::NE, src3_qnan);
+  e.ORR(X0, X0, kF64QuietBit);
+  e.FMOV(dest, X0);
+  e.B(done);
+  e.l(src3_qnan);
+  e.FMOV(dest, src3);
+  e.B(done);
+}
+
+inline void EmitSelectFirstNanLanesF32x4(A64Emitter& e, QReg result, QReg src1,
+                                         QReg src2) {
+  // mask1 = isnan(src1)
+  e.FCMEQ(Q3.S4(), src1.S4(), src1.S4());
+  e.MVN(Q3.B16(), Q3.B16());
+  e.BIT(result.B16(), src1.B16(), Q3.B16());
+
+  // mask2 = !mask1 & isnan(src2)
+  e.FCMEQ(Q0.S4(), src2.S4(), src2.S4());
+  e.MVN(Q0.B16(), Q0.B16());
+  e.BIC(Q0.B16(), Q0.B16(), Q3.B16());
+  e.BIT(result.B16(), src2.B16(), Q0.B16());
+}
+
+inline void EmitSelectFirstQNanLanesF32x4(A64Emitter& e, QReg result, QReg src1,
+                                          QReg src2, QReg src3) {
+  // Prefer first NaN source lane and quiet signaling NaNs.
+  e.LoadConstantV(Q6, vec128i(0x00400000u));
+
+  e.FCMEQ(Q7.S4(), src1.S4(), src1.S4());
+  e.MVN(Q7.B16(), Q7.B16());
+  e.ORR(Q4.B16(), src1.B16(), Q6.B16());
+  e.BIT(result.B16(), Q4.B16(), Q7.B16());
+
+  e.FCMEQ(Q0.S4(), src2.S4(), src2.S4());
+  e.MVN(Q0.B16(), Q0.B16());
+  e.BIC(Q0.B16(), Q0.B16(), Q7.B16());
+  e.ORR(Q4.B16(), src2.B16(), Q6.B16());
+  e.BIT(result.B16(), Q4.B16(), Q0.B16());
+
+  e.FCMEQ(Q3.S4(), src3.S4(), src3.S4());
+  e.MVN(Q3.B16(), Q3.B16());
+  e.ORR(Q4.B16(), src3.B16(), Q6.B16());
+  e.BIC(Q3.B16(), Q3.B16(), Q7.B16());
+  e.BIC(Q3.B16(), Q3.B16(), Q0.B16());
+  e.BIT(result.B16(), Q4.B16(), Q3.B16());
+}
+
 // ============================================================================
 // OPCODE_COMMENT
 // ============================================================================
@@ -441,20 +584,22 @@ struct ROUND_V128 : Sequence<ROUND_V128, I<OPCODE_ROUND, V128Op, V128Op>> {
     if (i.src1.is_constant) {
       e.LoadConstantV(Q0, i.src1.constant());
     }
-    switch (i.instr->flags) {
-      case ROUND_TO_ZERO:
-        e.FRINTZ(i.dest.reg().S4(), src.S4());
-        break;
-      case ROUND_TO_NEAREST:
-        e.FRINTN(i.dest.reg().S4(), src.S4());
-        break;
-      case ROUND_TO_MINUS_INFINITY:
-        e.FRINTM(i.dest.reg().S4(), src.S4());
-        break;
-      case ROUND_TO_POSITIVE_INFINITY:
-        e.FRINTP(i.dest.reg().S4(), src.S4());
-        break;
-    }
+    EmitWithVmxFpcr(e, [&] {
+      switch (i.instr->flags) {
+        case ROUND_TO_ZERO:
+          e.FRINTZ(i.dest.reg().S4(), src.S4());
+          break;
+        case ROUND_TO_NEAREST:
+          e.FRINTN(i.dest.reg().S4(), src.S4());
+          break;
+        case ROUND_TO_MINUS_INFINITY:
+          e.FRINTM(i.dest.reg().S4(), src.S4());
+          break;
+        case ROUND_TO_POSITIVE_INFINITY:
+          e.FRINTP(i.dest.reg().S4(), src.S4());
+          break;
+      }
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_ROUND, ROUND_F32, ROUND_F64, ROUND_V128);
@@ -523,10 +668,24 @@ struct MAX_F64 : Sequence<MAX_F64, I<OPCODE_MAX, F64Op, F64Op, F64Op>> {
 };
 struct MAX_V128 : Sequence<MAX_V128, I<OPCODE_MAX, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    EmitCommutativeBinaryVOp<QReg>(
-        e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
-          e.FMAX(dest.S4(), src1.S4(), src2.S4());
-        });
+    EmitWithVmxFpcr(e, [&] {
+      QReg src1 = Q0;
+      QReg src2 = Q1;
+      if (i.src1.is_constant) {
+        e.LoadConstantV(src1, i.src1.constant());
+      } else {
+        e.MOV(src1.B16(), i.src1.reg().B16());
+      }
+      if (i.src2.is_constant) {
+        e.LoadConstantV(src2, i.src2.constant());
+      } else {
+        e.MOV(src2.B16(), i.src2.reg().B16());
+      }
+
+      e.FMAX(Q2.S4(), src1.S4(), src2.S4());
+      EmitSelectFirstNanLanesF32x4(e, Q2, src1, src2);
+      e.MOV(i.dest.reg().B16(), Q2.B16());
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_MAX, MAX_F32, MAX_F64, MAX_V128);
@@ -612,10 +771,24 @@ struct MIN_F64 : Sequence<MIN_F64, I<OPCODE_MIN, F64Op, F64Op, F64Op>> {
 };
 struct MIN_V128 : Sequence<MIN_V128, I<OPCODE_MIN, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    EmitCommutativeBinaryVOp(
-        e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
-          e.FMIN(dest.S4(), src1.S4(), src2.S4());
-        });
+    EmitWithVmxFpcr(e, [&] {
+      QReg src1 = Q0;
+      QReg src2 = Q1;
+      if (i.src1.is_constant) {
+        e.LoadConstantV(src1, i.src1.constant());
+      } else {
+        e.MOV(src1.B16(), i.src1.reg().B16());
+      }
+      if (i.src2.is_constant) {
+        e.LoadConstantV(src2, i.src2.constant());
+      } else {
+        e.MOV(src2.B16(), i.src2.reg().B16());
+      }
+
+      e.FMIN(Q2.S4(), src1.S4(), src2.S4());
+      EmitSelectFirstNanLanesF32x4(e, Q2, src1, src2);
+      e.MOV(i.dest.reg().B16(), Q2.B16());
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_MIN, MIN_I8, MIN_I16, MIN_I32, MIN_I64, MIN_F32,
@@ -1080,18 +1253,31 @@ struct ADD_F32 : Sequence<ADD_F32, I<OPCODE_ADD, F32Op, F32Op, F32Op>> {
 };
 struct ADD_F64 : Sequence<ADD_F64, I<OPCODE_ADD, F64Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    EmitCommutativeBinaryVOp<DReg>(
-        e, i, [](A64Emitter& e, DReg dest, DReg src1, DReg src2) {
-          e.FADD(dest, src1, src2);
-        });
+    DReg src1 = i.src1.is_constant ? D1 : i.src1.reg();
+    DReg src2 = i.src2.is_constant ? D2 : i.src2.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1.toQ(), i.src1.constant());
+    }
+    if (i.src2.is_constant) {
+      e.LoadConstantV(src2.toQ(), i.src2.constant());
+    }
+
+    oaknut::Label do_op;
+    oaknut::Label done;
+    EmitPropagateInputNanF64Binary(e, i.dest.reg(), src1, src2, do_op, done);
+    e.l(do_op);
+    e.FADD(i.dest.reg(), src1, src2);
+    e.l(done);
   }
 };
 struct ADD_V128 : Sequence<ADD_V128, I<OPCODE_ADD, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    EmitCommutativeBinaryVOp(
-        e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
-          e.FADD(dest.S4(), src1.S4(), src2.S4());
-        });
+    EmitWithVmxFpcr(e, [&] {
+      EmitCommutativeBinaryVOp(
+          e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
+            e.FADD(dest.S4(), src1.S4(), src2.S4());
+          });
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_ADD, ADD_I8, ADD_I16, ADD_I32, ADD_I64, ADD_F32,
@@ -1210,19 +1396,32 @@ struct SUB_F32 : Sequence<SUB_F32, I<OPCODE_SUB, F32Op, F32Op, F32Op>> {
 struct SUB_F64 : Sequence<SUB_F64, I<OPCODE_SUB, F64Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     assert_true(!i.instr->flags);
-    EmitAssociativeBinaryVOp<DReg>(
-        e, i, [](A64Emitter& e, DReg dest, DReg src1, DReg src2) {
-          e.FSUB(dest, src1, src2);
-        });
+    DReg src1 = i.src1.is_constant ? D1 : i.src1.reg();
+    DReg src2 = i.src2.is_constant ? D2 : i.src2.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1.toQ(), i.src1.constant());
+    }
+    if (i.src2.is_constant) {
+      e.LoadConstantV(src2.toQ(), i.src2.constant());
+    }
+
+    oaknut::Label do_op;
+    oaknut::Label done;
+    EmitPropagateInputNanF64Binary(e, i.dest.reg(), src1, src2, do_op, done);
+    e.l(do_op);
+    e.FSUB(i.dest.reg(), src1, src2);
+    e.l(done);
   }
 };
 struct SUB_V128 : Sequence<SUB_V128, I<OPCODE_SUB, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     assert_true(!i.instr->flags);
-    EmitAssociativeBinaryVOp(
-        e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
-          e.FSUB(dest.S4(), src1.S4(), src2.S4());
-        });
+    EmitWithVmxFpcr(e, [&] {
+      EmitAssociativeBinaryVOp(
+          e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
+            e.FSUB(dest.S4(), src1.S4(), src2.S4());
+          });
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_SUB, SUB_I8, SUB_I16, SUB_I32, SUB_I64, SUB_F32,
@@ -1305,19 +1504,32 @@ struct MUL_F32 : Sequence<MUL_F32, I<OPCODE_MUL, F32Op, F32Op, F32Op>> {
 struct MUL_F64 : Sequence<MUL_F64, I<OPCODE_MUL, F64Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     assert_true(!i.instr->flags);
-    EmitCommutativeBinaryVOp<DReg>(
-        e, i, [](A64Emitter& e, DReg dest, DReg src1, DReg src2) {
-          e.FMUL(dest, src1, src2);
-        });
+    DReg src1 = i.src1.is_constant ? D1 : i.src1.reg();
+    DReg src2 = i.src2.is_constant ? D2 : i.src2.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1.toQ(), i.src1.constant());
+    }
+    if (i.src2.is_constant) {
+      e.LoadConstantV(src2.toQ(), i.src2.constant());
+    }
+
+    oaknut::Label do_op;
+    oaknut::Label done;
+    EmitPropagateInputNanF64Binary(e, i.dest.reg(), src1, src2, do_op, done);
+    e.l(do_op);
+    e.FMUL(i.dest.reg(), src1, src2);
+    e.l(done);
   }
 };
 struct MUL_V128 : Sequence<MUL_V128, I<OPCODE_MUL, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     assert_true(!i.instr->flags);
-    EmitCommutativeBinaryVOp(
-        e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
-          e.FMUL(dest.S4(), src1.S4(), src2.S4());
-        });
+    EmitWithVmxFpcr(e, [&] {
+      EmitCommutativeBinaryVOp(
+          e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
+            e.FMUL(dest.S4(), src1.S4(), src2.S4());
+          });
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_MUL, MUL_I8, MUL_I16, MUL_I32, MUL_I64, MUL_F32,
@@ -1699,10 +1911,21 @@ struct DIV_F32 : Sequence<DIV_F32, I<OPCODE_DIV, F32Op, F32Op, F32Op>> {
 struct DIV_F64 : Sequence<DIV_F64, I<OPCODE_DIV, F64Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     assert_true(!i.instr->flags);
-    EmitAssociativeBinaryVOp<DReg>(
-        e, i, [](A64Emitter& e, DReg dest, DReg src1, DReg src2) {
-          e.FDIV(dest, src1, src2);
-        });
+    DReg src1 = i.src1.is_constant ? D1 : i.src1.reg();
+    DReg src2 = i.src2.is_constant ? D2 : i.src2.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1.toQ(), i.src1.constant());
+    }
+    if (i.src2.is_constant) {
+      e.LoadConstantV(src2.toQ(), i.src2.constant());
+    }
+
+    oaknut::Label do_op;
+    oaknut::Label done;
+    EmitPropagateInputNanF64Binary(e, i.dest.reg(), src1, src2, do_op, done);
+    e.l(do_op);
+    e.FDIV(i.dest.reg(), src1, src2);
+    e.l(done);
   }
 };
 struct DIV_V128 : Sequence<DIV_V128, I<OPCODE_DIV, V128Op, V128Op, V128Op>> {
@@ -1752,64 +1975,67 @@ struct MUL_ADD_F32
 struct MUL_ADD_F64
     : Sequence<MUL_ADD_F64, I<OPCODE_MUL_ADD, F64Op, F64Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    DReg src3 = D3;
-    if (i.src3.is_constant) {
-      e.LoadConstantV(src3.toQ(), i.src3.constant());
-    } else {
-      src3 = i.src3.reg();
-    }
-
-    DReg src2 = D2;
-    if (i.src2.is_constant) {
-      e.LoadConstantV(src2.toQ(), i.src2.constant());
-    } else {
-      src2 = i.src2.reg();
-    }
-
     DReg src1 = D1;
+    DReg src2 = D2;
+    DReg src3 = D3;
     if (i.src1.is_constant) {
       e.LoadConstantV(src1.toQ(), i.src1.constant());
     } else {
-      src1 = i.src1.reg();
+      e.FMOV(src1, i.src1.reg());
+    }
+    if (i.src2.is_constant) {
+      e.LoadConstantV(src2.toQ(), i.src2.constant());
+    } else {
+      e.FMOV(src2, i.src2.reg());
+    }
+    if (i.src3.is_constant) {
+      e.LoadConstantV(src3.toQ(), i.src3.constant());
+    } else {
+      e.FMOV(src3, i.src3.reg());
     }
 
-    e.FMADD(i.dest, src1, src2, src3);
+    oaknut::Label do_op;
+    oaknut::Label done;
+    EmitPropagateInputNanF64Ternary(e, i.dest.reg(), src1, src2, src3, do_op,
+                                    done);
+    e.l(do_op);
+    e.FMADD(i.dest.reg(), src1, src2, src3);
+    e.l(done);
   }
 };
 struct MUL_ADD_V128
     : Sequence<MUL_ADD_V128,
                I<OPCODE_MUL_ADD, V128Op, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    const QReg dest = i.dest.reg();
+    EmitWithVmxFpcr(e, [&] {
+      const QReg dest = i.dest.reg();
+      const QReg temp1 = Q0;
+      const QReg temp2 = Q1;
+      const QReg temp3 = Q2;
 
-    // Always use temporary registers to avoid conflicts
-    QReg temp1 = Q0;
-    QReg temp2 = Q1;
-    QReg temp3 = Q2;
+      if (i.src1.is_constant) {
+        e.LoadConstantV(temp1, i.src1.constant());
+      } else {
+        e.MOV(temp1.B16(), i.src1.reg().B16());
+      }
 
-    if (i.src1.is_constant) {
-      e.LoadConstantV(temp1, i.src1.constant());
-    } else {
-      e.MOV(temp1.B16(), i.src1.reg().B16());
-    }
+      if (i.src2.is_constant) {
+        e.LoadConstantV(temp2, i.src2.constant());
+      } else {
+        e.MOV(temp2.B16(), i.src2.reg().B16());
+      }
 
-    if (i.src2.is_constant) {
-      e.LoadConstantV(temp2, i.src2.constant());
-    } else {
-      e.MOV(temp2.B16(), i.src2.reg().B16());
-    }
+      if (i.src3.is_constant) {
+        e.LoadConstantV(temp3, i.src3.constant());
+      } else {
+        e.MOV(temp3.B16(), i.src3.reg().B16());
+      }
 
-    if (i.src3.is_constant) {
-      e.LoadConstantV(temp3, i.src3.constant());
-    } else {
-      e.MOV(temp3.B16(), i.src3.reg().B16());
-    }
+      e.MOV(dest.B16(), temp3.B16());
+      e.FMLA(dest.S4(), temp1.S4(), temp2.S4());
 
-    // First multiply: dest = temp1 * temp2
-    e.FMUL(dest.S4(), temp1.S4(), temp2.S4());
-
-    // Then add: dest = dest + temp3
-    e.FADD(dest.S4(), dest.S4(), temp3.S4());
+      EmitSelectFirstQNanLanesF32x4(e, dest, temp1, temp2, temp3);
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_MUL_ADD, MUL_ADD_F32, MUL_ADD_F64, MUL_ADD_V128);
@@ -1854,52 +2080,67 @@ struct MUL_SUB_F32
 struct MUL_SUB_F64
     : Sequence<MUL_SUB_F64, I<OPCODE_MUL_SUB, F64Op, F64Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    DReg src3(1);
+    DReg src1 = D1;
+    DReg src2 = D2;
+    DReg src3 = D3;
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src1.toQ(), i.src1.constant());
+    } else {
+      e.FMOV(src1, i.src1.reg());
+    }
+    if (i.src2.is_constant) {
+      e.LoadConstantV(src2.toQ(), i.src2.constant());
+    } else {
+      e.FMOV(src2, i.src2.reg());
+    }
     if (i.src3.is_constant) {
-      src3 = D1;
       e.LoadConstantV(src3.toQ(), i.src3.constant());
     } else {
-      // If i.dest == i.src3, back up i.src3 so we don't overwrite it.
-      src3 = i.src3.reg();
-      if (i.dest.reg().index() == i.src3.reg().index()) {
-        e.FMOV(D1, i.src3);
-        src3 = D1;
-      }
+      e.FMOV(src3, i.src3.reg());
     }
 
-    // Multiply operation is commutative.
-    EmitCommutativeBinaryVOp<DReg>(
-        e, i, [](A64Emitter& e, DReg dest, DReg src1, DReg src2) {
-          e.FMUL(dest, src1, src2);  // $0 = $1 * $2
-        });
-
-    e.FSUB(i.dest, i.dest, src3);  // $0 = $1 + $2
+    oaknut::Label do_op;
+    oaknut::Label done;
+    EmitPropagateInputNanF64Ternary(e, i.dest.reg(), src1, src2, src3, do_op,
+                                    done);
+    e.l(do_op);
+    e.FMUL(i.dest.reg(), src1, src2);
+    e.FSUB(i.dest.reg(), i.dest.reg(), src3);
+    e.l(done);
   }
 };
 struct MUL_SUB_V128
     : Sequence<MUL_SUB_V128,
                I<OPCODE_MUL_SUB, V128Op, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    QReg src3(1);
-    if (i.src3.is_constant) {
-      src3 = Q1;
-      e.LoadConstantV(src3, i.src3.constant());
-    } else {
-      // If i.dest == i.src3, back up i.src3 so we don't overwrite it.
-      src3 = i.src3;
-      if (i.dest == i.src3) {
-        e.MOV(Q1.B16(), i.src3.reg().B16());
-        src3 = Q1;
+    EmitWithVmxFpcr(e, [&] {
+      const QReg dest = i.dest.reg();
+      QReg temp1 = Q0;
+      QReg temp2 = Q1;
+      QReg temp3 = Q2;
+
+      if (i.src1.is_constant) {
+        e.LoadConstantV(temp1, i.src1.constant());
+      } else {
+        e.MOV(temp1.B16(), i.src1.reg().B16());
       }
-    }
 
-    // Multiply operation is commutative.
-    EmitCommutativeBinaryVOp(
-        e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
-          e.FMUL(dest.S4(), src1.S4(), src2.S4());  // $0 = $1 * $2
-        });
+      if (i.src2.is_constant) {
+        e.LoadConstantV(temp2, i.src2.constant());
+      } else {
+        e.MOV(temp2.B16(), i.src2.reg().B16());
+      }
 
-    e.FSUB(i.dest.reg().S4(), i.dest.reg().S4(), src3.S4());
+      if (i.src3.is_constant) {
+        e.LoadConstantV(temp3, i.src3.constant());
+      } else {
+        e.MOV(temp3.B16(), i.src3.reg().B16());
+      }
+
+      // a * b - c == a * b + (-c), keeping one final rounding.
+      e.FNEG(dest.S4(), temp3.S4());
+      e.FMLA(dest.S4(), temp1.S4(), temp2.S4());
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_MUL_SUB, MUL_SUB_F32, MUL_SUB_F64, MUL_SUB_V128);
@@ -1940,6 +2181,24 @@ struct NEG_F32 : Sequence<NEG_F32, I<OPCODE_NEG, F32Op, F32Op>> {
 };
 struct NEG_F64 : Sequence<NEG_F64, I<OPCODE_NEG, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // PPC fnmadd/fnmsub are lowered to NEG(MUL_ADD/MUL_SUB).
+    // For NaN results, PPC preserves sign/payload instead of negating them.
+    if (!i.src1.is_constant && IsMulAddOrMulSubDef(i.src1.value)) {
+      DReg src_for_nan = i.src1.reg();
+      if (i.dest.reg().index() == i.src1.reg().index()) {
+        src_for_nan = i.src1.reg().index() == 0 ? D1 : D0;
+        e.FMOV(src_for_nan, i.src1.reg());
+      }
+
+      oaknut::Label done;
+      e.FNEG(i.dest, i.src1);
+      e.FCMP(src_for_nan, src_for_nan);
+      e.B(Cond::VC, done);
+      e.FMOV(i.dest.reg(), src_for_nan);
+      e.l(done);
+      return;
+    }
+
     e.FNEG(i.dest, i.src1);
   }
 };
@@ -2007,12 +2266,14 @@ struct SQRT_F64 : Sequence<SQRT_F64, I<OPCODE_SQRT, F64Op, F64Op>> {
 };
 struct SQRT_V128 : Sequence<SQRT_V128, I<OPCODE_SQRT, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    if (i.src1.is_constant) {
-      e.LoadConstantV(Q0, i.src1.constant());
-      e.FSQRT(i.dest.reg().S4(), Q0.S4());
-    } else {
-      e.FSQRT(i.dest.reg().S4(), i.src1.reg().S4());
-    }
+    EmitWithVmxFpcr(e, [&] {
+      if (i.src1.is_constant) {
+        e.LoadConstantV(Q0, i.src1.constant());
+        e.FSQRT(i.dest.reg().S4(), Q0.S4());
+      } else {
+        e.FSQRT(i.dest.reg().S4(), i.src1.reg().S4());
+      }
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_SQRT, SQRT_F32, SQRT_F64, SQRT_V128);
@@ -2045,12 +2306,14 @@ struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
 };
 struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    if (i.src1.is_constant) {
-      e.LoadConstantV(Q0, i.src1.constant());
-      e.FRSQRTE(i.dest.reg().S4(), Q0.S4());
-    } else {
-      e.FRSQRTE(i.dest.reg().S4(), i.src1.reg().S4());
-    }
+    EmitWithVmxFpcr(e, [&] {
+      if (i.src1.is_constant) {
+        e.LoadConstantV(Q0, i.src1.constant());
+        e.FRSQRTE(i.dest.reg().S4(), Q0.S4());
+      } else {
+        e.FRSQRTE(i.dest.reg().S4(), i.src1.reg().S4());
+      }
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RSQRT, RSQRT_F32, RSQRT_F64, RSQRT_V128);
@@ -2083,12 +2346,14 @@ struct RECIP_F64 : Sequence<RECIP_F64, I<OPCODE_RECIP, F64Op, F64Op>> {
 };
 struct RECIP_V128 : Sequence<RECIP_V128, I<OPCODE_RECIP, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    if (i.src1.is_constant) {
-      e.LoadConstantV(Q0, i.src1.constant());
-      e.FRECPE(i.dest.reg().S4(), Q0.S4());
-    } else {
-      e.FRECPE(i.dest.reg().S4(), i.src1.reg().S4());
-    }
+    EmitWithVmxFpcr(e, [&] {
+      if (i.src1.is_constant) {
+        e.LoadConstantV(Q0, i.src1.constant());
+        e.FRECPE(i.dest.reg().S4(), Q0.S4());
+      } else {
+        e.FRECPE(i.dest.reg().S4(), i.src1.reg().S4());
+      }
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RECIP, RECIP_F32, RECIP_F64, RECIP_V128);
