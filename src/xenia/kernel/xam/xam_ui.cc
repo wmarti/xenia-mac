@@ -666,10 +666,12 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
 void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
+  (void)user_index;
+  XELOGE("XamShowDirtyDiscErrorUI called");
+
   if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
-    XELOGE("Disc Read Error (no UI available)");
-    assert_always();
-    exit(1);
+    XELOGE("Disc Read Error (no UI available) - continuing without abort");
+    xeXamDispatchHeadlessAsync([]() {});
     return;
   }
 
@@ -681,12 +683,9 @@ void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
   xe::hid::InputSystem* input_system = emulator->input_system();
-  xeXamDispatchDialog<MessageBoxDialog>(
+  xeXamDispatchDialogAsync<MessageBoxDialog>(
       new MessageBoxDialog(imgui_drawer, input_system, title, desc, {"OK"}, 0),
-      [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
-  // This is death, and should never return.
-  // TODO(benvanik): cleaner exit.
-  exit(1);
+      [](MessageBoxDialog*) -> void {});
 }
 DECLARE_XAM_EXPORT1(XamShowDirtyDiscErrorUI, kUI, kImplemented);
 
