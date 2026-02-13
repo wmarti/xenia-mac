@@ -4569,12 +4569,22 @@ bool MetalCommandProcessor::IssueDrawMsl(
   auto bind_msl_textures = [&](MslShader* shader,
                                MslShader::MslTranslation* translation,
                                bool is_pixel_stage) {
-    auto bind_texture_slot = [&](uint32_t slot, MTL::Texture* texture) {
+    auto& bound_textures = is_pixel_stage ? msl_bound_pixel_textures_
+                                          : msl_bound_vertex_textures_;
+    auto bind_texture_slot = [&](uint32_t slot, MTL::Texture* texture) -> bool {
+      if (slot >= MslTextureIndex::kMaxPerStage) {
+        return false;
+      }
+      if (bound_textures[slot] == texture) {
+        return false;
+      }
       if (is_pixel_stage) {
         current_render_encoder_->setFragmentTexture(texture, slot);
       } else {
         current_render_encoder_->setVertexTexture(texture, slot);
       }
+      bound_textures[slot] = texture;
+      return true;
     };
     auto clear_slots_from = [&](uint32_t start, uint32_t end_exclusive) {
       for (uint32_t slot = start; slot < end_exclusive; ++slot) {
@@ -4603,7 +4613,6 @@ bool MetalCommandProcessor::IssueDrawMsl(
 
     MetalTextureCache* metal_texture_cache = texture_cache_.get();
     for (uint32_t slot = 0; slot < bound_count; ++slot) {
-      uint32_t tex_index = MslTextureIndex::kBase + slot;
       MTL::Texture* texture = nullptr;
       int32_t texture_binding_index = texture_binding_indices[slot];
       if (texture_binding_index >= 0 &&
@@ -4627,8 +4636,7 @@ bool MetalCommandProcessor::IssueDrawMsl(
       } else {
         texture = metal_texture_cache->GetNullTexture2D();
       }
-      bind_texture_slot(tex_index, texture);
-      if (texture) {
+      if (bind_texture_slot(slot, texture) && texture) {
         UseRenderEncoderResource(texture, MTL::ResourceUsageRead);
       }
     }
@@ -4638,12 +4646,23 @@ bool MetalCommandProcessor::IssueDrawMsl(
   auto bind_msl_samplers = [&](MslShader* shader,
                                MslShader::MslTranslation* translation,
                                bool is_pixel_stage) {
-    auto bind_sampler_slot = [&](uint32_t slot, MTL::SamplerState* sampler) {
+    auto& bound_samplers = is_pixel_stage ? msl_bound_pixel_samplers_
+                                          : msl_bound_vertex_samplers_;
+    auto bind_sampler_slot =
+        [&](uint32_t slot, MTL::SamplerState* sampler) -> bool {
+      if (slot >= MslSamplerIndex::kMaxPerStage) {
+        return false;
+      }
+      if (bound_samplers[slot] == sampler) {
+        return false;
+      }
       if (is_pixel_stage) {
         current_render_encoder_->setFragmentSamplerState(sampler, slot);
       } else {
         current_render_encoder_->setVertexSamplerState(sampler, slot);
       }
+      bound_samplers[slot] = sampler;
+      return true;
     };
 
     uint32_t* previous_bound_count = is_pixel_stage
