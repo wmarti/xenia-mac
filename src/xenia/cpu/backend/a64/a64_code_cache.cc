@@ -45,15 +45,16 @@ DEFINE_bool(a64_indirection_table_log, false,
             "Log A64 indirection table mapping and updates.", "CPU");
 DEFINE_int32(a64_indirection_table_log_limit, 32,
              "Maximum number of A64 indirection table log entries.", "CPU");
-DEFINE_bool(
-    ios_jit_brk_prepare_fallback, true,
-    "On iOS ARM64, if protection transitions fail, issue external JIT "
-    "prepare breakpoint (brk #0x69 by default; optional brk #0xf00d/x16=1) "
-    "so StikDebug-style brokers can prepare the region, then retry.",
-    "CPU");
-DEFINE_bool(ios_jit_brk_use_universal_0xf00d, false,
+DEFINE_bool(ios_jit_brk_prepare_fallback, true,
+            "On iOS ARM64, if protection transitions fail, issue external JIT "
+            "prepare breakpoint (brk #0xf00d/x16=1 by default; optional legacy "
+            "brk #0x69) "
+            "so StikDebug-style brokers can prepare the region, then retry.",
+            "CPU");
+DEFINE_bool(ios_jit_brk_use_universal_0xf00d, true,
             "On iOS ARM64, use universal JIT broker breakpoint brk #0xf00d "
-            "(x16=1) instead of legacy brk #0x69 for external prepare.",
+            "(x16=1) instead of legacy brk #0x69 for external prepare. "
+            "Enabled by default for modern StikDebug scripts.",
             "CPU");
 DEFINE_int32(ios_jit_initial_external_prepare_bytes, 0,
              "On iOS ARM64 TXM startup, issue one external prepare for "
@@ -77,10 +78,19 @@ bool ShouldLogIndirectionTable() {
 
 #if XE_PLATFORM_IOS && XE_ARCH_ARM64
 std::atomic<bool> ios_external_prepare_issued{false};
+std::atomic<bool> ios_external_detach_issued{false};
+std::atomic<bool> ios_force_universal_prepare_command{false};
+constexpr uint32_t kLegacyPrepareRejectedResult = 0xE0000069u;
+constexpr uint32_t kLegacyPrepareRejectedResultSwapped = 0x690000E0u;
+
+bool ShouldUseUniversalPrepareCommand() {
+  return cvars::ios_jit_brk_use_universal_0xf00d ||
+         ios_force_universal_prepare_command.load(std::memory_order_relaxed);
+}
 
 const char* ExternalPrepareBreakpointDescription() {
-  return cvars::ios_jit_brk_use_universal_0xf00d ? "brk #0xf00d (x16=1)"
-                                                 : "brk #0x69";
+  return ShouldUseUniversalPrepareCommand() ? "brk #0xf00d (x16=1)"
+                                            : "brk #0x69";
 }
 
 bool GetPageAlignedRange(void* address, size_t length, uintptr_t& aligned_start,
@@ -174,6 +184,41 @@ bool SetPageAlignedAccessWithMaxProtRetry(void* address, size_t length,
   return true;
 }
 
+#if defined(__aarch64__)
+void InvokeUniversalPrepareBreakpoint(uintptr_t aligned_start,
+                                      size_t aligned_length) {
+  register uint64_t x0 __asm("x0") = static_cast<uint64_t>(aligned_start);
+  register uint64_t x1 __asm("x1") = static_cast<uint64_t>(aligned_length);
+  register uint64_t x16 __asm("x16") = 1;
+  asm volatile("brk #0xf00d" : "+r"(x0), "+r"(x1), "+r"(x16) : : "memory");
+}
+
+void InvokeUniversalDetachBreakpoint() {
+  register uint64_t x16 __asm("x16") = 0;
+  asm volatile("brk #0xf00d" : "+r"(x16) : : "memory");
+}
+#endif
+
+bool MaybeRequestExternalJitDetach() {
+  if (!ShouldUseUniversalPrepareCommand()) {
+    return true;
+  }
+  bool expected = false;
+  if (!ios_external_detach_issued.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel)) {
+    return true;
+  }
+#if defined(__aarch64__)
+  // The universal StikDebug script supports command 0 (detach). Once the JIT
+  // region has been prepared, detach so the broker doesn't sit in a signal
+  // loop for the rest of process lifetime.
+  InvokeUniversalDetachBreakpoint();
+  return true;
+#else
+  return false;
+#endif
+}
+
 bool RequestExternalJitPrepare(void* address, size_t length) {
   uintptr_t aligned_start = 0;
   size_t aligned_length = 0;
@@ -183,18 +228,37 @@ bool RequestExternalJitPrepare(void* address, size_t length) {
   }
 
 #if defined(__aarch64__)
-  register uint64_t x0 __asm("x0") = static_cast<uint64_t>(aligned_start);
-  register uint64_t x1 __asm("x1") = static_cast<uint64_t>(aligned_length);
-  if (cvars::ios_jit_brk_use_universal_0xf00d) {
+  if (ShouldUseUniversalPrepareCommand()) {
     // StikDebug universal JIT script path:
     // x16=1 + brk #0xf00d => prepare region (x0=addr, x1=len).
-    register uint64_t x16 __asm("x16") = 1;
-    asm volatile("brk #0xf00d" : "+r"(x0), "+r"(x1), "+r"(x16) : : "memory");
-  } else {
-    // Legacy broker path expected by bundled StikDebug scripts (maciOS.js,
-    // UTM-Dolphin.js, manic.js): brk #0x69 with x0=addr, x1=len.
-    asm volatile("brk #0x69" : "+r"(x0), "+r"(x1) : : "memory");
+    InvokeUniversalPrepareBreakpoint(aligned_start, aligned_length);
+    MaybeRequestExternalJitDetach();
+    return true;
   }
+
+  register uint64_t x0 __asm("x0") = static_cast<uint64_t>(aligned_start);
+  register uint64_t x1 __asm("x1") = static_cast<uint64_t>(aligned_length);
+  // Legacy broker path expected by older StikDebug scripts:
+  // brk #0x69 with x0=addr, x1=len.
+  asm volatile("brk #0x69" : "+r"(x0), "+r"(x1) : : "memory");
+
+  // Newer StikDebug scripts intentionally reject legacy 0x69 and ask callers
+  // to migrate to universal 0xf00d command dispatch.
+  const uint32_t legacy_result = static_cast<uint32_t>(x0);
+  if (legacy_result == kLegacyPrepareRejectedResult ||
+      legacy_result == kLegacyPrepareRejectedResultSwapped) {
+    const bool already_forced = ios_force_universal_prepare_command.exchange(
+        true, std::memory_order_acq_rel);
+    if (!already_forced) {
+      XELOGW(
+          "iOS JIT legacy prepare rejected (x0=0x{:08X}); switching to "
+          "universal brk #0xf00d (x16=1)",
+          legacy_result);
+    }
+    InvokeUniversalPrepareBreakpoint(aligned_start, aligned_length);
+    MaybeRequestExternalJitDetach();
+  }
+
   return true;
 #else
   return false;
@@ -532,6 +596,7 @@ bool A64CodeCache::Initialize() {
 
       // TXM setup failed, fall back to single-view mprotect flips.
       ios_external_prepare_issued.store(false, std::memory_order_release);
+      ios_external_detach_issued.store(false, std::memory_order_release);
       generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
           mmap(nullptr, kGeneratedCodeSize, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));

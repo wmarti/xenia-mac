@@ -264,6 +264,8 @@ bool MMIOHandler::TryDecodeLoadStore(const uint8_t* p,
 #elif XE_ARCH_ARM64
   decoded_out.length = sizeof(uint32_t);
   uint32_t instruction = *reinterpret_cast<const uint32_t*>(p);
+  constexpr uint32_t kArm64RevWMask = UINT32_C(0xFFFFFC00);
+  constexpr uint32_t kArm64RevWFixed = UINT32_C(0x5AC00800);
 
   // Literal loading (PC-relative) is not handled.
 
@@ -307,6 +309,21 @@ bool MMIOHandler::TryDecodeLoadStore(const uint8_t* p,
     // Zero constant rather than a register read.
     decoded_out.is_constant = true;
     decoded_out.constant = 0;
+  }
+  if (decoded_out.is_load &&
+      decoded_out.value_reg >= DecodedLoadStore::kArm64ValueRegX0 &&
+      decoded_out.value_reg <= (DecodedLoadStore::kArm64ValueRegX0 + 30)) {
+    // Detect LDR + REV Wt, Wt so the handler doesn't byte-swap (REV will run).
+    uint32_t next_instruction =
+        *reinterpret_cast<const uint32_t*>(p + sizeof(uint32_t));
+    uint8_t rev_rd = next_instruction & 31;
+    uint8_t rev_rn = (next_instruction >> 5) & 31;
+    uint8_t value_reg =
+        decoded_out.value_reg - DecodedLoadStore::kArm64ValueRegX0;
+    if ((next_instruction & kArm64RevWMask) == kArm64RevWFixed &&
+        rev_rd == value_reg && rev_rn == value_reg) {
+      decoded_out.byte_swap = true;
+    }
   }
 
   decoded_out.mem_has_base = true;
@@ -401,6 +418,7 @@ bool MMIOHandler::ExceptionCallbackThunk(Exception* ex, void* data) {
 
 bool MMIOHandler::ExceptionCallback(Exception* ex) {
   if (ex->code() != Exception::Code::kAccessViolation) {
+    XELOGD("MMIOHandler: not an access violation, code={}", (int)ex->code());
     return false;
   }
   Exception::AccessViolationOperation operation =
@@ -408,14 +426,21 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
   if (operation != Exception::AccessViolationOperation::kRead &&
       operation != Exception::AccessViolationOperation::kWrite) {
     // Data Execution Prevention or something else uninteresting.
+    XELOGD("MMIOHandler: unknown operation type (not read or write)");
     return false;
   }
   bool is_write = operation == Exception::AccessViolationOperation::kWrite;
   if (ex->fault_address() < uint64_t(virtual_membase_) ||
       ex->fault_address() > uint64_t(memory_end_)) {
     // Quick kill anything outside our mapping.
+    XELOGD(
+        "MMIOHandler: fault_address 0x{:016X} outside range [0x{:016X}, "
+        "0x{:016X}]",
+        ex->fault_address(), uint64_t(virtual_membase_), uint64_t(memory_end_));
     return false;
   }
+  XELOGD("MMIOHandler: handling fault at 0x{:016X}, is_write={}",
+         ex->fault_address(), is_write);
 
   void* fault_host_address = reinterpret_cast<void*>(ex->fault_address());
 

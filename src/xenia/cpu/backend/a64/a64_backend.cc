@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstring>
+#include <new>
 #if XE_PLATFORM_MAC || XE_PLATFORM_LINUX
 #include <dlfcn.h>
 #endif
@@ -44,6 +45,14 @@
 DECLARE_bool(record_mmio_access_exceptions);
 DECLARE_bool(log_mmio_recording);
 
+#if XE_PLATFORM_IOS
+constexpr bool kA64HostGuestStackSyncDefault = false;
+constexpr int64_t kA64MaxStackpointsDefault = 16384;
+#else
+constexpr bool kA64HostGuestStackSyncDefault = true;
+constexpr int64_t kA64MaxStackpointsDefault = 65536;
+#endif
+
 DEFINE_int32(a64_extension_mask, -1,
              "Allow the detection and utilization of specific instruction set "
              "features.\n"
@@ -52,9 +61,10 @@ DEFINE_int32(a64_extension_mask, -1,
              "    2 = F16C\n"
              "   -1 = Detect and utilize all possible processor features\n",
              "a64");
-DEFINE_bool(a64_enable_host_guest_stack_synchronization, true,
+DEFINE_bool(a64_enable_host_guest_stack_synchronization,
+            kA64HostGuestStackSyncDefault,
             "Enable host/guest stack synchronization for A64.", "a64");
-DEFINE_int64(max_stackpoints, 65536,
+DEFINE_int64(max_stackpoints, kA64MaxStackpointsDefault,
              "Maximum number of stackpoints in host/guest stack sync.", "a64");
 
 namespace xe {
@@ -537,8 +547,14 @@ void A64Backend::InitializeBackendContext(void* ctx) {
   auto* bctx = BackendContextForGuestContext(ctx);
   if (cvars::a64_enable_host_guest_stack_synchronization &&
       cvars::max_stackpoints > 0) {
-    bctx->stackpoints = new A64BackendStackpoint[
-        static_cast<size_t>(cvars::max_stackpoints)]{};
+    bctx->stackpoints = new (std::nothrow)
+        A64BackendStackpoint[static_cast<size_t>(cvars::max_stackpoints)]{};
+    if (!bctx->stackpoints) {
+      XELOGW(
+          "A64: failed to allocate {} stackpoints for thread context; "
+          "continuing with stack sync disabled for this thread",
+          cvars::max_stackpoints);
+    }
   } else {
     bctx->stackpoints = nullptr;
   }

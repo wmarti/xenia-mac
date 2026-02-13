@@ -58,12 +58,17 @@ static void* AllocateContext() {
                                memory::AllocationType::kReserveCommit,
                                memory::PageAccess::kReadWrite);
   if (p) {
+    auto* fallback_ctx = reinterpret_cast<char*>(p) + granularity;
     bool expected = false;
     if (g_logged_context_fallback.compare_exchange_strong(
             expected, true, std::memory_order_relaxed)) {
-      XELOGW("AllocateContext: using fallback PPC context mapping");
+      XELOGW(
+          "AllocateContext: using fallback PPC context mapping at {:p} "
+          "(low32=0x{:08X})",
+          fallback_ctx,
+          static_cast<uint32_t>(reinterpret_cast<uintptr_t>(fallback_ctx)));
     }
-    return reinterpret_cast<char*>(p) + granularity;
+    return fallback_ctx;
   }
 
   assert_always("giving up on allocating context, likely leaking contexts");
