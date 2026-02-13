@@ -58,9 +58,8 @@ DEFINE_path(
     "Root path for cache files. If empty, the cache folder under the storage "
     "root will be used.",
     "Storage");
-// Mount flags are defined in xenia/emulator.cc so tests and apps share them.
-DECLARE_bool(mount_scratch);
-DECLARE_bool(mount_cache);
+DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
+DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
 
 // CVar normally defined in windowed_app_main_qt.cc (excluded on iOS).
 DEFINE_transient_path(target, "", "Specifies the target file to run.",
