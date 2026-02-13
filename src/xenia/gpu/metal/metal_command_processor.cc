@@ -9143,6 +9143,18 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
     consts.alpha_to_mask = (rb_colorcontrol.value >> 24) | (1 << 8);
   }
 
+  // Blend constants — used by the SPIR-V translator (same registers as the
+  // MSC path). Without these values the translated shader would default to
+  // zeros even when the guest uses fixed-function blend constants.
+  consts.edram_blend_constant[0] =
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_RED);
+  consts.edram_blend_constant[1] =
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN);
+  consts.edram_blend_constant[2] =
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE);
+  consts.edram_blend_constant[3] =
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA);
+
   // Color exponent bias (matching Vulkan backend).
   for (uint32_t i = 0; i < 4; ++i) {
     int32_t color_exp_bias = color_infos[i].color_exp_bias;
