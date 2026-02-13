@@ -23,7 +23,6 @@ BitStream::BitStream(uint8_t* buffer, size_t size_in_bits)
 BitStream::~BitStream() = default;
 
 void BitStream::SetOffset(size_t offset_bits) {
-  assert_false(offset_bits > size_bits_);
   offset_bits_ = std::min(offset_bits, size_bits_);
 }
 

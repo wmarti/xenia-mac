@@ -9,6 +9,8 @@
 
 #include "xenia/apu/sdl/sdl_audio_system.h"
 
+#include <atomic>
+
 #include "xenia/apu/apu_flags.h"
 #include "xenia/apu/sdl/sdl_audio_driver.h"
 #include "xenia/base/logging.h"
@@ -62,6 +64,22 @@ X_STATUS SDLAudioSystem::CreateDriver(size_t index,
                                       xe::threading::Semaphore* semaphore,
                                       AudioDriver** out_driver) {
   assert_not_null(out_driver);
+#if XE_PLATFORM_IOS
+  // iOS/SDL audio path is single-output in practice here. Additional guest
+  // clients should not attempt to open another device because SDL reports
+  // "Audio device already open" and we fall back to silence anyway.
+  if (index > 0) {
+    static std::atomic<bool> logged_secondary_fallback{false};
+    if (!logged_secondary_fallback.exchange(true, std::memory_order_relaxed)) {
+      XELOGW(
+          "SDLAudioSystem: iOS secondary audio clients use silent fallback; "
+          "keeping primary SDL device on client 0");
+    }
+    *out_driver = new SilentAudioDriver(semaphore);
+    return X_STATUS_SUCCESS;
+  }
+#endif
+
   auto driver = std::make_unique<SDLAudioDriver>(semaphore);
   if (!driver->Initialize()) {
     driver->Shutdown();

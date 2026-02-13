@@ -506,9 +506,8 @@ void XmaContextOld::Decode(XMA_CONTEXT_DATA* data) {
         if (offset == -1) {
           // No more frames.
           SwapInputBuffer(data);
-          // TODO partial frames? end?
-          XELOGE("XmaContext {}: TODO partial frames? end?", id());
-          assert_always("TODO");
+          XELOGE("XmaContext {}: no more frames in packet stream", id());
+          data->parser_error_status = 4;
           return;
         } else {
           data->input_buffer_read_offset = offset;
@@ -622,8 +621,9 @@ void XmaContextOld::Decode(XMA_CONTEXT_DATA* data) {
     auto ret = avcodec_send_packet(av_context_, av_packet_);
     if (ret < 0) {
       XELOGE("XmaContext {}: Error - Sending packet for decoding failed", id());
-      // TODO bail out
-      assert_always();
+      data->parser_error_status = 4;
+      SwapInputBuffer(data);
+      return;
     }
     ret = avcodec_receive_frame(av_context_, av_frame_);
     /*
@@ -637,8 +637,7 @@ void XmaContextOld::Decode(XMA_CONTEXT_DATA* data) {
       data->parser_error_status = 4;  // TODO(Gliniak): Find all parsing errors
                                       // and create enumerator from them
       SwapInputBuffer(data);
-      assert_always();
-      return;  // TODO bail out
+      return;
     }
     assert_true(ret == 0);
 
@@ -728,8 +727,23 @@ void XmaContextOld::Decode(XMA_CONTEXT_DATA* data) {
         offset =
             xma::GetPacketFrameOffset(packet) + packet_idx * kBitsPerPacket;
       }
-      // TODO buffer bounds check
-      assert_true(data->input_buffer_read_offset < offset);
+      // Some streams can report a non-advancing or out-of-range next frame
+      // offset. Treat this as a parser error and recover instead of aborting.
+      if (offset <= data->input_buffer_read_offset ||
+          offset > current_input_size * 8) {
+        XELOGAPU(
+            "XmaContext {}: invalid next frame offset {} (current={}, "
+            "buffer_bits={})",
+            id(), offset, data->input_buffer_read_offset,
+            current_input_size * 8);
+        data->parser_error_status = 4;
+        if (is_streaming) {
+          SwapInputBuffer(data);
+        } else {
+          is_stream_done_ = true;
+        }
+        break;
+      }
       data->input_buffer_read_offset = offset;
     }
   }
