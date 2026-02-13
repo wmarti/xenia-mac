@@ -2629,7 +2629,7 @@ void MetalCommandProcessor::OnPrimaryBufferEnd() {
   if (!cvars::submit_on_primary_buffer_end || !current_command_buffer_) {
     return;
   }
-  if (!copy_resolve_writes_pending_ && !CanEndSubmissionImmediately()) {
+  if (!CanEndSubmissionImmediately()) {
     return;
   }
   EndCommandBuffer();
