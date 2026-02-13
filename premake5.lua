@@ -764,7 +764,9 @@ workspace("xenia")
     local ffmpeg_dir = "third_party/FFmpeg"
     project("libavcodec")
       filter("platforms:iOS-ARM64")
-        buildoptions({ "-include config_macos_aarch64.h" })
+        -- FFmpeg now uses a unified config.h with platform detection.
+        -- Reuse the Apple ARM64 config path for iOS by forcing config.h.
+        buildoptions({ "-include config.h" })
         includedirs({ ffmpeg_dir .. "/compat/atomics/gcc" })
         files({
           ffmpeg_dir .. "/libavcodec/aarch64/fft_init_aarch64.c",
@@ -776,7 +778,7 @@ workspace("xenia")
       filter({})
     project("libavutil")
       filter("platforms:iOS-ARM64")
-        buildoptions({ "-include config_macos_aarch64.h" })
+        buildoptions({ "-include config.h" })
         includedirs({ ffmpeg_dir .. "/compat/atomics/gcc" })
         files({
           ffmpeg_dir .. "/libavutil/aarch64/cpu.c",
@@ -786,7 +788,7 @@ workspace("xenia")
       filter({})
     project("libavformat")
       filter("platforms:iOS-ARM64")
-        buildoptions({ "-include config_macos_aarch64.h" })
+        buildoptions({ "-include config.h" })
         includedirs({ ffmpeg_dir .. "/compat/atomics/gcc" })
         files({
           ffmpeg_dir .. "/libavformat/network.c",
