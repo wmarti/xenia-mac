@@ -741,12 +741,21 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
                                                     : SpirvSets::kTexturesPixel;
 
   // Build the runtime texture binding lookup for Metal slots.
-  // Slots are direct (msl_texture = SPIR-V binding), and reflection may leave
-  // holes, so keep a dense slot array with -1 for unbound slots.
+  // Slots are direct (msl_texture = SPIR-V binding). Seed with translator
+  // order, then refine with reflection where possible.
   const MslShader& msl_shader = static_cast<const MslShader&>(shader());
   const auto& shader_texture_bindings =
       msl_shader.GetTextureBindingsAfterTranslation();
-  uint32_t max_texture_slot = 0;
+  texture_binding_indices_for_msl_slots_.reserve(std::min<size_t>(
+      shader_texture_bindings.size(), MslTextureIndex::kMaxPerStage));
+  for (uint32_t i = 0;
+       i < std::min<uint32_t>(uint32_t(shader_texture_bindings.size()),
+                              MslTextureIndex::kMaxPerStage);
+       ++i) {
+    texture_binding_indices_for_msl_slots_.push_back(int32_t(i));
+  }
+  bool has_reflected_texture_bindings = false;
+  bool texture_reflection_incomplete = false;
   auto register_texture_binding =
       [&](const spirv_cross::Resource& resource) -> void {
     uint32_t set =
@@ -754,6 +763,7 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
     if (set != texture_descriptor_set) {
       return;
     }
+    has_reflected_texture_bindings = true;
     uint32_t spv_binding =
         compiler.get_decoration(resource.id, spv::DecorationBinding);
     if (spv_binding >= MslTextureIndex::kMaxPerStage) {
@@ -772,6 +782,7 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
           "shader={:016X}",
           spv_binding, shader_texture_bindings.size(),
           shader().ucode_data_hash());
+      texture_reflection_incomplete = true;
       return;
     }
     int32_t runtime_binding_index = int32_t(spv_binding);
@@ -782,13 +793,13 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
     int32_t& slot_binding = texture_binding_indices_for_msl_slots_[spv_binding];
     if (slot_binding == -1) {
       slot_binding = runtime_binding_index;
-      max_texture_slot = std::max(max_texture_slot, spv_binding);
     } else if (slot_binding != runtime_binding_index) {
       XELOGW(
           "MslShader: Conflicting texture remap at slot {} ({} vs {}) "
           "shader={:016X}",
           spv_binding, slot_binding, runtime_binding_index,
           shader().ucode_data_hash());
+      texture_reflection_incomplete = true;
     }
   };
   for (const auto& image : resources.separate_images) {
@@ -797,14 +808,17 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   for (const auto& image : resources.sampled_images) {
     register_texture_binding(image);
   }
-  if (!texture_binding_indices_for_msl_slots_.empty()) {
-    texture_binding_indices_for_msl_slots_.resize(max_texture_slot + 1, -1);
-  } else if (!shader_texture_bindings.empty()) {
+  if (!has_reflected_texture_bindings && !shader_texture_bindings.empty()) {
     XELOGW(
         "MslShader: No reflected texture bindings for shader={:016X} stage={} "
-        "(runtime={})",
+        "(runtime={}), using translator-order texture remap",
         shader().ucode_data_hash(), GetExecutionModelName(execution_model),
         shader_texture_bindings.size());
+  } else if (texture_reflection_incomplete) {
+    XELOGW(
+        "MslShader: Incomplete texture reflection remap for shader={:016X} "
+        "stage={}, keeping translator-order mappings for unresolved slots",
+        shader().ucode_data_hash(), GetExecutionModelName(execution_model));
   }
 
   // Build the runtime sampler binding lookup for Metal slots.
@@ -814,6 +828,8 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
       msl_shader.GetTextureBindingsAfterTranslation().size());
   const auto& shader_sampler_bindings =
       msl_shader.GetSamplerBindingsAfterTranslation();
+  std::vector<bool> sampler_binding_mapped(shader_sampler_bindings.size(),
+                                           false);
   sampler_binding_indices_for_msl_slots_.reserve(
       sampler_spv_bindings_msl_order.size());
   for (uint32_t spv_binding : sampler_spv_bindings_msl_order) {
@@ -834,26 +850,44 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
           shader().ucode_data_hash());
       continue;
     }
+    if (sampler_binding_index < sampler_binding_mapped.size() &&
+        sampler_binding_mapped[sampler_binding_index]) {
+      continue;
+    }
     sampler_binding_indices_for_msl_slots_.push_back(sampler_binding_index);
+    if (sampler_binding_index < sampler_binding_mapped.size()) {
+      sampler_binding_mapped[sampler_binding_index] = true;
+    }
   }
   size_t sampler_mapped_count = sampler_binding_indices_for_msl_slots_.size();
-  bool sampler_remap_complete =
-      sampler_spv_bindings_msl_order.size() == sampler_mapped_count;
-  if (!shader_sampler_bindings.empty() && !sampler_remap_complete) {
-    // Fall back to translator order if reflection/remap was incomplete.
-    // This avoids leaving stale sampler slots from prior draws.
-    sampler_binding_indices_for_msl_slots_.clear();
-    sampler_binding_indices_for_msl_slots_.reserve(
-        shader_sampler_bindings.size());
+  if (!shader_sampler_bindings.empty() &&
+      sampler_mapped_count < shader_sampler_bindings.size()) {
     for (uint32_t i = 0; i < shader_sampler_bindings.size(); ++i) {
-      sampler_binding_indices_for_msl_slots_.push_back(i);
+      if (!sampler_binding_mapped[i]) {
+        sampler_binding_indices_for_msl_slots_.push_back(i);
+      }
     }
+  }
+  bool sampler_reflection_incomplete =
+      sampler_spv_bindings_msl_order.size() > sampler_mapped_count;
+  if (!shader_sampler_bindings.empty() && sampler_reflection_incomplete) {
     XELOGW(
-        "MslShader: Falling back to sequential sampler binding order "
+        "MslShader: Sampler reflection remap incomplete; preserving mapped "
+        "samplers and appending unmapped samplers in translator order "
         "shader={:016X} stage={} (reflected={} mapped={} runtime={})",
         shader().ucode_data_hash(), GetExecutionModelName(execution_model),
         sampler_spv_bindings_msl_order.size(), sampler_mapped_count,
         shader_sampler_bindings.size());
+  } else if (sampler_spv_bindings_msl_order.empty() &&
+             !shader_sampler_bindings.empty()) {
+    XELOGW(
+        "MslShader: No reflected sampler bindings for shader={:016X} stage={}, "
+        "using translator-order sampler remap",
+        shader().ucode_data_hash(), GetExecutionModelName(execution_model));
+  }
+  if (sampler_binding_indices_for_msl_slots_.size() >
+      MslSamplerIndex::kMaxPerStage) {
+    sampler_binding_indices_for_msl_slots_.resize(MslSamplerIndex::kMaxPerStage);
   }
 
   // Validate resource counts against Metal limits before compilation.

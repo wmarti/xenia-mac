@@ -37,7 +37,10 @@ bool MetalPrimitiveProcessor::Initialize() {
   // are no geometry shaders available.  The SpirvShaderTranslator has
   // built-in support for kPointListAsTriangleStrip and
   // kRectangleListAsTriangleStrip host vertex shader types.
-  bool spirvcross = cvars::metal_use_spirvcross;
+  bool spirvcross = true;
+#if METAL_SHADER_CONVERTER_AVAILABLE
+  spirvcross = cvars::metal_use_spirvcross;
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
   bool point_sprites_without_expansion = !spirvcross;
   bool rect_lists_without_expansion = !spirvcross;
 

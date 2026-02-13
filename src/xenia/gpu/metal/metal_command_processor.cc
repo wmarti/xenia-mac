@@ -92,6 +92,14 @@ namespace gpu {
 namespace metal {
 
 namespace {
+bool UseSpirvCrossPath() {
+#if METAL_SHADER_CONVERTER_AVAILABLE
+  return cvars::metal_use_spirvcross;
+#else
+  return true;
+#endif  // METAL_SHADER_CONVERTER_AVAILABLE
+}
+
 void GetBoundRenderTargetSize(const MetalRenderTargetCache* render_target_cache,
                               uint32_t fallback_width, uint32_t fallback_height,
                               uint32_t& width_out, uint32_t& height_out) {
@@ -827,8 +835,7 @@ MTL::RenderPipelineState* MetalCommandProcessor::CreateMslPipelineState(
   desc->setDepthAttachmentPixelFormat(request.depth_format);
   desc->setStencilAttachmentPixelFormat(request.stencil_format);
   desc->setSampleCount(request.sample_count);
-  // Alpha-to-mask is implemented in shader via gl_SampleMask output.
-  desc->setAlphaToCoverageEnabled(false);
+  desc->setAlphaToCoverageEnabled(request.alpha_to_mask_enable != 0);
 
   for (uint32_t i = 0; i < 4; ++i) {
     auto* color_attachment = desc->colorAttachments()->object(i);
@@ -1342,7 +1349,7 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("Failed to initialize shader translation");
     return false;
   }
-  if (cvars::metal_use_spirvcross) {
+  if (UseSpirvCrossPath()) {
     InitializeMslAsyncCompilation();
   }
 #if METAL_SHADER_CONVERTER_AVAILABLE
@@ -1516,7 +1523,7 @@ bool MetalCommandProcessor::SetupContext() {
 #else
   // SPIRV-Cross path: use command-buffer-scoped uniforms buffers so CPU writes
   // to the next submission can't race with in-flight GPU reads.
-  if (cvars::metal_use_spirvcross) {
+  if (UseSpirvCrossPath()) {
     if (!EnsureSpirvUniformBuffer()) {
       return false;
     }
@@ -1544,6 +1551,12 @@ bool MetalCommandProcessor::InitializeShaderTranslation() {
       render_target_cache_->draw_resolution_scale_x(),
       render_target_cache_->draw_resolution_scale_y());
 
+#if !METAL_SHADER_CONVERTER_AVAILABLE
+  if (!cvars::metal_use_spirvcross) {
+    XELOGW("Metal MSC path unavailable in this build; forcing SPIRV-Cross path");
+  }
+#endif  // !METAL_SHADER_CONVERTER_AVAILABLE
+
 #if METAL_SHADER_CONVERTER_AVAILABLE
   shader_translator_ = std::make_unique<DxbcShaderTranslator>(
       ui::GraphicsProvider::GpuVendorID::kApple,
@@ -1570,7 +1583,7 @@ bool MetalCommandProcessor::InitializeShaderTranslation() {
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
   // Initialize SPIRV-Cross (MSL) path when enabled.
-  if (cvars::metal_use_spirvcross) {
+  if (UseSpirvCrossPath()) {
     // Build SpirvShaderTranslator::Features for Metal.
     // Enable all features as a baseline, then disable what Metal doesn't need.
     SpirvShaderTranslator::Features spirv_features(true);
@@ -1670,7 +1683,7 @@ void MetalCommandProcessor::PrepareForWait() {
 #if METAL_SHADER_CONVERTER_AVAILABLE
     ScheduleDrawRingRelease(current_command_buffer_);
 #else
-    if (cvars::metal_use_spirvcross) {
+    if (UseSpirvCrossPath()) {
       ScheduleSpirvUniformBufferRelease(current_command_buffer_);
     }
 #endif
@@ -1756,7 +1769,7 @@ void MetalCommandProcessor::ShutdownContext() {
 #if METAL_SHADER_CONVERTER_AVAILABLE
     ScheduleDrawRingRelease(current_command_buffer_);
 #else
-    if (cvars::metal_use_spirvcross) {
+    if (UseSpirvCrossPath()) {
       ScheduleSpirvUniformBufferRelease(current_command_buffer_);
     }
 #endif
@@ -2466,7 +2479,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 #if METAL_SHADER_CONVERTER_AVAILABLE
     ScheduleDrawRingRelease(current_command_buffer_);
 #else
-    if (cvars::metal_use_spirvcross) {
+    if (UseSpirvCrossPath()) {
       ScheduleSpirvUniformBufferRelease(current_command_buffer_);
     }
 #endif
@@ -2643,7 +2656,7 @@ Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
   // Create hash for caching using XXH3 (same as D3D12)
   uint64_t hash = XXH3_64bits(host_address, dword_count * sizeof(uint32_t));
 
-  if (cvars::metal_use_spirvcross) {
+  if (UseSpirvCrossPath()) {
     // SPIRV-Cross path: use MslShader (inherits SpirvShader).
     auto it = msl_shader_cache_.find(hash);
     if (it != msl_shader_cache_.end()) {
@@ -2772,7 +2785,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     // The MSC path uses mesh shader emulation for tessellation, so it requires
     // mesh shader support. The SPIRV-Cross path uses native Metal tessellation
     // (drawPatches), so mesh shaders are not needed.
-    if (!cvars::metal_use_spirvcross && !mesh_shader_supported_) {
+    if (!UseSpirvCrossPath() && !mesh_shader_supported_) {
       static bool tess_mesh_logged = false;
       if (!tess_mesh_logged) {
         tess_mesh_logged = true;
@@ -2822,7 +2835,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           "IssueDraw: failed to begin Metal command buffer/render encoder; "
           "skipping draws until uniforms buffer allocation recovers");
     }
-    return cvars::metal_use_spirvcross;
+    return UseSpirvCrossPath();
   }
 #if METAL_SHADER_CONVERTER_AVAILABLE
   if (!EnsureDrawRingCapacity()) {
@@ -2834,7 +2847,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     return true;
   }
 #else
-  if (cvars::metal_use_spirvcross && !EnsureSpirvUniformBufferCapacity()) {
+  if (UseSpirvCrossPath() && !EnsureSpirvUniformBufferCapacity()) {
     XELOGE(
         "IssueDraw: failed to prepare SPIRV-Cross uniforms ring; skipping "
         "draw");
@@ -2845,7 +2858,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   // =========================================================================
   // SPIRV-Cross (MSL) draw path — bypasses the entire MSC / IRRuntime flow.
   // =========================================================================
-  if (cvars::metal_use_spirvcross) {
+  if (UseSpirvCrossPath()) {
     return IssueDrawMsl(vertex_shader, pixel_shader,
                         primitive_processing_result, primitive_polygonal,
                         is_rasterization_done, memexport_used,
@@ -5113,7 +5126,7 @@ bool MetalCommandProcessor::IssueCopy() {
 #if METAL_SHADER_CONVERTER_AVAILABLE
   ScheduleDrawRingRelease(copy_command_buffer);
 #else
-  if (cvars::metal_use_spirvcross) {
+  if (UseSpirvCrossPath()) {
     ScheduleSpirvUniformBufferRelease(copy_command_buffer);
   }
 #endif
@@ -5173,7 +5186,7 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
       NS::String::string("XeniaCommandBuffer", NS::UTF8StringEncoding));
 
 #if !METAL_SHADER_CONVERTER_AVAILABLE
-  if (cvars::metal_use_spirvcross && !EnsureSpirvUniformBuffer()) {
+  if (UseSpirvCrossPath() && !EnsureSpirvUniformBuffer()) {
     static auto last_ensure_uniforms_fail_log =
         std::chrono::steady_clock::time_point{};
     const auto now = std::chrono::steady_clock::now();
@@ -5694,7 +5707,7 @@ void MetalCommandProcessor::EndCommandBuffer() {
 #if METAL_SHADER_CONVERTER_AVAILABLE
     ScheduleDrawRingRelease(current_command_buffer_);
 #else
-    if (cvars::metal_use_spirvcross) {
+    if (UseSpirvCrossPath()) {
       ScheduleSpirvUniformBufferRelease(current_command_buffer_);
     }
 #endif
@@ -8539,8 +8552,7 @@ MetalCommandProcessor::GetOrCreateMslTessPipelineState(
       MTL::TessellationControlPointIndexTypeNone);
 
   // Render target attachments with blend state (same as non-tess pipeline).
-  // Alpha-to-mask is handled in the shader via gl_SampleMask (SPIR-V path).
-  desc->setAlphaToCoverageEnabled(false);
+  desc->setAlphaToCoverageEnabled(key_data.alpha_to_mask_enable != 0);
   for (uint32_t i = 0; i < 4; ++i) {
     auto* color_attachment = desc->colorAttachments()->object(i);
     color_attachment->setPixelFormat(color_formats[i]);
@@ -8891,6 +8903,7 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateMslPipelineState(
   request.depth_format = depth_format;
   request.stencil_format = stencil_format;
   request.normalized_color_mask = key_data.normalized_color_mask;
+  request.alpha_to_mask_enable = key_data.alpha_to_mask_enable;
   request.priority = pixel_translation ? 2 : 1;
   for (uint32_t i = 0; i < 4; ++i) {
     request.color_formats[i] = color_formats[i];

@@ -479,6 +479,7 @@ class MetalCommandProcessor : public CommandProcessor {
     MTL::PixelFormat depth_format = MTL::PixelFormatInvalid;
     MTL::PixelFormat stencil_format = MTL::PixelFormatInvalid;
     uint32_t normalized_color_mask = 0;
+    uint32_t alpha_to_mask_enable = 0;
     uint32_t blendcontrol[4] = {};
     uint8_t priority = 0;
   };
