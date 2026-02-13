@@ -24,6 +24,36 @@ namespace a64 {
 
 volatile int anchor_vector = 0;
 
+template <typename Fn>
+void EmitWithVmxFpcr(A64Emitter& e, Fn&& emit_op) {
+  // Altivec vector FP runs with non-IEEE flush-to-zero and round-to-nearest.
+  e.MRS(X13, SystemReg::FPCR);
+  e.MOV(X14, X13);
+  e.BFI(X14, XZR, 22, 2);
+  e.ORR(X14, X14, uint64_t(1) << 24);
+  e.MSR(SystemReg::FPCR, X14);
+  emit_op();
+  e.MSR(SystemReg::FPCR, X13);
+}
+
+inline void EmitPreferQNaNLanesF32x4(A64Emitter& e, QReg result, QReg src1,
+                                     QReg src2) {
+  // vaddfp/vsubfp keep the first NaN payload encountered per lane and
+  // quiet signaling NaNs.
+  e.LoadConstantV(Q6, vec128i(0x00400000u));
+
+  e.FCMEQ(Q7.S4(), src1.S4(), src1.S4());
+  e.MVN(Q7.B16(), Q7.B16());
+  e.ORR(Q4.B16(), src1.B16(), Q6.B16());
+  e.BIT(result.B16(), Q4.B16(), Q7.B16());
+
+  e.FCMEQ(Q0.S4(), src2.S4(), src2.S4());
+  e.MVN(Q0.B16(), Q0.B16());
+  e.BIC(Q0.B16(), Q0.B16(), Q7.B16());
+  e.ORR(Q4.B16(), src2.B16(), Q6.B16());
+  e.BIT(result.B16(), Q4.B16(), Q0.B16());
+}
+
 // ============================================================================
 // OPCODE_VECTOR_CONVERT_I2F
 // ============================================================================
@@ -35,11 +65,13 @@ struct VECTOR_CONVERT_I2F
     if (i.src1.is_constant) {
       e.LoadConstantV(src, i.src1.constant());
     }
-    if (i.instr->flags & ARITHMETIC_UNSIGNED) {
-      e.UCVTF(i.dest.reg().S4(), src.S4());
-    } else {
-      e.SCVTF(i.dest.reg().S4(), src.S4());
-    }
+    EmitWithVmxFpcr(e, [&] {
+      if (i.instr->flags & ARITHMETIC_UNSIGNED) {
+        e.UCVTF(i.dest.reg().S4(), src.S4());
+      } else {
+        e.SCVTF(i.dest.reg().S4(), src.S4());
+      }
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_VECTOR_CONVERT_I2F, VECTOR_CONVERT_I2F);
@@ -55,11 +87,13 @@ struct VECTOR_CONVERT_F2I
     if (i.src1.is_constant) {
       e.LoadConstantV(src, i.src1.constant());
     }
-    if (i.instr->flags & ARITHMETIC_UNSIGNED) {
-      e.FCVTZU(i.dest.reg().S4(), src.S4());
-    } else {
-      e.FCVTZS(i.dest.reg().S4(), src.S4());
-    }
+    EmitWithVmxFpcr(e, [&] {
+      if (i.instr->flags & ARITHMETIC_UNSIGNED) {
+        e.FCVTZU(i.dest.reg().S4(), src.S4());
+      } else {
+        e.FCVTZS(i.dest.reg().S4(), src.S4());
+      }
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_VECTOR_CONVERT_F2I, VECTOR_CONVERT_F2I);
@@ -270,7 +304,8 @@ struct VECTOR_COMPARE_EQ_V128
               e.CMEQ(dest.S4(), src1.S4(), src2.S4());
               break;
             case FLOAT32_TYPE:
-              e.FCMEQ(dest.S4(), src1.S4(), src2.S4());
+              EmitWithVmxFpcr(
+                  e, [&] { e.FCMEQ(dest.S4(), src1.S4(), src2.S4()); });
               break;
           }
         });
@@ -298,7 +333,8 @@ struct VECTOR_COMPARE_SGT_V128
               e.CMGT(dest.S4(), src1.S4(), src2.S4());
               break;
             case FLOAT32_TYPE:
-              e.FCMGT(dest.S4(), src1.S4(), src2.S4());
+              EmitWithVmxFpcr(
+                  e, [&] { e.FCMGT(dest.S4(), src1.S4(), src2.S4()); });
               break;
           }
         });
@@ -326,7 +362,8 @@ struct VECTOR_COMPARE_SGE_V128
               e.CMGE(dest.S4(), src1.S4(), src2.S4());
               break;
             case FLOAT32_TYPE:
-              e.FCMGE(dest.S4(), src1.S4(), src2.S4());
+              EmitWithVmxFpcr(
+                  e, [&] { e.FCMGE(dest.S4(), src1.S4(), src2.S4()); });
               break;
           }
         });
@@ -354,9 +391,11 @@ struct VECTOR_COMPARE_UGT_V128
               e.CMHI(dest.S4(), src1.S4(), src2.S4());
               break;
             case FLOAT32_TYPE:
-              e.FABS(Q0.S4(), src1.S4());
-              e.FABS(Q1.S4(), src2.S4());
-              e.FCMGT(dest.S4(), Q0.S4(), Q1.S4());
+              EmitWithVmxFpcr(e, [&] {
+                e.FABS(Q0.S4(), src1.S4());
+                e.FABS(Q1.S4(), src2.S4());
+                e.FCMGT(dest.S4(), Q0.S4(), Q1.S4());
+              });
               break;
           }
         });
@@ -384,9 +423,11 @@ struct VECTOR_COMPARE_UGE_V128
               e.CMHS(dest.S4(), src1.S4(), src2.S4());
               break;
             case FLOAT32_TYPE:
-              e.FABS(Q0.S4(), src1.S4());
-              e.FABS(Q1.S4(), src2.S4());
-              e.FCMGE(dest.S4(), Q0.S4(), Q1.S4());
+              EmitWithVmxFpcr(e, [&] {
+                e.FABS(Q0.S4(), src1.S4());
+                e.FABS(Q1.S4(), src2.S4());
+                e.FCMGE(dest.S4(), Q0.S4(), Q1.S4());
+              });
               break;
           }
         });
@@ -444,7 +485,12 @@ struct VECTOR_ADD
             case FLOAT32_TYPE:
               assert_false(is_unsigned);
               assert_false(saturate);
-              e.FADD(dest.S4(), src1.S4(), src2.S4());
+              EmitWithVmxFpcr(e, [&] {
+                e.MOV(Q2.B16(), src1.B16());
+                e.MOV(Q3.B16(), src2.B16());
+                e.FADD(dest.S4(), Q2.S4(), Q3.S4());
+                EmitPreferQNaNLanesF32x4(e, dest, Q2, Q3);
+              });
               break;
             default:
               assert_unhandled_case(part_type);
@@ -505,7 +551,12 @@ struct VECTOR_SUB
             case FLOAT32_TYPE:
               assert_false(is_unsigned);
               assert_false(saturate);
-              e.FSUB(dest.S4(), src1.S4(), src2.S4());
+              EmitWithVmxFpcr(e, [&] {
+                e.MOV(Q2.B16(), src1.B16());
+                e.MOV(Q3.B16(), src2.B16());
+                e.FSUB(dest.S4(), Q2.S4(), Q3.S4());
+                EmitPreferQNaNLanesF32x4(e, dest, Q2, Q3);
+              });
               break;
             default:
               assert_unhandled_case(part_type);
