@@ -44,6 +44,7 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
+#include "xenia/gpu/metal/metal_shader_cache.h"
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
@@ -52,7 +53,6 @@
 #include "xenia/ui/metal/metal_presenter.h"
 
 #if METAL_SHADER_CONVERTER_AVAILABLE
-#include "xenia/gpu/metal/metal_shader_cache.h"
 #include "xenia/gpu/metal/metal_shader_converter.h"
 using BYTE = uint8_t;
 #include "xenia/gpu/metal/d3d12_5_1_bytecode/adaptive_quad_hs.h"
@@ -1907,7 +1907,41 @@ void MetalCommandProcessor::InitializeShaderStorage(
     const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
     std::function<void()> completion_callback) {
   CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking,
-                                            completion_callback);
+                                            nullptr);
+
+  if (!device_) {
+    XELOGW("Metal shader storage init skipped (no device)");
+    if (completion_callback) {
+      completion_callback();
+    }
+    return;
+  }
+
+  std::string device_tag = "unknown";
+  if (device_->name()) {
+    device_tag = device_->name()->utf8String();
+  }
+  for (char& ch : device_tag) {
+    if (!std::isalnum(static_cast<unsigned char>(ch))) {
+      ch = '_';
+    }
+  }
+
+  std::filesystem::path shader_storage_title_root =
+      cache_root / "shaders" / "metal" / "local" / device_tag /
+      fmt::format("{:08X}", title_id);
+  std::error_code ec;
+  std::filesystem::create_directories(shader_storage_title_root, ec);
+  if (ec) {
+    XELOGW("Metal shader storage: Failed to create {}: {}",
+           shader_storage_title_root.string(), ec.message());
+  } else if (::cvars::metal_shader_disk_cache && g_metal_shader_cache) {
+    g_metal_shader_cache->Initialize(shader_storage_title_root / "metallib");
+  }
+
+  if (completion_callback) {
+    completion_callback();
+  }
 }
 #endif  // METAL_SHADER_CONVERTER_AVAILABLE
 
