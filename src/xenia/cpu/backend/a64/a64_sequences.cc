@@ -2900,7 +2900,11 @@ struct SET_ROUNDING_MODE_I32
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // Low 3 bits are |Non-IEEE:1|RoundingMode:2|
     // Non-IEEE bit is flush-to-zero
-    e.AND(W1, i.src1, 0b111);
+    if (i.src1.is_constant) {
+      e.MOV(W1, static_cast<uint32_t>(i.src1.constant()) & 0b111);
+    } else {
+      e.AND(W1, i.src1.reg(), 0b111);
+    }
 
     // Use the low 3 bits as an index into a LUT
     e.MOV(X0, reinterpret_cast<uintptr_t>(fpcr_table));
