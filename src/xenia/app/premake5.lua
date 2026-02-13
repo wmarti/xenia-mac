@@ -220,6 +220,11 @@ project("xenia-app")
 
   -- iOS app configuration (SPIRV-Cross path + SDL audio/input).
   filter("system:ios")
+    local ios_entitlements_path =
+        path.getabsolute(path.join(project_root, "xenia_ios.entitlements"))
+    files({
+      project_root.."/xenia_ios.entitlements",
+    })
     links({
       "xenia-gpu-metal",
       "xenia-ui-metal",
@@ -253,6 +258,8 @@ project("xenia-app")
       ["EXECUTABLE_NAME"] = "xenia_edge",
       ["PRODUCT_BUNDLE_IDENTIFIER"] = "com.xenia.xenia-edge-ios",
       ["CODE_SIGN_STYLE"] = "Automatic",
+      ["CODE_SIGN_ENTITLEMENTS"] = ios_entitlements_path,
+      ["CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION"] = "YES",
     })
     local ios_app_bundle = "${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}"
     local ios_icon_src =
