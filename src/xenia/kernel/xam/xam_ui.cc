@@ -1226,6 +1226,18 @@ X_RESULT xeXamShowCreateProfileUIEx(uint32_t user_index, dword_t flag,
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
 
   if (cvars::headless || !imgui_drawer) {
+#if XE_PLATFORM_IOS
+    if (!cvars::headless) {
+      auto& app_context = emulator->display_window()->app_context();
+      auto* ios_context =
+          dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+      if (ios_context) {
+        return xeXamDispatchHeadlessAsync([ios_context, user_index]() {
+          ios_context->PromptSignInUI(user_index, 1);
+        });
+      }
+    }
+#endif  // XE_PLATFORM_IOS
     return X_ERROR_SUCCESS;
   }
 
