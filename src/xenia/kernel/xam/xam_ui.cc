@@ -821,10 +821,6 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
     return X_ERROR_NO_SUCH_USER;
   }
 
-  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
-    return xeXamDispatchHeadlessAsync([]() {});
-  }
-
   bool is_xbla_unlock_offer =
       (offer_id == ((uint64_t(kernel_state()->title_id()) << 32) | 1ull));
 
@@ -906,6 +902,34 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
       break;
   }
 
+  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
+#if XE_PLATFORM_IOS
+    if (!cvars::headless) {
+      auto& app_context =
+          kernel_state()->emulator()->display_window()->app_context();
+      auto* ios_context =
+          dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+      if (ios_context) {
+        return xeXamDispatchHeadlessAsync(
+            [ios_context, title = std::string(title), desc = std::string(desc),
+             buttons = std::vector<std::string>(buttons), ui_type,
+             is_xbla_unlock_offer]() {
+              uint32_t selected_button = 0;
+              ios_context->PromptMessageBoxUI(title, desc, buttons, 0,
+                                              &selected_button);
+              if (ui_type == X_MARKETPLACE_ENTRYPOINT::ContentItem &&
+                  is_xbla_unlock_offer && selected_button == 0) {
+                cvars::license_mask = 1;
+                kernel_state()->BroadcastNotification(
+                    kXNotificationLiveContentInstalled, 0);
+              }
+            });
+      }
+    }
+#endif  // XE_PLATFORM_IOS
+    return xeXamDispatchHeadlessAsync([]() {});
+  }
+
   desc +=
       "\nNote that since Xenia cannot access Xbox Marketplace, any DLC must be "
       "installed manually using File -> Install Content.";
@@ -963,17 +987,6 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
     return X_ERROR_NO_SUCH_USER;
   }
 
-  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
-    return xeXamDispatchHeadless(
-        [hresult_ptr]() -> X_RESULT {
-          if (hresult_ptr) {
-            *hresult_ptr = X_E_SUCCESS;
-          }
-          return X_ERROR_SUCCESS;
-        },
-        overlapped);
-  }
-
   auto close = [hresult_ptr](MessageBoxDialog* dialog) -> X_RESULT {
     if (hresult_ptr) {
       // TODO
@@ -1008,6 +1021,40 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
       "\n\nNote that since Xenia cannot access Xbox Marketplace, any DLC "
       "must "
       "be installed manually using File -> Install Content.";
+
+  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
+#if XE_PLATFORM_IOS
+    if (!cvars::headless) {
+      auto& app_context =
+          kernel_state()->emulator()->display_window()->app_context();
+      auto* ios_context =
+          dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+      if (ios_context) {
+        return xeXamDispatchHeadless(
+            [ios_context, title = std::string(title), desc = std::string(desc),
+             buttons = std::vector<std::string>(buttons),
+             hresult_ptr]() -> X_RESULT {
+              uint32_t selected_button = 0;
+              ios_context->PromptMessageBoxUI(title, desc, buttons, 0,
+                                              &selected_button);
+              if (hresult_ptr) {
+                *hresult_ptr = X_E_SUCCESS;
+              }
+              return X_ERROR_SUCCESS;
+            },
+            overlapped);
+      }
+    }
+#endif  // XE_PLATFORM_IOS
+    return xeXamDispatchHeadless(
+        [hresult_ptr]() -> X_RESULT {
+          if (hresult_ptr) {
+            *hresult_ptr = X_E_SUCCESS;
+          }
+          return X_ERROR_SUCCESS;
+        },
+        overlapped);
+  }
 
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
