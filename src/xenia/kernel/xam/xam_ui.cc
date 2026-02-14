@@ -656,9 +656,51 @@ dword_result_t XamShowDeviceSelectorUI_entry(
   }
 
   std::vector<const DummyDeviceInfo*> devices = ListStorageDevices();
+  std::string title = "Select storage device";
+  std::string desc = "";
+
+  cxxopts::OptionNames buttons;
+  for (auto& device_info : devices) {
+    buttons.push_back(to_utf8(device_info->name));
+  }
+  buttons.push_back("Cancel");
 
   if (cvars::headless || !cvars::storage_selection_dialog ||
       !kernel_state()->emulator()->imgui_drawer()) {
+#if XE_PLATFORM_IOS
+    if (!cvars::headless && cvars::storage_selection_dialog) {
+      auto& app_context =
+          kernel_state()->emulator()->display_window()->app_context();
+      auto* ios_context =
+          dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+      if (ios_context) {
+        return xeXamDispatchHeadless(
+            [device_id_ptr, devices,
+             buttons = std::vector<std::string>(buttons),
+             title = std::string(title), desc = std::string(desc),
+             ios_context]() -> X_RESULT {
+              if (devices.empty()) {
+                return X_ERROR_CANCELLED;
+              }
+              uint32_t selected_button = 0;
+              if (!ios_context->PromptMessageBoxUI(title, desc, buttons, 0,
+                                                   &selected_button)) {
+                XELOGW(
+                    "iOS: storage selector prompt unavailable, defaulting to "
+                    "first device.");
+                selected_button = 0;
+              }
+              if (selected_button >= devices.size()) {
+                return X_ERROR_CANCELLED;
+              }
+              const DummyDeviceInfo* device_info = devices.at(selected_button);
+              *device_id_ptr = static_cast<uint32_t>(device_info->device_id);
+              return X_ERROR_SUCCESS;
+            },
+            overlapped);
+      }
+    }
+#endif  // XE_PLATFORM_IOS
     // Default to the first storage device (HDD) if headless / no UI.
     return xeXamDispatchHeadless(
         [device_id_ptr, devices]() -> X_RESULT {
@@ -680,15 +722,6 @@ dword_result_t XamShowDeviceSelectorUI_entry(
     return X_ERROR_SUCCESS;
   };
 
-  std::string title = "Select storage device";
-  std::string desc = "";
-
-  cxxopts::OptionNames buttons;
-  for (auto& device_info : devices) {
-    buttons.push_back(to_utf8(device_info->name));
-  }
-  buttons.push_back("Cancel");
-
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
   xe::hid::InputSystem* input_system = emulator->input_system();
@@ -701,17 +734,33 @@ DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
   (void)user_index;
   XELOGE("XamShowDirtyDiscErrorUI called");
-
-  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
-    XELOGE("Disc Read Error (no UI available) - continuing without abort");
-    xeXamDispatchHeadlessAsync([]() {});
-    return;
-  }
-
   std::string title = "Disc Read Error";
   std::string desc =
       "There's been an issue reading content from the game disc.\nThis is "
       "likely caused by bad or unimplemented file IO calls.";
+
+  if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
+#if XE_PLATFORM_IOS
+    if (!cvars::headless) {
+      auto& app_context =
+          kernel_state()->emulator()->display_window()->app_context();
+      auto* ios_context =
+          dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+      if (ios_context) {
+        xeXamDispatchHeadlessAsync([ios_context, title = std::string(title),
+                                    desc = std::string(desc)]() {
+          uint32_t selected_button = 0;
+          ios_context->PromptMessageBoxUI(title, desc, {"OK"}, 0,
+                                          &selected_button);
+        });
+        return;
+      }
+    }
+#endif  // XE_PLATFORM_IOS
+    XELOGE("Disc Read Error (no UI available) - continuing without abort");
+    xeXamDispatchHeadlessAsync([]() {});
+    return;
+  }
 
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
