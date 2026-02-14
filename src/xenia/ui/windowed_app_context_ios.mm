@@ -37,9 +37,10 @@ bool IOSWindowedAppContext::PromptMessageBoxUI(const std::string& title, const s
   __block BOOL shown = NO;
   dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
-  const NSString* title_ns =
+  NSString* title_ns =
       title.empty() ? @"Message Box" : [NSString stringWithUTF8String:title.c_str()];
-  const NSString* text_ns = text.empty() ? @"" : [NSString stringWithUTF8String:text.c_str()];
+  NSString* text_ns =
+      text.empty() ? @"" : [NSString stringWithUTF8String:text.c_str()];
 
   NSMutableArray<NSString*>* prompt_buttons = [NSMutableArray arrayWithCapacity:buttons.size()];
   for (const auto& button : buttons) {
