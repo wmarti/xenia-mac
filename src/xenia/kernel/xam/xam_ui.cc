@@ -398,7 +398,8 @@ static dword_result_t XamShowMessageBoxUi(
       !(flags & XMBox_PASSCODEMODE || flags & XMBox_VERIFYPASSCODEMODE)) {
     const uint32_t selected_active_button =
         buttons.empty() ? 0
-                        : std::min(active_button, uint32_t(buttons.size() - 1));
+                        : std::min(uint32_t(active_button),
+                                   uint32_t(buttons.size() - 1));
     auto run = [ios_context, title_str = std::string(title),
                 text_str = std::string(text),
                 buttons_copy = std::vector<std::string>(buttons),
