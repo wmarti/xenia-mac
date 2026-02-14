@@ -1313,6 +1313,21 @@ dword_result_t XamShowAchievementsUI_entry(dword_t user_index,
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
   if (!imgui_drawer) {
+#if XE_PLATFORM_IOS
+    auto& app_context =
+        kernel_state()->emulator()->display_window()->app_context();
+    auto* ios_context =
+        dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+    if (ios_context) {
+      return xeXamDispatchHeadlessAsync([ios_context]() {
+        uint32_t selected_button = 0;
+        ios_context->PromptMessageBoxUI(
+            "Achievements",
+            "Achievements UI is not implemented yet in the iOS build.", {"OK"},
+            0, &selected_button);
+      });
+    }
+#endif  // XE_PLATFORM_IOS
     return X_ERROR_SUCCESS;
   }
   xe::hid::InputSystem* input_system =
@@ -1335,6 +1350,21 @@ dword_result_t XamShowGamerCardUI_entry(dword_t user_index) {
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
   if (!imgui_drawer) {
+#if XE_PLATFORM_IOS
+    auto& app_context =
+        kernel_state()->emulator()->display_window()->app_context();
+    auto* ios_context =
+        dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+    if (ios_context) {
+      return xeXamDispatchHeadlessAsync([ios_context]() {
+        uint32_t selected_button = 0;
+        ios_context->PromptMessageBoxUI(
+            "Gamer Card",
+            "Gamer card UI is not implemented yet in the iOS build.", {"OK"}, 0,
+            &selected_button);
+      });
+    }
+#endif  // XE_PLATFORM_IOS
     return X_ERROR_SUCCESS;
   }
 
@@ -1355,6 +1385,21 @@ dword_result_t XamShowEditProfileUI_entry(dword_t user_index) {
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
   if (!imgui_drawer) {
+#if XE_PLATFORM_IOS
+    auto& app_context =
+        kernel_state()->emulator()->display_window()->app_context();
+    auto* ios_context =
+        dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+    if (ios_context) {
+      return xeXamDispatchHeadlessAsync([ios_context]() {
+        uint32_t selected_button = 0;
+        ios_context->PromptMessageBoxUI(
+            "Edit Profile",
+            "Profile editing UI is not implemented yet in the iOS build.",
+            {"OK"}, 0, &selected_button);
+      });
+    }
+#endif  // XE_PLATFORM_IOS
     return X_ERROR_SUCCESS;
   }
 
