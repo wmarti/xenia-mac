@@ -68,9 +68,11 @@ class IOSWindowedAppContext final : public WindowedAppContext {
   using GameTerminateCallback = std::function<bool()>;
   using GameExitedCallback = std::function<void()>;
   using SignInUIPromptCallback = std::function<bool(uint32_t, uint32_t)>;
-  using KeyboardPromptCallback = std::function<bool(
-      const std::string&, const std::string&, const std::string&, std::string*,
-      bool*)>;
+  using MessageBoxPromptCallback =
+      std::function<bool(const std::string&, const std::string&, const std::vector<std::string>&,
+                         uint32_t, uint32_t*)>;
+  using KeyboardPromptCallback = std::function<bool(const std::string&, const std::string&,
+                                                    const std::string&, std::string*, bool*)>;
 
   void set_profiles_list_callback(ProfilesListCallback callback) {
     profiles_list_callback_ = std::move(callback);
@@ -131,17 +133,23 @@ class IOSWindowedAppContext final : public WindowedAppContext {
     return signin_ui_prompt_callback_(user_index, users_needed);
   }
 
+  void set_message_box_prompt_callback(MessageBoxPromptCallback callback) {
+    message_box_prompt_callback_ = std::move(callback);
+  }
+  bool PromptMessageBoxUI(const std::string& title, const std::string& text,
+                          const std::vector<std::string>& buttons, uint32_t default_button,
+                          uint32_t* selected_button_out) const;
+
   void set_keyboard_prompt_callback(KeyboardPromptCallback callback) {
     keyboard_prompt_callback_ = std::move(callback);
   }
   bool PromptKeyboardUI(const std::string& title, const std::string& description,
-                        const std::string& default_text,
-                        std::string* text_out, bool* cancelled_out) const {
+                        const std::string& default_text, std::string* text_out,
+                        bool* cancelled_out) const {
     if (!keyboard_prompt_callback_) {
       return false;
     }
-    return keyboard_prompt_callback_(title, description, default_text, text_out,
-                                     cancelled_out);
+    return keyboard_prompt_callback_(title, description, default_text, text_out, cancelled_out);
   }
 
   // Callback invoked when the view layout changes (rotation, resize, etc.).
@@ -165,6 +173,7 @@ class IOSWindowedAppContext final : public WindowedAppContext {
   GameTerminateCallback game_terminate_callback_;
   GameExitedCallback game_exited_callback_;
   SignInUIPromptCallback signin_ui_prompt_callback_;
+  MessageBoxPromptCallback message_box_prompt_callback_;
   KeyboardPromptCallback keyboard_prompt_callback_;
   LayoutChangedCallback layout_changed_callback_;
 };

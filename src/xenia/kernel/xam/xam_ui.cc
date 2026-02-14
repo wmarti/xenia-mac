@@ -8,6 +8,8 @@
  */
 
 #include "xenia/kernel/xam/xam_ui.h"
+
+#include <algorithm>
 #include "xenia/app/emulator_window.h"
 #include "xenia/base/png_utils.h"
 #include "xenia/base/system.h"
@@ -386,6 +388,37 @@ static dword_result_t XamShowMessageBoxUi(
         kernel_state()->memory()->TranslateVirtual(button_ptr));
     buttons.push_back(xe::to_utf8(button));
   }
+
+#if XE_PLATFORM_IOS
+  auto& app_context =
+      kernel_state()->emulator()->display_window()->app_context();
+  auto* ios_context =
+      dynamic_cast<xe::ui::IOSWindowedAppContext*>(&app_context);
+  if (ios_context &&
+      !(flags & XMBox_PASSCODEMODE || flags & XMBox_VERIFYPASSCODEMODE)) {
+    const uint32_t selected_active_button =
+        buttons.empty() ? 0
+                        : std::min(active_button, uint32_t(buttons.size() - 1));
+    auto run = [ios_context, title_str = std::string(title),
+                text_str = std::string(text),
+                buttons_copy = std::vector<std::string>(buttons),
+                selected_active_button, result_ptr]() -> X_RESULT {
+      uint32_t selected_button = selected_active_button;
+      if (!ios_context->PromptMessageBoxUI(title_str, text_str, buttons_copy,
+                                           selected_active_button,
+                                           &selected_button)) {
+        XELOGW(
+            "iOS: failed to show native message box prompt, defaulting to "
+            "button {}.",
+            selected_active_button);
+        selected_button = selected_active_button;
+      }
+      result_ptr->ButtonPressed = selected_button;
+      return X_ERROR_SUCCESS;
+    };
+    return xeXamDispatchHeadless(run, overlapped);
+  }
+#endif  // XE_PLATFORM_IOS
 
   X_RESULT result;
   if (cvars::headless || !kernel_state()->emulator()->imgui_drawer()) {
