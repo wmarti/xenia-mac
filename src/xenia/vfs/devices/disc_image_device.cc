@@ -9,6 +9,9 @@
 
 #include "xenia/vfs/devices/disc_image_device.h"
 
+#include <cstring>
+#include <vector>
+
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -29,15 +32,32 @@ DiscImageDevice::~DiscImageDevice() = default;
 bool DiscImageDevice::Initialize() {
   mmap_ = MappedMemory::Open(host_path_, MappedMemory::Mode::kRead);
   if (!mmap_) {
+#if XE_PLATFORM_IOS
+    file_handle_ = xe::filesystem::FileHandle::OpenExisting(
+        host_path_, xe::filesystem::FileAccess::kGenericRead);
+    auto file_info = xe::filesystem::GetInfo(host_path_);
+    if (!file_handle_ || !file_info ||
+        file_info->type != xe::filesystem::FileInfo::Type::kFile) {
+      XELOGE("Disc image could not be opened for fallback reads");
+      return false;
+    }
+    image_size_ = file_info->total_size;
+    XELOGW(
+        "Disc image mmap unavailable, using iOS fallback file reads "
+        "(size=0x{:X})",
+        image_size_);
+#else
     XELOGE("Disc image could not be mapped");
     return false;
+#endif  // XE_PLATFORM_IOS
   } else {
+    image_size_ = mmap_->size();
     XELOGFS("DiscImageDevice::Initialize");
   }
 
   ParseState state = {0};
-  state.ptr = mmap_->data();
-  state.size = mmap_->size();
+  state.ptr = mmap_ ? mmap_->data() : nullptr;
+  state.size = image_size_;
   auto result = Verify(&state);
   if (result != Error::kSuccess) {
     XELOGE("Failed to verify disc image header: {}",
@@ -45,7 +65,27 @@ bool DiscImageDevice::Initialize() {
     return false;
   }
 
-  result = ReadAllEntries(&state, state.ptr + state.root_offset);
+  if (state.root_offset > state.size ||
+      state.root_size > (state.size - state.root_offset)) {
+    XELOGE("Disc image root directory is out of bounds");
+    return false;
+  }
+
+  std::vector<uint8_t> root_buffer_storage;
+  const uint8_t* root_buffer = nullptr;
+  if (state.ptr) {
+    root_buffer = state.ptr + state.root_offset;
+  } else {
+    root_buffer_storage.resize(state.root_size);
+    if (!ReadImage(state.root_offset, root_buffer_storage.data(),
+                   root_buffer_storage.size())) {
+      XELOGE("Failed to read disc image root directory");
+      return false;
+    }
+    root_buffer = root_buffer_storage.data();
+  }
+
+  result = ReadAllEntries(&state, root_buffer);
   if (result != Error::kSuccess) {
     XELOGE("Failed to read all GDFX entries: {}", static_cast<int32_t>(result));
     return false;
@@ -68,6 +108,37 @@ Entry* DiscImageDevice::ResolvePath(const std::string_view path) {
 }
 
 DiscImageDevice::Error DiscImageDevice::Verify(ParseState* state) {
+  if (!state->ptr) {
+    for (size_t offset : kGdfxLikelyOffsets) {
+      const size_t sector32_offset = offset + (32 * kGdfxSectorSize);
+      if (sector32_offset > state->size || state->size - sector32_offset < 28) {
+        continue;
+      }
+      if (!VerifyMagic(state, sector32_offset)) {
+        continue;
+      }
+
+      uint8_t fs_data[28] = {};
+      if (!ReadImage(sector32_offset, fs_data, sizeof(fs_data))) {
+        continue;
+      }
+
+      uint32_t root_sector = xe::load<uint32_t>(fs_data + 20);
+      uint32_t root_size = xe::load<uint32_t>(fs_data + 24);
+      if (root_size < 13 || root_size > 32 * 1024 * 1024) {
+        continue;
+      }
+
+      state->game_offset = offset;
+      state->root_sector = root_sector;
+      state->root_size = root_size;
+      state->root_offset =
+          state->game_offset + (state->root_sector * kGdfxSectorSize);
+      return Error::kSuccess;
+    }
+    return Error::kErrorFileMismatch;
+  }
+
   // Use shared GDFX utility to find the game partition.
   auto partition = GdfxFindPartition(state->ptr, state->size);
   if (!partition) {
@@ -84,6 +155,13 @@ DiscImageDevice::Error DiscImageDevice::Verify(ParseState* state) {
 }
 
 bool DiscImageDevice::VerifyMagic(ParseState* state, size_t offset) {
+  if (!state->ptr) {
+    uint8_t magic[kGdfxMagicSize] = {};
+    if (!ReadImage(offset, magic, kGdfxMagicSize)) {
+      return false;
+    }
+    return std::memcmp(magic, kGdfxMagic, kGdfxMagicSize) == 0;
+  }
   return GdfxVerifyMagic(state->ptr, state->size, offset);
 }
 
@@ -142,15 +220,27 @@ bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer,
     entry->data_size_ = 0;
     if (length) {
       // Not a leaf - read in children.
-      if (state->size < state->game_offset + (sector * kGdfxSectorSize)) {
+      const size_t folder_offset =
+          state->game_offset + (sector * kGdfxSectorSize);
+      if (folder_offset > state->size ||
+          length > (state->size - folder_offset)) {
         // Out of bounds read.
         return false;
       }
-      // Read child list.
-      uint8_t* folder_ptr =
-          state->ptr + state->game_offset + (sector * kGdfxSectorSize);
-      if (!ReadEntry(state, folder_ptr, 0, entry.get())) {
-        return false;
+      if (state->ptr) {
+        // Read child list directly from mapped memory.
+        uint8_t* folder_ptr = state->ptr + folder_offset;
+        if (!ReadEntry(state, folder_ptr, 0, entry.get())) {
+          return false;
+        }
+      } else {
+        std::vector<uint8_t> folder_data(length);
+        if (!ReadImage(folder_offset, folder_data.data(), folder_data.size())) {
+          return false;
+        }
+        if (!ReadEntry(state, folder_data.data(), 0, entry.get())) {
+          return false;
+        }
       }
     }
   } else {
@@ -168,6 +258,28 @@ bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer,
   }
 
   return true;
+}
+
+bool DiscImageDevice::ReadImage(size_t offset, void* buffer,
+                                size_t length) const {
+  if (!length) {
+    return true;
+  }
+  if (offset > image_size_ || length > (image_size_ - offset)) {
+    return false;
+  }
+  if (mmap_) {
+    std::memcpy(buffer, mmap_->data() + offset, length);
+    return true;
+  }
+  if (!file_handle_) {
+    return false;
+  }
+  size_t bytes_read = 0;
+  if (!file_handle_->Read(offset, buffer, length, &bytes_read)) {
+    return false;
+  }
+  return bytes_read == length;
 }
 
 }  // namespace vfs

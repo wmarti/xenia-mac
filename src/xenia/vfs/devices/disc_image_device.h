@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/vfs/device.h"
 
@@ -38,12 +39,14 @@ class DiscImageDevice : public Device {
   uint32_t component_name_max_length() const override { return 255; }
 
   uint32_t total_allocation_units() const override {
-    return uint32_t(mmap_->size() / sectors_per_allocation_unit() /
+    return uint32_t(image_size_ / sectors_per_allocation_unit() /
                     bytes_per_sector());
   }
   uint32_t available_allocation_units() const override { return 0; }
   uint32_t sectors_per_allocation_unit() const override { return 1; }
   uint32_t bytes_per_sector() const override { return 0x200; }
+
+  bool ReadImage(size_t offset, void* buffer, size_t length) const;
 
  private:
   enum class Error {
@@ -58,6 +61,8 @@ class DiscImageDevice : public Device {
   std::filesystem::path host_path_;
   std::unique_ptr<Entry> root_entry_;
   std::unique_ptr<MappedMemory> mmap_;
+  std::unique_ptr<xe::filesystem::FileHandle> file_handle_;
+  size_t image_size_ = 0;
 
   typedef struct {
     uint8_t* ptr;

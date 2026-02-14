@@ -39,7 +39,7 @@ X_STATUS DiscImageEntry::Open(uint32_t desired_access, File** out_file) {
 
 std::unique_ptr<MappedMemory> DiscImageEntry::OpenMapped(
     MappedMemory::Mode mode, size_t offset, size_t length) {
-  if (mode != MappedMemory::Mode::kRead) {
+  if (!mmap_ || mode != MappedMemory::Mode::kRead) {
     // Only allow reads.
     return nullptr;
   }
