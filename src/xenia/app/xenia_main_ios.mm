@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -86,6 +88,9 @@ class EmulatorAppIOS final : public xe::ui::WindowedApp {
       : xe::ui::WindowedApp(app_context, "xenia") {}
 
   std::filesystem::path GetIOSStorageRoot() const;
+  bool RequestGameStop(const char* reason);
+  void StartEmulatorThread(std::filesystem::path game_path);
+  void StartQueuedLaunchIfIdle();
   void EmulatorThread(const std::filesystem::path& game_path);
 
   static std::unique_ptr<apu::AudioSystem> CreateAudioSystem(
@@ -98,6 +103,10 @@ class EmulatorAppIOS final : public xe::ui::WindowedApp {
   std::unique_ptr<ui::Window> window_;
   std::thread emulator_thread_;
   std::atomic<bool> emulator_thread_running_{false};
+  std::atomic<bool> game_stop_requested_{false};
+  std::atomic<bool> shutting_down_{false};
+  std::mutex launch_mutex_;
+  std::optional<std::filesystem::path> queued_launch_path_;
   bool emulator_initialized_ = false;
 };
 
@@ -194,31 +203,30 @@ bool EmulatorAppIOS::OnInitialize() {
 
   ios_context.set_game_launch_callback(
       [this](const std::string& path) {
+        if (shutting_down_.load(std::memory_order_acquire)) {
+          XELOGW("iOS: Ignoring game launch request while shutting down");
+          return;
+        }
+
         XELOGI("iOS: Game launch requested: {}", path);
         auto game_path = std::filesystem::path(path);
 
-        if (emulator_thread_.joinable()) {
-          if (emulator_thread_running_.load(std::memory_order_acquire)) {
-            XELOGW("iOS: Emulator thread already running");
-            return;
+        if (emulator_thread_running_.load(std::memory_order_acquire)) {
+          {
+            std::lock_guard<std::mutex> lock(launch_mutex_);
+            queued_launch_path_ = game_path;
           }
-          emulator_thread_.join();
+          XELOGI("iOS: Emulator thread is running; queued launch '{}'",
+                 game_path);
+          RequestGameStop("Queued launch");
+          return;
         }
 
-        emulator_thread_ = std::thread([this, game_path]() {
-          emulator_thread_running_.store(true, std::memory_order_release);
-          EmulatorThread(game_path);
-          emulator_thread_running_.store(false, std::memory_order_release);
-        });
+        StartEmulatorThread(std::move(game_path));
       });
 
   ios_context.set_game_terminate_callback([this]() {
-    if (!emulator_ || !emulator_thread_running_.load(std::memory_order_acquire)) {
-      return false;
-    }
-    XELOGI("iOS: TerminateCurrentGame requested");
-    emulator_->TerminateTitle();
-    return true;
+    return RequestGameStop("TerminateCurrentGame");
   });
 
   ios_context.set_profiles_list_callback([this]() {
@@ -299,12 +307,75 @@ bool EmulatorAppIOS::OnInitialize() {
   return true;
 }
 
+bool EmulatorAppIOS::RequestGameStop(const char* reason) {
+  if (!emulator_ || !emulator_thread_running_.load(std::memory_order_acquire)) {
+    game_stop_requested_.store(false, std::memory_order_release);
+    return false;
+  }
+  if (game_stop_requested_.exchange(true, std::memory_order_acq_rel)) {
+    XELOGI("iOS: {} already in progress", reason ? reason : "Game stop");
+    return true;
+  }
+
+  XELOGI("iOS: {} requested", reason ? reason : "Game stop");
+  const X_STATUS terminate_status = emulator_->TerminateTitle();
+  if (XFAILED(terminate_status)) {
+    game_stop_requested_.store(false, std::memory_order_release);
+    XELOGW("iOS: TerminateTitle failed with status {:08X}", terminate_status);
+    return false;
+  }
+  return true;
+}
+
+void EmulatorAppIOS::StartEmulatorThread(std::filesystem::path game_path) {
+  if (emulator_thread_.joinable()) {
+    emulator_thread_.join();
+  }
+
+  game_stop_requested_.store(false, std::memory_order_release);
+  emulator_thread_ = std::thread([this, game_path = std::move(game_path)]() {
+    emulator_thread_running_.store(true, std::memory_order_release);
+    EmulatorThread(game_path);
+    emulator_thread_running_.store(false, std::memory_order_release);
+    game_stop_requested_.store(false, std::memory_order_release);
+    app_context().CallInUIThread([this]() { StartQueuedLaunchIfIdle(); });
+  });
+}
+
+void EmulatorAppIOS::StartQueuedLaunchIfIdle() {
+  if (shutting_down_.load(std::memory_order_acquire) ||
+      emulator_thread_running_.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  std::optional<std::filesystem::path> queued_path;
+  {
+    std::lock_guard<std::mutex> lock(launch_mutex_);
+    if (!queued_launch_path_.has_value()) {
+      return;
+    }
+    queued_path = std::move(queued_launch_path_);
+    queued_launch_path_.reset();
+  }
+
+  if (!queued_path.has_value() || queued_path->empty()) {
+    return;
+  }
+
+  XELOGI("iOS: Starting queued game launch: {}", queued_path->string());
+  StartEmulatorThread(std::move(*queued_path));
+}
+
 void EmulatorAppIOS::OnDestroy() {
   XELOGI("iOS: EmulatorAppIOS::OnDestroy invoked");
+  shutting_down_.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(launch_mutex_);
+    queued_launch_path_.reset();
+  }
   if (emulator_thread_.joinable()) {
-    if (emulator_ && emulator_thread_running_.load(std::memory_order_acquire)) {
-      XELOGI("iOS: OnDestroy requesting title termination");
-      emulator_->TerminateTitle();
+    if (emulator_thread_running_.load(std::memory_order_acquire)) {
+      RequestGameStop("OnDestroy");
     }
     emulator_thread_.join();
     emulator_thread_running_.store(false, std::memory_order_release);
@@ -340,51 +411,54 @@ void EmulatorAppIOS::EmulatorThread(
     config::LoadGameConfigForFile(game_path);
   }
 
-  // Set up the emulator with all subsystems.
-  X_STATUS result = emulator_->Setup(
-      window_.get(),
-      nullptr,  // No ImGui drawer on iOS for now.
-      true,     // require_cpu_backend
-      CreateAudioSystem,
-      CreateGraphicsSystem,
-      CreateInputDrivers);
+  if (!emulator_initialized_) {
+    // Set up the emulator with all subsystems once and keep it alive while the
+    // app is running.
+    X_STATUS setup_result = emulator_->Setup(
+        window_.get(),
+        nullptr,  // No ImGui drawer on iOS for now.
+        true,     // require_cpu_backend
+        CreateAudioSystem,
+        CreateGraphicsSystem,
+        CreateInputDrivers);
 
-  if (XFAILED(result)) {
-    XELOGE("iOS: Emulator::Setup failed with status {:08X}", result);
-    return;
-  }
+    if (XFAILED(setup_result)) {
+      XELOGE("iOS: Emulator::Setup failed with status {:08X}", setup_result);
+      return;
+    }
 
-  auto* graphics_system = emulator_->graphics_system();
-  auto* presenter = graphics_system ? graphics_system->presenter() : nullptr;
-  if (!presenter) {
-    XELOGE("iOS: Graphics presenter is not available after setup");
-    return;
-  }
-  if (!app_context().CallInUIThreadSynchronous([this, presenter]() {
-        if (window_) {
-          window_->SetPresenter(presenter);
-        }
-      })) {
-    XELOGE("iOS: Failed to attach presenter to display window");
-    return;
-  }
+    auto* graphics_system = emulator_->graphics_system();
+    auto* presenter = graphics_system ? graphics_system->presenter() : nullptr;
+    if (!presenter) {
+      XELOGE("iOS: Graphics presenter is not available after setup");
+      return;
+    }
+    if (!app_context().CallInUIThreadSynchronous([this, presenter]() {
+          if (window_) {
+            window_->SetPresenter(presenter);
+          }
+        })) {
+      XELOGE("iOS: Failed to attach presenter to display window");
+      return;
+    }
 
-  emulator_initialized_ = true;
-  XELOGI("iOS: Emulator setup complete");
+    emulator_initialized_ = true;
+    XELOGI("iOS: Emulator setup complete");
+  }
 
   if (!game_path.empty()) {
     auto abs_path = std::filesystem::absolute(game_path);
     XELOGI("iOS: Launching game: {}", abs_path);
 
-    result = emulator_->LaunchPath(abs_path);
-    if (XFAILED(result)) {
-      XELOGE("iOS: Failed to launch game: {:08X}", result);
+    X_STATUS launch_result = emulator_->LaunchPath(abs_path);
+    if (XFAILED(launch_result)) {
+      XELOGE("iOS: Failed to launch game: {:08X}", launch_result);
       return;
     }
 
     XELOGI("iOS: Game launched successfully");
     emulator_->WaitUntilExit();
-    XELOGI("iOS: Game execution finished (WaitUntilExit returned)");
+    XELOGI("iOS: Game execution finished (exit wait completed)");
   }
 }
 

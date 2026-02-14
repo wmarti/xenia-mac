@@ -136,6 +136,9 @@ XContentContainerDevice::ReadContainerHeader(FILE* host_file) {
   if (fread(header.get(), sizeof(XContentContainerHeader), 1, host_file) != 1) {
     return nullptr;
   }
+  if (!header->content_header.is_magic_valid()) {
+    return nullptr;
+  }
   return header;
 }
 

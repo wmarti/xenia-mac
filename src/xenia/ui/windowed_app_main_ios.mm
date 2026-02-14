@@ -13,6 +13,7 @@
 
 #include <TargetConditionals.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <algorithm>
@@ -48,16 +49,12 @@ DECLARE_path(log_file);
 @class XeniaMetalView;
 
 extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
-extern "C" int ptrace(int request, pid_t pid, caddr_t addr, int data);
 
 #ifndef CS_OPS_STATUS
 #define CS_OPS_STATUS 0
 #endif
 #ifndef CS_DEBUGGED
 #define CS_DEBUGGED 0x10000000
-#endif
-#ifndef PT_TRACE_ME
-#define PT_TRACE_ME 0
 #endif
 
 static BOOL xe_is_cs_debugged(void) {
@@ -77,28 +74,59 @@ static BOOL xe_can_mmap_exec_page(void) {
   return YES;
 }
 
-static BOOL xe_enable_ptrace_jit_hack(void) {
+static int xe_ios_product_major_version(void) {
 #if TARGET_OS_TV
-  return NO;
+  return -1;
 #else
-  if (xe_is_cs_debugged()) {
-    return YES;
+  size_t version_size = 0;
+  if (sysctlbyname("kern.osproductversion", nullptr, &version_size, nullptr, 0) == 0 &&
+      version_size > 0) {
+    std::string version(version_size, '\0');
+    if (sysctlbyname("kern.osproductversion", version.data(), &version_size, nullptr, 0) == 0 &&
+        version_size > 0) {
+      if (!version.empty() && version.back() == '\0') {
+        version.pop_back();
+      }
+      int parsed_major = 0;
+      size_t index = 0;
+      while (index < version.size() && version[index] >= '0' && version[index] <= '9') {
+        parsed_major = parsed_major * 10 + (version[index] - '0');
+        ++index;
+      }
+      if (parsed_major > 0) {
+        return parsed_major;
+      }
+    }
   }
-
-  // Keep this minimal: only request traced state to obtain CS_DEBUGGED.
-  // Do not alter exception ports; Xenia depends on SIGBUS/SIGSEGV handling.
-  if (ptrace(PT_TRACE_ME, 0, NULL, 0) < 0) {
-    return NO;
-  }
-  return YES;
+  return -1;
 #endif
+}
+
+static BOOL xe_ios_requires_debugger_broker(void) {
+  const int major = xe_ios_product_major_version();
+  return major >= 26;
+}
+
+static NSString* xe_jit_not_detected_guidance_message(void) {
+  if (!xe_ios_requires_debugger_broker()) {
+    return @"JIT is not available yet. On iOS 18 and below, use a signature-patched sideload "
+           @"(no debugger needed). You can open Settings while waiting.";
+  }
+  return @"Enable JIT first (StikDebug, SideJITServer, or AltJIT). "
+         @"You can open Settings while waiting.";
 }
 
 // ---------------------------------------------------------------------------
 // JIT availability check -- tests whether executable memory can be mapped.
-// Requires CS_DEBUGGED (set by StikDebug, AltJIT, SideJITServer, etc.).
+// On iOS versions before 26, signature-patched sideloads can use normal W^X
+// flow without debugger attachment. iOS 26+ requires debugger/broker state.
 // ---------------------------------------------------------------------------
-static BOOL xe_check_jit_available(void) { return xe_is_cs_debugged() && xe_can_mmap_exec_page(); }
+static BOOL xe_check_jit_available(void) {
+  if (xe_ios_requires_debugger_broker()) {
+    return xe_is_cs_debugged() && xe_can_mmap_exec_page();
+  }
+  return xe_can_mmap_exec_page();
+}
 
 static std::filesystem::path xe_get_ios_documents_path() {
   @autoreleasepool {
@@ -618,6 +646,12 @@ std::vector<IOSConfigSection> BuildIOSConfigSections() {
                  "Universal JIT Breakpoint",
                  "Use brk #0xF00D (x16 command dispatch) instead of legacy "
                  "brk #0x69.",
+                 false);
+  AddBoolSetting(compatibility.items, "ios_jit_non_txm_force_mprotect_flip",
+                 "Force Mprotect Flip (Non-TXM)",
+                 "Force RW/RX page flips on non-TXM iOS devices. "
+                 "By default non-TXM still tries dual-map first. "
+                 "Ignored when TXM is active.",
                  false);
   if (!compatibility.items.empty()) {
     sections.push_back(std::move(compatibility));
@@ -1296,6 +1330,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 @property(nonatomic, strong) UILabel* importedGamesEmptyLabel;
 @property(nonatomic, strong) UIView* inGameMenuOverlay;
 @property(nonatomic, assign) BOOL gameRunning;
+@property(nonatomic, assign) BOOL gameStopInProgress;
 @property(nonatomic, assign) xe::ui::IOSWindowedAppContext* appContext;
 
 // JIT status widgets.
@@ -1333,6 +1368,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   self.jitAcquired = NO;
   self.launcherLandscapeUnlocked = NO;
   self.gameRunning = NO;
+  self.gameStopInProgress = NO;
 
   // Create the Metal-backed rendering view (full screen, behind everything).
   self.metalView = [[XeniaMetalView alloc] initWithFrame:self.view.bounds];
@@ -1472,8 +1508,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   UILabel* jitWarningBody = [[UILabel alloc] init];
   jitWarningBody.translatesAutoresizingMaskIntoConstraints = NO;
   jitWarningBody.numberOfLines = 0;
-  jitWarningBody.text = @"Enable JIT with StikDebug, SideJITServer, or AltJIT. "
-                        @"Settings and menu navigation stay available.";
+  jitWarningBody.text = xe_jit_not_detected_guidance_message();
   jitWarningBody.textColor = [UIColor colorWithRed:0.95 green:0.83 blue:0.76 alpha:1.0];
   jitWarningBody.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
   [self.jitWarningCard addSubview:jitWarningBody];
@@ -1876,9 +1911,16 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
 - (void)exitGameTapped:(UIButton*)sender {
   [self hideInGameMenuOverlay];
+  if (self.gameStopInProgress) {
+    self.statusLabel.text = @"Stopping game... Please wait.";
+    return;
+  }
   BOOL requested_stop = self.appContext ? self.appContext->TerminateCurrentGame() : NO;
   if (requested_stop) {
-    [self showLauncherOverlay];
+    self.gameStopInProgress = YES;
+    self.launcherOverlay.hidden = NO;
+    self.launcherOverlay.alpha = 1.0;
+    xe_request_portrait_orientation(self);
     self.statusLabel.text = @"Stopping game...";
   } else {
     self.statusLabel.text = @"No active game to stop.";
@@ -2340,8 +2382,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 - (void)presentJITRequiredAlert {
   UIAlertController* alert = [UIAlertController
       alertControllerWithTitle:@"JIT Not Detected"
-                       message:@"Enable JIT first (StikDebug, SideJITServer, or AltJIT). "
-                               @"You can open Settings while waiting."
+                       message:xe_jit_not_detected_guidance_message()
                 preferredStyle:UIAlertControllerStyleAlert];
   [alert addAction:[UIAlertAction actionWithTitle:@"Open Settings"
                                             style:UIAlertActionStyleDefault
@@ -2356,6 +2397,10 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
 - (void)launchGameAtPath:(const std::filesystem::path&)game_path
              displayName:(NSString*)display_name {
+  if (self.gameStopInProgress || self.gameRunning) {
+    self.statusLabel.text = @"Please wait for the current game to stop.";
+    return;
+  }
   if (!self.jitAcquired) {
     [self presentJITRequiredAlert];
     return;
@@ -2466,6 +2511,10 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 }
 
 - (void)openGameTapped:(UIButton*)sender {
+  if (self.gameStopInProgress) {
+    self.statusLabel.text = @"Stopping game... Please wait.";
+    return;
+  }
   NSArray<UTType*>* contentTypes = @[
     [UTType typeWithFilenameExtension:@"iso"],
     [UTType typeWithFilenameExtension:@"xex"],
@@ -2582,6 +2631,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
 - (void)showLauncherOverlay {
   self.gameRunning = NO;
+  self.gameStopInProgress = NO;
   [self hideInGameMenuOverlay];
   self.launcherOverlay.hidden = NO;
   self.statusLabel.text = @"";
@@ -2744,11 +2794,7 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 // iOS entry point.
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
-  if (xe_enable_ptrace_jit_hack()) {
-    NSLog(@"iOS: Ptrace JIT setup complete.");
-  } else {
-    NSLog(@"iOS: Ptrace JIT setup unavailable; use StikDebug/AltJIT/SideJIT.");
-  }
+  NSLog(@"iOS: skipping ptrace/debugger JIT setup; using normal W^X app flow.");
   @autoreleasepool {
     return UIApplicationMain(argc, argv, nil,
                              NSStringFromClass([XeniaAppDelegate class]));

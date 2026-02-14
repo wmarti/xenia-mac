@@ -13,8 +13,8 @@
 #include <cstring>
 
 // pthread_jit_write_protect_np is only available on macOS ARM64.
-// On iOS, the dual-mapping (split W^X via vm_remap) path is used instead,
-// so we never need to toggle JIT write protection per-thread.
+// On iOS, generated code typically uses dual-mapped W^X aliases instead, so
+// we never need to toggle JIT write protection per-thread.
 #if XE_PLATFORM_APPLE && !XE_PLATFORM_IOS
 #include <pthread.h>
 #endif
@@ -58,7 +58,7 @@ void A64Function::Setup(uint8_t* machine_code, size_t machine_code_length) {
 bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
 #if XE_PLATFORM_APPLE && !XE_PLATFORM_IOS && defined(__aarch64__)
   // Initialize JIT execution for this thread (macOS only).
-  // On iOS, the dual-mapping path means execute pages are always executable.
+  // On iOS, execution uses mapped aliases rather than per-thread JIT toggles.
   InitializeJITThread();
 #endif
 
@@ -70,21 +70,21 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
   size_t target_region_size = 0;
   xe::memory::PageAccess target_region_access =
       xe::memory::PageAccess::kNoAccess;
-  const bool target_region_ok = xe::memory::QueryProtect(
+  bool target_region_ok = xe::memory::QueryProtect(
       machine_code_, target_region_size, target_region_access);
 
   size_t thunk_region_size = 0;
   xe::memory::PageAccess thunk_region_access =
       xe::memory::PageAccess::kNoAccess;
-  const bool thunk_region_ok = xe::memory::QueryProtect(
+  bool thunk_region_ok = xe::memory::QueryProtect(
       reinterpret_cast<void*>(thunk), thunk_region_size, thunk_region_access);
 
-  const bool target_executable =
-      target_region_access == xe::memory::PageAccess::kExecuteReadOnly ||
-      target_region_access == xe::memory::PageAccess::kExecuteReadWrite;
-  const bool thunk_executable =
-      thunk_region_access == xe::memory::PageAccess::kExecuteReadOnly ||
-      thunk_region_access == xe::memory::PageAccess::kExecuteReadWrite;
+  auto is_executable = [](xe::memory::PageAccess access) {
+    return access == xe::memory::PageAccess::kExecuteReadOnly ||
+           access == xe::memory::PageAccess::kExecuteReadWrite;
+  };
+  bool target_executable = is_executable(target_region_access);
+  bool thunk_executable = is_executable(thunk_region_access);
 
   if (!target_region_ok || !target_executable || !thunk_region_ok ||
       !thunk_executable) {

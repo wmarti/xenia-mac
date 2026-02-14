@@ -859,9 +859,81 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module,
 }
 
 void KernelState::TerminateTitle() {
+#if XE_PLATFORM_IOS
+  XELOGD("KernelState::TerminateTitle");
+  auto global_lock = global_critical_region_.Acquire();
+
+  // Call terminate routines.
+  // TODO(benvanik): these might take arguments.
+  // FIXME: Calling these will send some threads into kernel code and they'll
+  // hold the lock when terminated! Do we need to wait for all threads to exit?
+  /*
+  if (from_guest_thread) {
+    for (auto routine : terminate_notifications_) {
+      auto thread_state = XThread::GetCurrentThread()->thread_state();
+      processor()->Execute(thread_state, routine.guest_routine);
+    }
+  }
+  terminate_notifications_.clear();
+  */
+
+  // Kill all guest threads.
+  for (auto it = threads_by_id_.begin(); it != threads_by_id_.end();) {
+    if (!XThread::IsInThread(it->second) && it->second->is_guest_thread()) {
+      auto thread = it->second;
+
+      if (thread->is_running()) {
+        // Need to step the thread to a safe point (returns it to guest code
+        // so it's guaranteed to not be holding any locks / in host kernel
+        // code / etc). Can't do that properly if we have the lock.
+        if (!emulator_->is_paused()) {
+          thread->thread()->Suspend();
+        }
+
+        global_lock.unlock();
+        processor_->StepToGuestSafePoint(thread->thread_id());
+        thread->Terminate(0);
+        global_lock.lock();
+      }
+
+      // Erase it from the thread list.
+      it = threads_by_id_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  // Third: Unload all user modules (including the executable).
+  for (size_t i = 0; i < user_modules_.size(); i++) {
+    X_STATUS status = user_modules_[i]->Unload();
+    assert_true(XSUCCEEDED(status));
+
+    object_table_.RemoveHandle(user_modules_[i]->handle());
+  }
+  user_modules_.clear();
+
+  // Release all objects in the object table.
+  object_table_.PurgeAllObjects();
+
+  // Unregister all notify listeners.
+  notify_listeners_.clear();
+
+  // Unset the executable module.
+  executable_module_ = nullptr;
+
+  if (XThread::IsInThread()) {
+    threads_by_id_.erase(XThread::GetCurrentThread()->thread_id());
+
+    // Now commit suicide (using Terminate, because we can't call into guest
+    // code anymore).
+    global_lock.unlock();
+    XThread::GetCurrentThread()->Terminate(0);
+  }
+#else
   XELOGI("KernelState::TerminateTitle");
   xe::FlushLog();
   std::quick_exit(EXIT_SUCCESS);
+#endif
 }
 
 void KernelState::RegisterThread(XThread* thread) {
