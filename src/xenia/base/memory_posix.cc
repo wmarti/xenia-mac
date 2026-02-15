@@ -329,11 +329,6 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
   const bool can_read = (prot & VM_PROT_READ) != 0;
   const bool can_write = (prot & VM_PROT_WRITE) != 0;
   const bool can_execute = (prot & VM_PROT_EXECUTE) != 0;
-    
-    if (can_execute) {
-        sys_icache_invalidate(base_address, length);
-    }
-
   if (can_write) {
     access_out =
         can_execute ? PageAccess::kExecuteReadWrite : PageAccess::kReadWrite;
