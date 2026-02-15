@@ -131,7 +131,7 @@ bool XmaContextNew::Work() {
   if (data.IsConsumeOnlyContext()) {
     Consume(&output_rb, &data);
     if (data.output_buffer_read_offset == data.output_buffer_write_offset) {
-      ClearLocked();
+      ClearLocked(&data);
     }
     data.Store(context_ptr);
     return true;
@@ -206,26 +206,25 @@ void XmaContextNew::Enable() {
 
 void XmaContextNew::Clear() {
   std::lock_guard<xe_mutex> lock(lock_);
-  ClearLocked();
-}
-
-void XmaContextNew::ClearLocked() {
-  XELOGAPU("XmaContext: reset context {}", id());
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);
+  ClearLocked(&data);
+  data.Store(context_ptr);
+}
 
-  data.input_buffer_0_valid = 0;
-  data.input_buffer_1_valid = 0;
-  data.output_buffer_valid = 0;
+void XmaContextNew::ClearLocked(XMA_CONTEXT_DATA* data) {
+  XELOGAPU("XmaContext: reset context {}", id());
 
-  data.input_buffer_read_offset = 0;
-  data.output_buffer_read_offset = 0;
-  data.output_buffer_write_offset = 0;
-  data.input_buffer_read_offset = kBitsPerPacketHeader;
+  data->input_buffer_0_valid = 0;
+  data->input_buffer_1_valid = 0;
+  data->output_buffer_valid = 0;
+
+  data->input_buffer_read_offset = kBitsPerPacketHeader;
+  data->output_buffer_read_offset = 0;
+  data->output_buffer_write_offset = 0;
 
   current_frame_remaining_subframes_ = 0;
-  data.Store(context_ptr);
 }
 
 void XmaContextNew::Disable() {
