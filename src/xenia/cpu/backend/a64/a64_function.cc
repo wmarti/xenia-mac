@@ -86,6 +86,57 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
   bool target_executable = is_executable(target_region_access);
   bool thunk_executable = is_executable(thunk_region_access);
 
+  // Attempt to fix non-executable regions
+  if (target_region_ok && !target_executable) {
+    XELOGW(
+        "A64 iOS JIT target not executable, attempting reprotect: "
+        "target={:p} current_access={} size=0x{:X}",
+        static_cast<void*>(machine_code_),
+        static_cast<uint32_t>(target_region_access),
+        static_cast<uint32_t>(target_region_size));
+    
+    // Try to reprotect to RX
+    if (xe::memory::Protect(machine_code_, target_region_size,
+                            xe::memory::PageAccess::kExecuteReadOnly)) {
+      target_region_ok = xe::memory::QueryProtect(
+          machine_code_, target_region_size, target_region_access);
+      target_executable = is_executable(target_region_access);
+      
+      if (target_executable) {
+        XELOGI("A64 iOS JIT target reprotect succeeded: new_access={}",
+               static_cast<uint32_t>(target_region_access));
+      }
+    } else {
+      XELOGE("A64 iOS JIT target reprotect failed");
+    }
+  }
+
+  if (thunk_region_ok && !thunk_executable) {
+    XELOGW(
+        "A64 iOS JIT thunk not executable, attempting reprotect: "
+        "thunk={:p} current_access={} size=0x{:X}",
+        reinterpret_cast<void*>(thunk),
+        static_cast<uint32_t>(thunk_region_access),
+        static_cast<uint32_t>(thunk_region_size));
+    
+    // Try to reprotect to RX
+    if (xe::memory::Protect(reinterpret_cast<void*>(thunk), thunk_region_size,
+                            xe::memory::PageAccess::kExecuteReadOnly)) {
+      // Verify the change took effect
+      thunk_region_ok = xe::memory::QueryProtect(
+          reinterpret_cast<void*>(thunk), thunk_region_size, thunk_region_access);
+      thunk_executable = is_executable(thunk_region_access);
+      
+      if (thunk_executable) {
+        XELOGI("A64 iOS JIT thunk reprotect succeeded: new_access={}",
+               static_cast<uint32_t>(thunk_region_access));
+      }
+    } else {
+      XELOGE("A64 iOS JIT thunk reprotect failed");
+    }
+  }
+
+  // Final check after attempting fixes
   if (!target_region_ok || !target_executable || !thunk_region_ok ||
       !thunk_executable) {
     static std::atomic<bool> logged_bad_jit_path{false};
@@ -128,9 +179,8 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
         static_cast<uint32_t>(target_region_size),
         static_cast<uint32_t>(target_region_access), thunk_insn, target_insn);
   }
-#endif
+#endif  // XE_PLATFORM_IOS && defined(__aarch64__)
 
-  // Make the actual thunk call
   auto* code = machine_code_.load(std::memory_order_acquire);
   thunk(code, thread_state->context(),
         reinterpret_cast<void*>(uintptr_t(return_address)));

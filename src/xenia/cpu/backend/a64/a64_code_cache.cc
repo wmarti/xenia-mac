@@ -483,6 +483,8 @@ bool RegionUnlockWrite(void* address, size_t length) {
 }
 
 bool RegionSetExec(void* address, size_t length) {
+    
+    
   return SetPageAlignedAccessWithExternalPrepareFallback(
       address, length, xe::memory::PageAccess::kExecuteReadOnly,
       "RX transition");
@@ -801,15 +803,15 @@ bool A64CodeCache::Initialize() {
       // For W^X flips, prefer starting from an RX mapping (so EXECUTE is
       // present in the mapping's max protections on iOS), then temporarily
       // switching pages to RW for writes.
-      generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
-          mmap(nullptr, kGeneratedCodeSize, PROT_READ | PROT_EXEC,
+      generated_code_write_base_ = reinterpret_cast<uint8_t*>(
+          mmap(nullptr, kGeneratedCodeSize, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-      if (generated_code_execute_base_ == MAP_FAILED) {
-        generated_code_execute_base_ = nullptr;
+      if (generated_code_write_base_ == MAP_FAILED) {
+          generated_code_write_base_ = nullptr;
         XELOGE("Unable to allocate iOS JIT code cache (RX mapping)");
         return false;
       }
-      generated_code_write_base_ = generated_code_execute_base_;
+      generated_code_execute_base_ = generated_code_write_base_;
       generated_code_uses_mprotect_flip_ = true;
       if (use_txm_broker_path) {
         XELOGI("iOS JIT mprotect-flip fallback active (TXM/broker path)");
