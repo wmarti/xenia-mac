@@ -78,7 +78,7 @@ DEFINE_bool(use_dedicated_xma_thread, kUseDedicatedXmaThreadDefault,
             "APU");
 
 DEFINE_string(
-    xma_decoder, "old",
+    xma_decoder, "new",
     "Decoder version used to process XMA audio.\n"
     "Use: [fake, master, old, new]\n"
     " fake: \n  No audio will be decoded.\n"
@@ -88,6 +88,8 @@ DEFINE_string(
     " new: \n  New version of decoder. Provides highest stability, but isn't "
     "yet finished.\n",
     "APU");
+
+UPDATE_from_string(xma_decoder, 2026, 2, 16, 12, "old");
 
 namespace xe {
 namespace apu {
