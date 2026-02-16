@@ -563,6 +563,8 @@ void A64Backend::InitializeBackendContext(void* ctx) {
   bctx->pending_stack_sync_sp = 0;
   bctx->pending_stack_sync_fp = 0;
   bctx->pending_stack_sync_target = 0;
+  bctx->njm_enabled = 1;
+  bctx->non_ieee_mode = 0;
   // Default to PPC rounding mode 0 (nearest, IEEE) and sync host FPCR.
   SetGuestRoundingMode(ctx, 0);
 }
@@ -576,6 +578,8 @@ void A64Backend::DeinitializeBackendContext(void* ctx) {
   bctx->pending_stack_sync_sp = 0;
   bctx->pending_stack_sync_fp = 0;
   bctx->pending_stack_sync_target = 0;
+  bctx->njm_enabled = 0;
+  bctx->non_ieee_mode = 0;
 }
 
 void A64Backend::PrepareForReentry(void* ctx) {
@@ -618,6 +622,9 @@ void A64Backend::SetGuestRoundingMode(void* ctx, unsigned int mode) {
       ctx_access == xe::memory::PageAccess::kNoAccess) {
     return;
   }
+
+  auto* bctx = BackendContextForGuestContext(ctx);
+  bctx->non_ieee_mode = (control >> 2) & 1;
 
   auto ppc_context = reinterpret_cast<ppc::PPCContext*>(ctx);
   ppc_context->fpscr.bits.rn = control & 3;

@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include "xenia/base/assert.h"
@@ -33,6 +34,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/base/threading.h"
+#include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
 #include "xenia/cpu/backend/a64/a64_tracers.h"
@@ -2497,20 +2499,32 @@ inline uint64_t EmulateFrsqrteBits(uint64_t src_bits,
   return out;
 }
 
-inline float64x2_t EmulateRsqrtF64(void*, std::byte src[16]) {
+inline float64x2_t EmulateRsqrtF64(void* raw_context, std::byte src[16]) {
+  bool non_ieee_mode = false;
+  if (raw_context) {
+    auto* backend_context = reinterpret_cast<A64BackendContext*>(
+        reinterpret_cast<std::byte*>(raw_context) - sizeof(A64BackendContext));
+    non_ieee_mode = backend_context->non_ieee_mode != 0;
+  }
   uint64_t in_bits;
   std::memcpy(&in_bits, src, sizeof(in_bits));
-  uint64_t out_bits = EmulateFrsqrteBits(in_bits);
+  uint64_t out_bits = EmulateFrsqrteBits(in_bits, non_ieee_mode);
   uint64x2_t out = vdupq_n_u64(0);
   out = vsetq_lane_u64(out_bits, out, 0);
   return vreinterpretq_f64_u64(out);
 }
 
-inline float32x4_t EmulateRsqrtV128(void*, std::byte src[16]) {
+inline float32x4_t EmulateRsqrtV128(void* raw_context, std::byte src[16]) {
+  bool njm_enabled = true;
+  if (raw_context) {
+    auto* backend_context = reinterpret_cast<A64BackendContext*>(
+        reinterpret_cast<std::byte*>(raw_context) - sizeof(A64BackendContext));
+    njm_enabled = backend_context->njm_enabled != 0;
+  }
   alignas(16) uint32_t lanes[4];
   std::memcpy(lanes, src, sizeof(lanes));
   for (uint32_t& lane : lanes) {
-    lane = EmulateVrsqrteScalarBits(lane);
+    lane = EmulateVrsqrteScalarBits(lane, njm_enabled);
   }
   return vreinterpretq_f32_u32(vld1q_u32(lanes));
 }
@@ -3399,6 +3413,15 @@ static const uint8_t fpcr_table[] = {
     0b1'01,  // |FZ|toward +infinity
     0b1'10,  // |FZ|toward -infinity
 };
+
+uint64_t SetNonIEEEModeForwarder(void* raw_context, uint64_t control) {
+  control &= 0b111;
+  auto* backend_context = reinterpret_cast<A64BackendContext*>(
+      reinterpret_cast<std::byte*>(raw_context) - sizeof(A64BackendContext));
+  backend_context->non_ieee_mode = (control >> 2) & 1;
+  return control;
+}
+
 struct SET_ROUNDING_MODE_I32
     : Sequence<SET_ROUNDING_MODE_I32,
                I<OPCODE_SET_ROUNDING_MODE, VoidOp, I32Op>> {
@@ -3406,9 +3429,13 @@ struct SET_ROUNDING_MODE_I32
     // Low 3 bits are |Non-IEEE:1|RoundingMode:2|
     // Non-IEEE bit is flush-to-zero
     if (i.src1.is_constant) {
-      e.MOV(W1, static_cast<uint32_t>(i.src1.constant()) & 0b111);
+      const uint32_t control = static_cast<uint32_t>(i.src1.constant()) & 0b111;
+      e.CallNative(SetNonIEEEModeForwarder, control);
+      e.MOV(W1, control);
     } else {
       e.AND(W1, i.src1.reg(), 0b111);
+      e.CallNativeSafe(reinterpret_cast<void*>(SetNonIEEEModeForwarder));
+      e.MOV(W1, W0);
     }
 
     // Use the low 3 bits as an index into a LUT

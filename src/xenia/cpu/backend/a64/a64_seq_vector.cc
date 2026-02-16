@@ -10,8 +10,10 @@
 
 #include <arm_neon.h>
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 
+#include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
 
 // For OPCODE_PACK/OPCODE_UNPACK
@@ -2521,11 +2523,10 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
 EMITTER_OPCODE_TABLE(OPCODE_UNPACK, UNPACK);
 
 namespace {
-thread_local bool a64_njm_enabled = true;
-
 uint64_t SetNJMForwarder(void* raw_context, uint64_t value) {
-  (void)raw_context;
-  a64_njm_enabled = value != 0;
+  auto* backend_context = reinterpret_cast<A64BackendContext*>(
+      reinterpret_cast<std::byte*>(raw_context) - sizeof(A64BackendContext));
+  backend_context->njm_enabled = value != 0;
   return 0;
 }
 }  // namespace

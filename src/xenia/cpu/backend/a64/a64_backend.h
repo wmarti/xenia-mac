@@ -53,6 +53,8 @@ struct A64BackendContext {
   uint64_t pending_stack_sync_target = 0;
   uint32_t current_stackpoint_depth = 0;
   uint32_t pending_stack_sync = 0;
+  uint32_t njm_enabled = 1;
+  uint32_t non_ieee_mode = 0;
 };
 
 class A64Backend : public Backend {
