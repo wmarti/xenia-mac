@@ -56,7 +56,13 @@ extern "C" {
 DEFINE_bool(ffmpeg_verbose, false, "Verbose FFmpeg output (debug and above)",
             "APU");
 
-DEFINE_bool(use_dedicated_xma_thread, true,
+#if XE_ARCH_ARM64
+constexpr bool kUseDedicatedXmaThreadDefault = false;
+#else
+constexpr bool kUseDedicatedXmaThreadDefault = true;
+#endif
+
+DEFINE_bool(use_dedicated_xma_thread, kUseDedicatedXmaThreadDefault,
             "Enables XMA decoding on separate thread. Disabled should produce "
             "better results, but decrease performance a bit.",
             "APU");
