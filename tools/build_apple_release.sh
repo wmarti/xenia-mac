@@ -15,6 +15,7 @@ Options:
   --config NAME        checked|debug|release|valgrind (default: release)
   --ios-min VERSION    iOS minimum version (default: 16.0)
   --macos-min VERSION  macOS minimum version (default: 15.0)
+  --mac-sign IDENTITY  macOS codesign identity (default: ad-hoc '-')
   --skip-ios
   --skip-macos-arm64
   --skip-macos-x86_64
@@ -82,9 +83,10 @@ resolve_macdeployqt() {
   return 1
 }
 
-adhoc_sign_macos_app() {
+sign_macos_app() {
   local app_bundle="$1"
   local entitlements="$2"
+  local identity="${3:--}"
 
   local main_exe="$app_bundle/Contents/MacOS/xenia_edge"
   local frameworks_dir="$app_bundle/Contents/Frameworks"
@@ -102,23 +104,23 @@ adhoc_sign_macos_app() {
       xargs -0 -I{} codesign --remove-signature "{}" >/dev/null 2>&1 || true
 
     find "$frameworks_dir" -maxdepth 2 -name "*.framework" -type d -print0 | \
-      xargs -0 -I{} codesign --force --sign - --timestamp=none "{}"
+      xargs -0 -I{} codesign --force --sign "$identity" --timestamp=none "{}"
     find "$frameworks_dir" -name "*.dylib" -type f -print0 | \
-      xargs -0 -I{} codesign --force --sign - --timestamp=none "{}"
+      xargs -0 -I{} codesign --force --sign "$identity" --timestamp=none "{}"
   fi
 
   if [ -d "$plugins_dir" ]; then
     find "$plugins_dir" -name "*.dylib" -type f -print0 | \
       xargs -0 -I{} codesign --remove-signature "{}" >/dev/null 2>&1 || true
     find "$plugins_dir" -name "*.dylib" -type f -print0 | \
-      xargs -0 -I{} codesign --force --sign - --timestamp=none "{}"
+      xargs -0 -I{} codesign --force --sign "$identity" --timestamp=none "{}"
   fi
 
   if [ -f "$main_exe" ]; then
-    codesign --force --sign - --timestamp=none "$main_exe"
+    codesign --force --sign "$identity" --timestamp=none "$main_exe"
   fi
 
-  codesign --force --deep --timestamp=none --sign - \
+  codesign --force --deep --timestamp=none --sign "$identity" \
     --entitlements "$entitlements" "$app_bundle"
   xattr -cr "$app_bundle"
 }
@@ -166,6 +168,7 @@ out_dir="artifacts/release"
 config="release"
 ios_min="16.0"
 macos_min="15.0"
+mac_sign_identity="-"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -177,6 +180,8 @@ while [ $# -gt 0 ]; do
       ios_min="${2:-}"; shift 2;;
     --macos-min)
       macos_min="${2:-}"; shift 2;;
+    --mac-sign)
+      mac_sign_identity="${2:-}"; shift 2;;
     --skip-ios)
       build_ios=0; shift;;
     --skip-macos-arm64)
@@ -211,11 +216,13 @@ echo "Config: $buildcfg"
 echo "Output: $out_dir"
 echo "macOS min: $macos_min"
 echo "iOS min: $ios_min"
+echo "macOS signing: $mac_sign_identity"
 
 if [ "$build_macos_arm64" -eq 1 ]; then
   echo ""
   echo "== macOS arm64 =="
   ./xb build --config="$buildcfg" --arch=arm64 --target=xenia-app -- \
+    CODE_SIGNING_ALLOWED=NO \
     MACOSX_DEPLOYMENT_TARGET="$macos_min"
 
   mac_dir="build/bin/Mac-ARM64/$buildcfg"
@@ -247,7 +254,7 @@ if [ "$build_macos_arm64" -eq 1 ]; then
       "$app_bundle/Contents/Frameworks/" || true
   fi
 
-  adhoc_sign_macos_app "$app_bundle" "xenia.entitlements"
+  sign_macos_app "$app_bundle" "xenia.entitlements" "$mac_sign_identity"
   package_macos_dmg "$app_bundle" "$out_dir/xenia_edge_macos_arm64.dmg" "LICENSE"
 fi
 
@@ -255,6 +262,7 @@ if [ "$build_macos_x86_64" -eq 1 ]; then
   echo ""
   echo "== macOS x86_64 =="
   ./xb build --config="$buildcfg" --arch=x86_64 --target=xenia-app -- \
+    CODE_SIGNING_ALLOWED=NO \
     MACOSX_DEPLOYMENT_TARGET="$macos_min"
 
   mac_dir="build/bin/Mac-x86_64/$buildcfg"
@@ -286,7 +294,7 @@ if [ "$build_macos_x86_64" -eq 1 ]; then
       "$app_bundle/Contents/Frameworks/" || true
   fi
 
-  adhoc_sign_macos_app "$app_bundle" "xenia.entitlements"
+  sign_macos_app "$app_bundle" "xenia.entitlements" "$mac_sign_identity"
   package_macos_dmg "$app_bundle" "$out_dir/xenia_edge_macos_x86_64.dmg" "LICENSE"
 fi
 
@@ -299,6 +307,11 @@ if [ "$build_ios" -eq 1 ]; then
   ./xb premake --target_os=ios
   ./xb build --config="$buildcfg" --target_os=ios --no_premake --target=xenia-app -- \
     CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGN_STYLE=Manual \
+    DEVELOPMENT_TEAM= \
+    PROVISIONING_PROFILE_SPECIFIER= \
+    CODE_SIGN_IDENTITY= \
     IPHONEOS_DEPLOYMENT_TARGET="$ios_min"
 
   ios_dir="build/bin/iOS-ARM64/$buildcfg"
