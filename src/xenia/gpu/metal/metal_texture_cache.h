@@ -263,6 +263,7 @@ class MetalTextureCache : public TextureCache {
   bool upload_batch_command_buffer_has_work_ = false;
   uint32_t upload_batch_depth_ = 0;
   std::unique_ptr<MetalHeapPool> texture_heap_pool_;
+  bool supports_bc_texture_compression_ = false;
 
   std::vector<ScaledResolveBuffer> scaled_resolve_buffers_;
   std::vector<RetiredScaledResolveBuffer> scaled_resolve_retired_buffers_;

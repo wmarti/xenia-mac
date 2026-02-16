@@ -553,6 +553,11 @@ bool MetalTextureCache::IsDecompressionNeededForKey(TextureKey key) const {
       if (::cvars::metal_force_bc_decompress) {
         return true;
       }
+      // BC support is GPU-family dependent on iOS. Creating BC textures on a
+      // device that doesn't support them may trip Metal validation and abort.
+      if (!supports_bc_texture_compression_) {
+        return true;
+      }
       const FormatInfo* format_info = FormatInfo::Get(key.format);
       if (!format_info) {
         return false;
@@ -1562,6 +1567,12 @@ bool MetalTextureCache::Initialize() {
         "Metal texture cache: Failed to get Metal device from command "
         "processor");
     return false;
+  }
+  supports_bc_texture_compression_ = device->supportsBCTextureCompression();
+  if (!supports_bc_texture_compression_) {
+    XELOGW(
+        "Metal: BC texture compression not supported by this device; forcing "
+        "BCn decompression");
   }
   if (::cvars::metal_texture_cache_use_private &&
       !::cvars::metal_texture_upload_via_blit) {
