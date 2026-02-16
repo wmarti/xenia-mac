@@ -116,7 +116,7 @@ void AudioSystem::WorkerThreadMain() {
     if (result.first == threading::WaitResult::kSuccess &&
         result.second == kMaximumClientCount) {
       // Shutdown event signaled.
-      if (paused_) {
+      if (paused_.load(std::memory_order_acquire)) {
         pause_fence_.Signal();
         threading::Wait(resume_event_.get(), false);
       }
@@ -388,10 +388,9 @@ bool AudioSystem::Restore(ByteStream* stream) {
 }
 
 void AudioSystem::Pause() {
-  if (paused_) {
+  if (paused_.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
-  paused_ = true;
 
   // Kind of a hack, but it works.
   shutdown_event_->Set();
@@ -401,10 +400,9 @@ void AudioSystem::Pause() {
 }
 
 void AudioSystem::Resume() {
-  if (!paused_) {
+  if (!paused_.exchange(false, std::memory_order_acq_rel)) {
     return;
   }
-  paused_ = false;
 
   resume_event_->Set();
 

@@ -208,7 +208,7 @@ void XmaDecoder::WorkerThreadMain() {
       // registers_.next_context = (n + 1) % kContextCount;
     }
 
-    if (paused_) {
+    if (paused_.load(std::memory_order_acquire)) {
       pause_fence_.Signal();
       resume_fence_.Wait();
     }
@@ -229,7 +229,7 @@ void XmaDecoder::Shutdown() {
     work_event_->Set();
   }
 
-  if (paused_) {
+  if (paused_.load(std::memory_order_acquire)) {
     Resume();
   }
 
@@ -400,19 +400,17 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
 }
 
 void XmaDecoder::Pause() {
-  if (paused_) {
+  if (paused_.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
-  paused_ = true;
 
   pause_fence_.Wait();
 }
 
 void XmaDecoder::Resume() {
-  if (!paused_) {
+  if (!paused_.exchange(false, std::memory_order_acq_rel)) {
     return;
   }
-  paused_ = false;
 
   resume_fence_.Signal();
 }
