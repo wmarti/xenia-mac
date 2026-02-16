@@ -154,6 +154,11 @@ struct XMA_CONTEXT_DATA {
   const bool IsConsumeOnlyContext() const {
     return (input_buffer_0_packet_count | input_buffer_1_packet_count) == 0;
   }
+  // Whether the SDC-based minimum exceeds the output buffer size.
+  const bool HasTightOutputBuffer() const {
+    return (int32_t)((subframe_decode_count * 2) - 1) >
+           (int32_t)output_buffer_block_count;
+  }
 };
 static_assert_size(XMA_CONTEXT_DATA, 64);
 
