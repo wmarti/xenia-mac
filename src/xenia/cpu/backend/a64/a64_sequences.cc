@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -2748,20 +2749,61 @@ EMITTER_OPCODE_TABLE(OPCODE_LOG2, LOG2_F32, LOG2_F64, LOG2_V128);
 // ============================================================================
 // OPCODE_DOT_PRODUCT_3
 // ============================================================================
+inline uint32_t EmulateDotProductBits(const std::byte src1[16],
+                                      const std::byte src2[16], bool dot3) {
+  alignas(16) uint32_t lhs_bits[4];
+  alignas(16) uint32_t rhs_bits[4];
+  std::memcpy(lhs_bits, src1, sizeof(lhs_bits));
+  std::memcpy(rhs_bits, src2, sizeof(rhs_bits));
+
+  if (dot3) {
+    lhs_bits[3] = 0;
+    rhs_bits[3] = 0;
+  }
+
+  const double p0 = static_cast<double>(BitsToFloat(lhs_bits[0])) *
+                    static_cast<double>(BitsToFloat(rhs_bits[0]));
+  const double p1 = static_cast<double>(BitsToFloat(lhs_bits[1])) *
+                    static_cast<double>(BitsToFloat(rhs_bits[1]));
+  const double p2 = static_cast<double>(BitsToFloat(lhs_bits[2])) *
+                    static_cast<double>(BitsToFloat(rhs_bits[2]));
+  const double p3 = static_cast<double>(BitsToFloat(lhs_bits[3])) *
+                    static_cast<double>(BitsToFloat(rhs_bits[3]));
+
+  const double sum = dot3 ? ((p0 + p2) + p1) : ((p0 + p2) + (p1 + p3));
+  if (std::isfinite(sum) &&
+      std::fabs(sum) > static_cast<double>(std::numeric_limits<float>::max())) {
+    return 0x7FC00000u;
+  }
+
+  float result = static_cast<float>(sum);
+  uint32_t result_bits;
+  std::memcpy(&result_bits, &result, sizeof(result_bits));
+  return result_bits;
+}
+
+inline float32x4_t EmulateDotProduct3V128(void*, std::byte src1[16],
+                                          std::byte src2[16]) {
+  uint32_t result_bits = EmulateDotProductBits(src1, src2, true);
+  return vreinterpretq_f32_u32(vdupq_n_u32(result_bits));
+}
+
 struct DOT_PRODUCT_3_V128
     : Sequence<DOT_PRODUCT_3_V128,
                I<OPCODE_DOT_PRODUCT_3, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // https://msdn.microsoft.com/en-us/library/bb514054(v=vs.90).aspx
-    EmitCommutativeBinaryVOp(
-        e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
-          e.FMUL(dest.S4(), src1.S4(), src2.S4());
-          e.MOV(dest.Selem()[3], WZR);
-          e.FADDP(dest.S4(), dest.S4(), dest.S4());
-          e.FADDP(S0, dest.toD().S2());
-          e.FMOV(W0, S0);
-          e.DUP(dest.S4(), W0);
-        });
+    if (i.src1.is_constant) {
+      e.ADD(e.GetNativeParam(0), SP, e.StashConstantV(0, i.src1.constant()));
+    } else {
+      e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1.reg().toQ()));
+    }
+    if (i.src2.is_constant) {
+      e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
+    } else {
+      e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2.reg().toQ()));
+    }
+    e.CallNativeSafe(reinterpret_cast<void*>(EmulateDotProduct3V128));
+    e.MOV(i.dest.reg().B16(), Q0.B16());
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_DOT_PRODUCT_3, DOT_PRODUCT_3_V128);
@@ -2769,19 +2811,28 @@ EMITTER_OPCODE_TABLE(OPCODE_DOT_PRODUCT_3, DOT_PRODUCT_3_V128);
 // ============================================================================
 // OPCODE_DOT_PRODUCT_4
 // ============================================================================
+inline float32x4_t EmulateDotProduct4V128(void*, std::byte src1[16],
+                                          std::byte src2[16]) {
+  uint32_t result_bits = EmulateDotProductBits(src1, src2, false);
+  return vreinterpretq_f32_u32(vdupq_n_u32(result_bits));
+}
+
 struct DOT_PRODUCT_4_V128
     : Sequence<DOT_PRODUCT_4_V128,
                I<OPCODE_DOT_PRODUCT_4, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // https://msdn.microsoft.com/en-us/library/bb514054(v=vs.90).aspx
-    EmitCommutativeBinaryVOp(
-        e, i, [](A64Emitter& e, QReg dest, QReg src1, QReg src2) {
-          e.FMUL(dest.S4(), src1.S4(), src2.S4());
-          e.FADDP(dest.S4(), dest.S4(), dest.S4());
-          e.FADDP(S0, dest.toD().S2());
-          e.FMOV(W0, S0);
-          e.DUP(dest.S4(), W0);
-        });
+    if (i.src1.is_constant) {
+      e.ADD(e.GetNativeParam(0), SP, e.StashConstantV(0, i.src1.constant()));
+    } else {
+      e.ADD(e.GetNativeParam(0), SP, e.StashV(0, i.src1.reg().toQ()));
+    }
+    if (i.src2.is_constant) {
+      e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
+    } else {
+      e.ADD(e.GetNativeParam(1), SP, e.StashV(1, i.src2.reg().toQ()));
+    }
+    e.CallNativeSafe(reinterpret_cast<void*>(EmulateDotProduct4V128));
+    e.MOV(i.dest.reg().B16(), Q0.B16());
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_DOT_PRODUCT_4, DOT_PRODUCT_4_V128);
