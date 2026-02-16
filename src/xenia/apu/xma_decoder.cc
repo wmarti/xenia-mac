@@ -26,6 +26,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xthread.h"
 extern "C" {
+#include "third_party/FFmpeg/libavutil/cpu.h"
 #include "third_party/FFmpeg/libavutil/log.h"
 }  // extern "C"
 
@@ -54,6 +55,15 @@ extern "C" {
 // using the XMA* functions.
 
 DEFINE_bool(ffmpeg_verbose, false, "Verbose FFmpeg output (debug and above)",
+            "APU");
+
+#if XE_ARCH_ARM64
+constexpr bool kDisableFfmpegNeonDefault = true;
+#else
+constexpr bool kDisableFfmpegNeonDefault = false;
+#endif
+DEFINE_bool(ffmpeg_disable_neon_on_arm64, kDisableFfmpegNeonDefault,
+            "Disable FFmpeg NEON runtime paths on ARM64 for decode parity.",
             "APU");
 
 #if XE_ARCH_ARM64
@@ -136,6 +146,13 @@ void av_log_callback(void* avcl, int level, const char* fmt, va_list va) {
 X_STATUS XmaDecoder::Setup(kernel::KernelState* kernel_state) {
   // Setup ffmpeg logging callback
   av_log_set_callback(av_log_callback);
+
+#if XE_ARCH_ARM64
+  if (cvars::ffmpeg_disable_neon_on_arm64) {
+    const int cpu_flags = av_get_cpu_flags();
+    av_force_cpu_flags(cpu_flags & ~AV_CPU_FLAG_NEON);
+  }
+#endif
 
   // Let the processor know we want register access callbacks.
   memory_->AddVirtualMappedRange(
