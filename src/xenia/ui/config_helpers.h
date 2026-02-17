@@ -53,6 +53,10 @@ inline const std::vector<CvarAlias>& GetCvarAliases() {
       {"gpu", "any", "gpu", "vulkan"},
       {"apu", "any", "apu", "alsa"},
       {"hid", "any", "hid", "sdl"},
+#elif XE_PLATFORM_APPLE
+      {"gpu", "any", "gpu", "metal"},
+      {"apu", "any", "apu", "sdl"},
+      {"hid", "any", "hid", "sdl"},
 #else
       {"gpu", "any", "gpu", "vulkan"},
       {"apu", "any", "apu", "sdl"},
@@ -73,6 +77,10 @@ GetKnownEnumOptions() {
 #elif XE_PLATFORM_LINUX
       {"gpu", {"vulkan", "null"}},
       {"apu", {"alsa", "sdl", "nop"}},
+      {"hid", {"sdl", "nop"}},
+#elif XE_PLATFORM_APPLE
+      {"gpu", {"metal", "null"}},
+      {"apu", {"nop", "sdl"}},
       {"hid", {"sdl", "nop"}},
 #else
       {"gpu", {"vulkan", "null"}},
