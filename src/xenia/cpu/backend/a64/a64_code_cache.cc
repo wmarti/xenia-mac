@@ -569,9 +569,17 @@ bool A64CodeCache::Initialize() {
   indirection_table_actual_base_ =
       reinterpret_cast<uintptr_t>(indirection_table_base_);
 #if XE_A64_INDIRECTION_64BIT
-  indirection_table_base_bias_ =
-      indirection_table_actual_base_ -
-      (static_cast<uintptr_t>(kIndirectionTableBase) * 2);
+  // With rel32 entries, slot address is table_base + (guest - guest_base).
+  indirection_table_base_bias_ = indirection_table_actual_base_ -
+                                 static_cast<uintptr_t>(kIndirectionTableBase);
+  external_indirection_targets_ = std::make_unique<uint64_t[]>(
+      static_cast<size_t>(kIndirectionExternalCapacity));
+  if (!external_indirection_targets_) {
+    XELOGE("Unable to allocate external indirection table (entries={})",
+           static_cast<uint32_t>(kIndirectionExternalCapacity));
+    return false;
+  }
+  external_indirection_target_count_.store(0, std::memory_order_relaxed);
 #endif
 #else
   // Other platforms: try to allocate at the preferred address first.
@@ -595,9 +603,8 @@ bool A64CodeCache::Initialize() {
   indirection_table_actual_base_ =
       reinterpret_cast<uintptr_t>(indirection_table_base_);
 #if XE_A64_INDIRECTION_64BIT
-  indirection_table_base_bias_ =
-      indirection_table_actual_base_ -
-      (static_cast<uintptr_t>(kIndirectionTableBase) * 2);
+  indirection_table_base_bias_ = indirection_table_actual_base_ -
+                                 static_cast<uintptr_t>(kIndirectionTableBase);
 #endif
 #endif
 
@@ -1017,9 +1024,34 @@ bool A64CodeCache::Initialize() {
   return true;
 }
 
+#if XE_A64_INDIRECTION_64BIT
+uint32_t A64CodeCache::EncodeIndirectionTarget(uint64_t host_address) {
+  const uintptr_t code_base = execute_base_address();
+  const uintptr_t code_end = code_base + kGeneratedCodeSize;
+  if (host_address >= code_base && host_address < code_end) {
+    return static_cast<uint32_t>(host_address - code_base);
+  }
+
+  std::lock_guard<std::mutex> lock(external_indirection_mutex_);
+  const uint32_t current_count =
+      external_indirection_target_count_.load(std::memory_order_relaxed);
+  if (current_count >= kIndirectionExternalCapacity) {
+    XELOGE(
+        "A64 indirection external table overflow (count={} capacity={}); "
+        "falling back to default target",
+        current_count, static_cast<uint32_t>(kIndirectionExternalCapacity));
+    return indirection_default_value_;
+  }
+
+  external_indirection_targets_[current_count] = host_address;
+  external_indirection_target_count_.store(current_count + 1,
+                                           std::memory_order_release);
+  return kIndirectionExternalTag | current_count;
+}
+#endif
+
 void A64CodeCache::set_indirection_default(uint32_t default_value) {
 #if XE_A64_INDIRECTION_64BIT
-  // On ARM64 platforms, we extend 32-bit values to 64-bit
   indirection_default_value_ = default_value;
 #else
   indirection_default_value_ = default_value;
@@ -1028,15 +1060,14 @@ void A64CodeCache::set_indirection_default(uint32_t default_value) {
 
 #if XE_A64_INDIRECTION_64BIT
 void A64CodeCache::set_indirection_default_64(uint64_t default_value) {
-  indirection_default_value_ = default_value;
+  indirection_default_value_ = EncodeIndirectionTarget(default_value);
 }
 #endif
 
 void A64CodeCache::AddIndirection(uint32_t guest_address,
                                   uint32_t host_address) {
 #if XE_A64_INDIRECTION_64BIT
-  // On ARM64 platforms, delegate to the 64-bit version
-  AddIndirection64(guest_address, host_address);
+  AddIndirection64(guest_address, static_cast<uint64_t>(host_address));
 #else
   if (!indirection_table_base_) {
     return;
@@ -1083,16 +1114,18 @@ void A64CodeCache::AddIndirection64(uint32_t guest_address,
     return;
   }
 
-  uint64_t* indirection_slot =
-      reinterpret_cast<uint64_t*>(indirection_table_base_ + guest_offset);
-  *indirection_slot = host_address;
+  uint32_t* indirection_slot =
+      reinterpret_cast<uint32_t*>(indirection_table_base_ + guest_offset);
+  const uint32_t encoded_target = EncodeIndirectionTarget(host_address);
+  *indirection_slot = encoded_target;
 
   if (ShouldLogIndirectionTable()) {
     XELOGI(
         "A64 indirection add: guest=0x{:08X} delta=0x{:X} offset=0x{:X} "
-        "slot=0x{:016X} host=0x{:016X}",
+        "slot=0x{:016X} encoded=0x{:08X} host=0x{:016X}",
         guest_address, guest_delta, guest_offset,
-        reinterpret_cast<uint64_t>(indirection_slot), host_address);
+        reinterpret_cast<uint64_t>(indirection_slot), encoded_target,
+        host_address);
   }
 }
 #endif
@@ -1118,9 +1151,11 @@ void A64CodeCache::CommitExecutableRange(uint32_t guest_low,
     return;
   }
 
-  uint32_t start_offset =
-      ((guest_low - kGuestAddressBase) >> 2) * kIndirectionEntrySize;
-  uint32_t size = ((guest_high - guest_low) >> 2) * kIndirectionEntrySize;
+  const size_t start_offset =
+      (static_cast<size_t>(guest_low - kGuestAddressBase) >> 2) *
+      kIndirectionEntrySize;
+  const size_t size = (static_cast<size_t>(guest_high - guest_low) >> 2) *
+                      kIndirectionEntrySize;
 
   // Sanity check bounds; the table should fully cover the XEX guest range now.
   if (start_offset + size > kIndirectionTableSize) {
@@ -1139,12 +1174,13 @@ void A64CodeCache::CommitExecutableRange(uint32_t guest_low,
     XELOGE(
         "CommitExecutableRange: failed to commit indirection table pages "
         "offset=0x{:X} size=0x{:X}",
-        start_offset, size);
+        static_cast<uint32_t>(start_offset), static_cast<uint32_t>(size));
     return;
   }
-  uint64_t* p = reinterpret_cast<uint64_t*>(target_memory);
-  uint32_t entry_count = size / kIndirectionEntrySize;
-  for (uint32_t i = 0; i < entry_count; i++) {
+  indirection_entry_t* p =
+      reinterpret_cast<indirection_entry_t*>(target_memory);
+  const size_t entry_count = size / kIndirectionEntrySize;
+  for (size_t i = 0; i < entry_count; i++) {
     p[i] = indirection_default_value_;
   }
 #else
@@ -1335,11 +1371,10 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
     }
 
     uintptr_t guest_diff = guest_address - kIndirectionTableBase;
-    uintptr_t guest_offset =
-        (guest_diff >> 2) * kIndirectionEntrySize;  // 8-byte entries
+    uintptr_t guest_offset = (guest_diff >> 2) * kIndirectionEntrySize;
     uintptr_t slot_address =
         reinterpret_cast<uintptr_t>(indirection_table_base_) + guest_offset;
-    uint64_t* indirection_slot = reinterpret_cast<uint64_t*>(slot_address);
+    uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(slot_address);
 
     // Check if the slot address is within bounds
     uintptr_t table_end = reinterpret_cast<uintptr_t>(indirection_table_base_) +
@@ -1348,7 +1383,8 @@ void A64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
       return;
     }
 
-    *indirection_slot = reinterpret_cast<uint64_t>(code_execute_address);
+    *indirection_slot = EncodeIndirectionTarget(
+        reinterpret_cast<uint64_t>(code_execute_address));
 #else
     uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
         indirection_table_base_ + (guest_address - kIndirectionTableBase));

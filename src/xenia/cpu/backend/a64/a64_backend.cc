@@ -216,8 +216,8 @@ bool A64Backend::Initialize(Processor* processor) {
   stack_sync_helper_ = thunk_emitter.EmitStackSyncHelper();
 
 #if XE_A64_INDIRECTION_64BIT
-  // On ARM64 platforms, we use 64-bit addresses and the indirection table now
-  // supports 64-bit entries, so we can store the actual thunk address directly.
+  // On ARM64 platforms, the indirection table stores rel32 offsets with
+  // tagged external targets. The code cache encodes this host pointer.
   static_cast<A64CodeCache*>(code_cache_.get())
       ->set_indirection_default_64(uint64_t(resolve_function_thunk_));
 #else

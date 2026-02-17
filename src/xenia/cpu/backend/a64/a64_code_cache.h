@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -101,17 +102,21 @@ class A64CodeCache : public CodeCache {
   uintptr_t indirection_table_base_bias() const {
     return indirection_table_base_bias_;
   }
+  uintptr_t external_indirection_table_base_address() const {
+    return reinterpret_cast<uintptr_t>(external_indirection_targets_.get());
+  }
 #endif
 
  public:
   // All executable code falls within 0x80000000 to 0x9FFFFFFF, so we can
   // only map enough for lookups within that range.
   // Size of the indirection table in bytes.
-  // On ARM64 platforms we store 64-bit entries (8 bytes) per 4-byte guest slot
-  // for the 0x2000_0000-byte guest executable range (0x8000_0000..0xA000_0000),
-  // so we need 0x4000_0000 bytes to cover the full space.
+  // On ARM64 platforms, entries store 32-bit relative offsets from the code
+  // cache execute base (plus tagged external targets for trampolines).
+  // This keeps dispatch O(1) while reducing contiguous VA reservation
+  // requirements on constrained iOS devices.
 #if XE_A64_INDIRECTION_64BIT
-  static const size_t kIndirectionTableSize = 0x40000000;  // 1 GiB
+  static const size_t kIndirectionTableSize = 0x20000000;  // 512 MiB
 #else
   static const size_t kIndirectionTableSize =
       0x20000000 - 1;  // 512 MiB - 1 (legacy)
@@ -168,16 +173,19 @@ class A64CodeCache : public CodeCache {
 
   // Value that the indirection table will be initialized with upon commit.
 #if XE_A64_INDIRECTION_64BIT
-  uint64_t indirection_default_value_ = 0xFEEDF00D;
+  uint32_t indirection_default_value_ = 0xFEEDF00D;
 #else
   uint32_t indirection_default_value_ = 0xFEEDF00D;
 #endif
 
 #if XE_A64_INDIRECTION_64BIT
-  // On ARM64 platforms, we use 64-bit pointers in the indirection table to
-  // handle high addresses that can't fit in 32-bit values.
-  using indirection_entry_t = uint64_t;
-  static constexpr size_t kIndirectionEntrySize = 8;
+  // On ARM64 platforms, we store rel32 offsets for generated code and tagged
+  // indexes for non-cache targets (for example guest trampolines).
+  using indirection_entry_t = uint32_t;
+  static constexpr size_t kIndirectionEntrySize = 4;
+  static constexpr uint32_t kIndirectionExternalTag = 0x80000000u;
+  static constexpr uint32_t kIndirectionExternalIndexMask = 0x7FFFFFFFu;
+  static constexpr uint32_t kIndirectionExternalCapacity = 0x00010000u;
 #else
   // Other platforms use 32-bit pointers
   using indirection_entry_t = uint32_t;
@@ -193,6 +201,11 @@ class A64CodeCache : public CodeCache {
   uintptr_t indirection_table_actual_base_ = 0;
 #if XE_A64_INDIRECTION_64BIT
   uintptr_t indirection_table_base_bias_ = 0;
+  std::unique_ptr<uint64_t[]> external_indirection_targets_;
+  std::atomic<uint32_t> external_indirection_target_count_ = {0};
+  std::mutex external_indirection_mutex_;
+
+  uint32_t EncodeIndirectionTarget(uint64_t host_address);
 #endif
   // Fixed at kGeneratedCodeExecuteBase and holding all generated code, growing
   // as needed.

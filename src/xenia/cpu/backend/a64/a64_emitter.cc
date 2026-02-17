@@ -1079,11 +1079,25 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // or a thunk to ResolveAddress.
     MOV(W17, function->address());
 #if XE_A64_INDIRECTION_64BIT
-    // ARM64 platforms with 64-bit indirection entries must compute an offset.
-    MOV(X16, code_cache_->indirection_table_base_bias());
-    LSL(X15, X17, 1);
-    ADD(X16, X16, X15);
-    LDR(X16, X16);
+    // ARM64 indirection table stores rel32 code-cache offsets and tagged
+    // external targets.
+    oaknut::Label external_target;
+    oaknut::Label indirection_target_ready;
+    MOV(X14, code_cache_->indirection_table_base_bias());
+    ADD(X14, X14, W17, UXTW);
+    LDR(W16, X14);
+    CMP(W16, 0);
+    B(oaknut::Cond::LT, external_target);
+    MOV(X14, code_cache_->execute_base_address());
+    ADD(X16, X14, W16, UXTW);
+    B(indirection_target_ready);
+    l(external_target);
+    AND(W15, W16, A64CodeCache::kIndirectionExternalIndexMask);
+    MOV(X14, code_cache_->external_indirection_table_base_address());
+    LSL(X15, X15, 3);
+    ADD(X14, X14, X15);
+    LDR(X16, X14);
+    l(indirection_target_ready);
 #else
     // Other platforms use 32-bit addresses mapped at guest address space.
     if (code_cache_->indirection_table_base_address() ==
@@ -1152,11 +1166,25 @@ void A64Emitter::CallIndirect(const hir::Instr* instr,
       MOV(W17, reg.toW());
     }
 #if XE_A64_INDIRECTION_64BIT
-    // ARM64 platforms with 64-bit indirection entries must compute an offset.
-    MOV(X16, code_cache_->indirection_table_base_bias());
-    LSL(X15, X17, 1);
-    ADD(X16, X16, X15);
-    LDR(X16, X16);
+    // ARM64 indirection table stores rel32 code-cache offsets and tagged
+    // external targets.
+    oaknut::Label external_target;
+    oaknut::Label indirection_target_ready;
+    MOV(X14, code_cache_->indirection_table_base_bias());
+    ADD(X14, X14, W17, UXTW);
+    LDR(W16, X14);
+    CMP(W16, 0);
+    B(oaknut::Cond::LT, external_target);
+    MOV(X14, code_cache_->execute_base_address());
+    ADD(X16, X14, W16, UXTW);
+    B(indirection_target_ready);
+    l(external_target);
+    AND(W15, W16, A64CodeCache::kIndirectionExternalIndexMask);
+    MOV(X14, code_cache_->external_indirection_table_base_address());
+    LSL(X15, X15, 3);
+    ADD(X14, X14, X15);
+    LDR(X16, X14);
+    l(indirection_target_ready);
 #else
     // Other platforms use 32-bit addresses mapped at guest address space.
     if (code_cache_->indirection_table_base_address() ==

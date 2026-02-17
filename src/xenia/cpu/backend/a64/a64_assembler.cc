@@ -96,8 +96,8 @@ bool A64Assembler::Assemble(GuestFunction* function, HIRBuilder* builder,
   // Install into indirection table.
   const uint64_t host_address = reinterpret_cast<uint64_t>(machine_code);
 #if XE_A64_INDIRECTION_64BIT
-  // On ARM64 platforms, machine code might be allocated in high address space.
-  // Use the 64-bit version of AddIndirection to store the full address.
+  // On ARM64 platforms, AddIndirection64 encodes the host address as rel32
+  // offset (or tagged external target) for compact dispatch table entries.
   reinterpret_cast<A64CodeCache*>(backend_->code_cache())
       ->AddIndirection64(function->address(), host_address);
 #else
