@@ -89,9 +89,10 @@ class EmulatorAppIOS final : public xe::ui::WindowedApp {
 
   std::filesystem::path GetIOSStorageRoot() const;
   bool RequestGameStop(const char* reason);
-  void StartEmulatorThread(std::filesystem::path game_path);
+  void StartEmulatorThread(std::filesystem::path game_path, bool require_cpu_backend);
   void StartQueuedLaunchIfIdle();
-  void EmulatorThread(const std::filesystem::path& game_path);
+  void EmulatorThread(const std::filesystem::path& game_path, bool require_cpu_backend);
+  bool EnsureProfileServicesReady();
 
   static std::unique_ptr<apu::AudioSystem> CreateAudioSystem(
       cpu::Processor* processor);
@@ -107,8 +108,25 @@ class EmulatorAppIOS final : public xe::ui::WindowedApp {
   std::atomic<bool> shutting_down_{false};
   std::mutex launch_mutex_;
   std::optional<std::filesystem::path> queued_launch_path_;
-  bool emulator_initialized_ = false;
+  std::atomic<bool> emulator_initialized_{false};
+  std::atomic<bool> emulator_cpu_initialized_{false};
 };
+
+bool EmulatorAppIOS::EnsureProfileServicesReady() {
+  if (emulator_ && emulator_->kernel_state() && emulator_->kernel_state()->xam_state()) {
+    return true;
+  }
+
+  if (!shutting_down_.load(std::memory_order_acquire) &&
+      !emulator_thread_running_.load(std::memory_order_acquire) &&
+      !emulator_initialized_.load(std::memory_order_acquire)) {
+    StartEmulatorThread({}, false);
+  }
+
+  // Do not block here; callers may execute on UI-sensitive paths.
+  return emulator_ && emulator_->kernel_state() &&
+         emulator_->kernel_state()->xam_state();
+}
 
 std::filesystem::path EmulatorAppIOS::GetIOSStorageRoot() const {
 #if XE_PLATFORM_IOS
@@ -208,7 +226,11 @@ bool EmulatorAppIOS::OnInitialize() {
           return;
         }
 
-        XELOGI("iOS: Game launch requested: {}", path);
+        if (path.empty()) {
+          XELOGI("iOS: Profile services init requested");
+        } else {
+          XELOGI("iOS: Game launch requested: {}", path);
+        }
         auto game_path = std::filesystem::path(path);
 
         if (emulator_thread_running_.load(std::memory_order_acquire)) {
@@ -222,7 +244,8 @@ bool EmulatorAppIOS::OnInitialize() {
           return;
         }
 
-        StartEmulatorThread(std::move(game_path));
+        const bool require_cpu_backend = !game_path.empty();
+        StartEmulatorThread(std::move(game_path), require_cpu_backend);
       });
 
   ios_context.set_game_terminate_callback([this]() {
@@ -256,8 +279,8 @@ bool EmulatorAppIOS::OnInitialize() {
     return profiles;
   });
 
-  ios_context.set_profile_create_callback([this](const std::string& gamertag) {
-    if (!emulator_ || !emulator_->kernel_state() || !emulator_->kernel_state()->xam_state()) {
+  ios_context.set_profile_create_callback([this](const std::string& gamertag) -> uint64_t {
+    if (!emulator_ || !EnsureProfileServicesReady()) {
       return uint64_t(0);
     }
     auto* profile_manager = emulator_->kernel_state()->xam_state()->profile_manager();
@@ -300,7 +323,7 @@ bool EmulatorAppIOS::OnInitialize() {
       }
     }
     profile_manager->Login(xuid, 0, true);
-    return profile_manager->GetProfile(static_cast<uint8_t>(0)) != nullptr;
+    return profile_manager->GetProfile(xuid) != nullptr;
   });
 
   XELOGI("iOS: EmulatorAppIOS initialized successfully");
@@ -327,15 +350,16 @@ bool EmulatorAppIOS::RequestGameStop(const char* reason) {
   return true;
 }
 
-void EmulatorAppIOS::StartEmulatorThread(std::filesystem::path game_path) {
+void EmulatorAppIOS::StartEmulatorThread(std::filesystem::path game_path,
+                                         bool require_cpu_backend) {
   if (emulator_thread_.joinable()) {
     emulator_thread_.join();
   }
 
   game_stop_requested_.store(false, std::memory_order_release);
-  emulator_thread_ = std::thread([this, game_path = std::move(game_path)]() {
+  emulator_thread_ = std::thread([this, game_path = std::move(game_path), require_cpu_backend]() {
     emulator_thread_running_.store(true, std::memory_order_release);
-    EmulatorThread(game_path);
+    EmulatorThread(game_path, require_cpu_backend);
     emulator_thread_running_.store(false, std::memory_order_release);
     game_stop_requested_.store(false, std::memory_order_release);
     app_context().CallInUIThread([this]() { StartQueuedLaunchIfIdle(); });
@@ -363,7 +387,7 @@ void EmulatorAppIOS::StartQueuedLaunchIfIdle() {
   }
 
   XELOGI("iOS: Starting queued game launch: {}", queued_path->string());
-  StartEmulatorThread(std::move(*queued_path));
+  StartEmulatorThread(std::move(*queued_path), true);
 }
 
 void EmulatorAppIOS::OnDestroy() {
@@ -384,10 +408,69 @@ void EmulatorAppIOS::OnDestroy() {
   window_.reset();
 }
 
-void EmulatorAppIOS::EmulatorThread(
-    const std::filesystem::path& game_path) {
+void EmulatorAppIOS::EmulatorThread(const std::filesystem::path& game_path,
+                                    bool require_cpu_backend) {
   xe::threading::set_name("Emulator Thread");
   const bool launched_with_game = !game_path.empty();
+  const bool need_profile_mode_transition =
+      !emulator_initialized_.load(std::memory_order_acquire) ||
+      (require_cpu_backend && !emulator_cpu_initialized_.load(std::memory_order_acquire));
+
+  if (need_profile_mode_transition) {
+    if (emulator_initialized_.load(std::memory_order_acquire) &&
+        !emulator_cpu_initialized_.load(std::memory_order_acquire) && require_cpu_backend) {
+      XELOGI("iOS: Reinitializing emulator for game mode");
+      // Detach the presenter on the UI thread before tearing down the graphics
+      // system, otherwise the window may present using a freed presenter.
+      if (!app_context().CallInUIThreadSynchronous([this]() {
+            if (window_) {
+              window_->SetPresenter(nullptr);
+            }
+          })) {
+        XELOGW("iOS: Failed to detach presenter prior to shutdown");
+      }
+      emulator_->Shutdown();
+    }
+
+    X_STATUS setup_result =
+        emulator_->Setup(window_.get(),
+                         nullptr,  // No ImGui drawer on iOS for now.
+                         require_cpu_backend, require_cpu_backend ? CreateAudioSystem : nullptr,
+                         require_cpu_backend ? CreateGraphicsSystem : nullptr,
+                         require_cpu_backend ? CreateInputDrivers : nullptr);
+
+    if (XFAILED(setup_result)) {
+      XELOGE("iOS: Emulator::Setup failed with status {:08X}", setup_result);
+      emulator_initialized_.store(false, std::memory_order_release);
+      emulator_cpu_initialized_.store(false, std::memory_order_release);
+      return;
+    }
+
+    auto* graphics_system = emulator_->graphics_system();
+    auto* presenter = graphics_system ? graphics_system->presenter() : nullptr;
+    if (presenter && !app_context().CallInUIThreadSynchronous([this, presenter]() {
+          if (window_) {
+            window_->SetPresenter(presenter);
+          }
+        })) {
+      XELOGE("iOS: Failed to attach presenter to display window");
+      emulator_initialized_.store(false, std::memory_order_release);
+      emulator_cpu_initialized_.store(false, std::memory_order_release);
+      return;
+    }
+
+    emulator_initialized_.store(true, std::memory_order_release);
+    emulator_cpu_initialized_.store(require_cpu_backend, std::memory_order_release);
+    XELOGI("iOS: Emulator setup complete");
+
+    if (!launched_with_game) {
+      app_context().CallInUIThread([this]() {
+        auto& ios_context = static_cast<ui::IOSWindowedAppContext&>(app_context());
+        ios_context.NotifyProfileServicesReady();
+      });
+    }
+  }
+
   struct ScopeExit {
     std::function<void()> fn;
     ~ScopeExit() {
@@ -400,50 +483,15 @@ void EmulatorAppIOS::EmulatorThread(
       return;
     }
     app_context().CallInUIThread([this]() {
-      auto& ios_context =
-          static_cast<ui::IOSWindowedAppContext&>(app_context());
+      auto& ios_context = static_cast<ui::IOSWindowedAppContext&>(app_context());
       ios_context.NotifyGameExited();
     });
   }};
 
   // Load game-specific config if available.
   if (!game_path.empty()) {
+    XELOGI("iOS: Loading game config for: {}", game_path.string());
     config::LoadGameConfigForFile(game_path);
-  }
-
-  if (!emulator_initialized_) {
-    // Set up the emulator with all subsystems once and keep it alive while the
-    // app is running.
-    X_STATUS setup_result = emulator_->Setup(
-        window_.get(),
-        nullptr,  // No ImGui drawer on iOS for now.
-        true,     // require_cpu_backend
-        CreateAudioSystem,
-        CreateGraphicsSystem,
-        CreateInputDrivers);
-
-    if (XFAILED(setup_result)) {
-      XELOGE("iOS: Emulator::Setup failed with status {:08X}", setup_result);
-      return;
-    }
-
-    auto* graphics_system = emulator_->graphics_system();
-    auto* presenter = graphics_system ? graphics_system->presenter() : nullptr;
-    if (!presenter) {
-      XELOGE("iOS: Graphics presenter is not available after setup");
-      return;
-    }
-    if (!app_context().CallInUIThreadSynchronous([this, presenter]() {
-          if (window_) {
-            window_->SetPresenter(presenter);
-          }
-        })) {
-      XELOGE("iOS: Failed to attach presenter to display window");
-      return;
-    }
-
-    emulator_initialized_ = true;
-    XELOGI("iOS: Emulator setup complete");
   }
 
   if (!game_path.empty()) {

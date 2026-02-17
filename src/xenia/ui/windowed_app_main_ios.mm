@@ -1958,7 +1958,9 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 }
 
 - (void)presentProfileCreateAlert {
-  UIAlertController* create_alert =
+  // Under MRC, `__weak` is unavailable; rely on block strong captures.
+  // Use `__block` for the alert to avoid a retain-cycle: alert -> action -> handler -> alert.
+  __block UIAlertController* create_alert =
       [UIAlertController alertControllerWithTitle:@"Create Profile"
                                           message:@"Enter a gamertag (1-15 characters)."
                                    preferredStyle:UIAlertControllerStyleAlert];
@@ -1977,6 +1979,9 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
               actionWithTitle:@"Create"
                         style:UIAlertActionStyleDefault
                       handler:^(__unused UIAlertAction* action) {
+                        if (!self.appContext) {
+                          return;
+                        }
                         UITextField* text_field = create_alert.textFields.firstObject;
                         NSString* raw_text = text_field.text ?: @"";
                         NSString* trimmed = [raw_text
@@ -1985,24 +1990,36 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
                         if (trimmed.length == 0 || !self.appContext) {
                           return;
                         }
+                        auto* app_context = self.appContext;
+                        if (!app_context) {
+                          return;
+                        }
+                        self.statusLabel.text = @"Creating profile...";
+                        NSString* gamertag = [[trimmed copy] autorelease];
+                        create_alert = nil;
                         uint64_t xuid =
-                            self.appContext->CreateProfile(std::string([trimmed UTF8String]));
+                            app_context->CreateProfile(std::string([gamertag UTF8String]));
                         if (!xuid) {
                           UIAlertController* failure = [UIAlertController
                               alertControllerWithTitle:@"Profile Not Created"
-                                               message:
-                                                   @"Gamertag is invalid or could not be created."
+                                               message:@"Profile could not be created. "
+                                                       @"Please try again."
                                         preferredStyle:UIAlertControllerStyleAlert];
                           [failure addAction:[UIAlertAction actionWithTitle:@"OK"
                                                                       style:UIAlertActionStyleCancel
                                                                     handler:nil]];
                           [self presentViewController:failure animated:YES completion:nil];
+                          self.statusLabel.text = @"Profile creation failed.";
                           return;
                         }
-                        self.appContext->SignInProfile(xuid);
+                        BOOL signed_in = app_context->SignInProfile(xuid);
+                        if (!signed_in) {
+                          self.statusLabel.text = @"Failed to sign in with the new profile.";
+                          return;
+                        }
                         [self refreshSignedInProfileUI];
                         self.statusLabel.text =
-                            [NSString stringWithFormat:@"Signed in as %@.", trimmed];
+                            [NSString stringWithFormat:@"Signed in as %@.", gamertag];
                       }]];
   [self presentViewController:create_alert animated:YES completion:nil];
 }
@@ -2081,15 +2098,14 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   };
 
   auto profiles = self.appContext->ListProfiles();
-  __unsafe_unretained XeniaViewController* weak_self = self;
   void (^present_create_alert)(void) = ^{
-    XeniaViewController* strong_self = weak_self;
-    if (!strong_self || !strong_self.appContext) {
+    if (!self.appContext) {
       finish(NO);
       return;
     }
 
-    UIAlertController* create_alert =
+    // Under MRC, use `__block` to avoid a retain-cycle: alert -> action -> handler -> alert.
+    __block UIAlertController* create_alert =
         [UIAlertController alertControllerWithTitle:@"Create Profile"
                                             message:@"Enter a gamertag (1-15 characters)."
                                      preferredStyle:UIAlertControllerStyleAlert];
@@ -2113,25 +2129,38 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
                                 NSString* raw_text = text_field.text ?: @"";
                                 NSString* trimmed = [raw_text stringByTrimmingCharactersInSet:
                                                                  [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                                if (trimmed.length == 0 || !strong_self.appContext) {
+                                if (trimmed.length == 0 || !self.appContext) {
                                   finish(NO);
                                   return;
                                 }
-                                uint64_t xuid = strong_self.appContext->CreateProfile(
-                                    std::string([trimmed UTF8String]));
+                                auto* app_context = self.appContext;
+                                if (!app_context) {
+                                  finish(NO);
+                                  return;
+                                }
+                                NSString* gamertag = [[trimmed copy] autorelease];
+                                create_alert = nil;
+                                uint64_t xuid =
+                                    app_context->CreateProfile(std::string([gamertag UTF8String]));
                                 if (!xuid) {
+                                  if (self.statusLabel) {
+                                    self.statusLabel.text =
+                                        @"Profile could not be created. Please try again.";
+                                  }
                                   finish(NO);
                                   return;
                                 }
-                                BOOL signed_in = strong_self.appContext->SignInProfile(xuid);
+                                BOOL signed_in = app_context->SignInProfile(xuid);
                                 if (signed_in) {
-                                  strong_self.statusLabel.text =
-                                      [NSString stringWithFormat:@"Signed in as %@.", trimmed];
+                                  self.statusLabel.text =
+                                      [NSString stringWithFormat:@"Signed in as %@.", gamertag];
+                                } else if (self.statusLabel) {
+                                  self.statusLabel.text = @"Failed to sign in with the new profile.";
                                 }
                                 finish(signed_in);
                               }]];
 
-    UIViewController* presenter = strong_self;
+    UIViewController* presenter = self;
     while (presenter.presentedViewController) {
       presenter = presenter.presentedViewController;
     }
@@ -2745,6 +2774,14 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
         return true;
       });
   app_context_->set_game_exited_callback([vc]() { [vc showLauncherOverlay]; });
+  app_context_->set_profile_services_ready_callback([vc]() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [vc refreshSignedInProfileUI];
+      if ([vc.statusLabel.text isEqualToString:@"Initializing profile services..."]) {
+        vc.statusLabel.text = @"";
+      }
+    });
+  });
 
   XELOGI("iOS: Metal view ready ({}x{})",
          static_cast<uint32_t>(vc.metalView.bounds.size.width *
@@ -2765,6 +2802,10 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   }
 
   [vc refreshSignedInProfileUI];
+  if (vc.appContext) {
+    vc.statusLabel.text = @"Initializing profile services...";
+    vc.appContext->LaunchGame(std::string());
+  }
 
   XELOGI("iOS: Application launched successfully");
   return YES;

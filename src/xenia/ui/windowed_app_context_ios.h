@@ -67,6 +67,7 @@ class IOSWindowedAppContext final : public WindowedAppContext {
   using ProfileSignInCallback = std::function<bool(uint64_t)>;
   using GameTerminateCallback = std::function<bool()>;
   using GameExitedCallback = std::function<void()>;
+  using ProfileServicesReadyCallback = std::function<void()>;
   using SignInUIPromptCallback = std::function<bool(uint32_t, uint32_t)>;
   using MessageBoxPromptCallback =
       std::function<bool(const std::string&, const std::string&, const std::vector<std::string>&,
@@ -102,6 +103,15 @@ class IOSWindowedAppContext final : public WindowedAppContext {
       return false;
     }
     return profile_sign_in_callback_(xuid);
+  }
+
+  void set_profile_services_ready_callback(ProfileServicesReadyCallback callback) {
+    profile_services_ready_callback_ = std::move(callback);
+  }
+  void NotifyProfileServicesReady() const {
+    if (profile_services_ready_callback_) {
+      profile_services_ready_callback_();
+    }
   }
 
   void set_game_terminate_callback(GameTerminateCallback callback) {
@@ -173,6 +183,7 @@ class IOSWindowedAppContext final : public WindowedAppContext {
   GameTerminateCallback game_terminate_callback_;
   GameExitedCallback game_exited_callback_;
   SignInUIPromptCallback signin_ui_prompt_callback_;
+  ProfileServicesReadyCallback profile_services_ready_callback_;
   MessageBoxPromptCallback message_box_prompt_callback_;
   KeyboardPromptCallback keyboard_prompt_callback_;
   LayoutChangedCallback layout_changed_callback_;
