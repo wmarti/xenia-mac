@@ -281,7 +281,7 @@ X_STATUS Emulator::Setup(
         graphics_system_factory,
     std::function<std::vector<std::unique_ptr<hid::InputDriver>>(ui::Window*)>
         input_driver_factory) {
-  X_STATUS result = X_STATUS_UNSUCCESSFUL;
+  X_STATUS result = X_STATUS_SUCCESS;
 
   // Store parameters for reuse across Shutdown/Setup cycles.
   // Only overwrite if non-null so re-calls after Shutdown keep prior values.
@@ -310,7 +310,7 @@ X_STATUS Emulator::Setup(
   memory_ = std::make_unique<Memory>();
   if (!memory_->Initialize()) {
     XELOGE("{}: Cannot initalize memory!", __func__);
-    return result;
+    return X_STATUS_UNSUCCESSFUL;
   }
 
   XELOGI("{}: Initializing Exports...", __func__);
@@ -468,7 +468,7 @@ X_STATUS Emulator::Setup(
   // Initialize emulator fallback exception handling last.
   ExceptionHandler::Install(Emulator::ExceptionCallbackThunk, this);
 
-  return result;
+  return X_STATUS_SUCCESS;
 }
 
 X_STATUS Emulator::TerminateTitle() {
