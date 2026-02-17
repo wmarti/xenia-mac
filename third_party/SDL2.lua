@@ -5,7 +5,9 @@
 
 -- iOS detection: on iOS we build SDL2 from source as a static library.
 local _ios =
-    os.isfile(".ios_target")
+    -- Resolve .ios_target relative to the main premake script directory so this
+    -- works regardless of premake include script directory changes.
+    os.isfile((_MAIN_SCRIPT_DIR and path.join(_MAIN_SCRIPT_DIR, ".ios_target")) or ".ios_target")
     or os.getenv("XE_TARGET_IOS") == "1"
     or (os.target and os.target() == "ios")
     or os.istarget("ios")

@@ -4,7 +4,12 @@
 --   3. premake os.target() / os.istarget()
 --   4. Raw _OPTIONS["os"] from command line
 function is_ios_target()
-  return os.isfile(".ios_target")
+  -- Note: premake changes its script directory while processing includes, so
+  -- checking a relative ".ios_target" can be unreliable. Resolve relative to
+  -- the main premake script location.
+  local main_dir = _MAIN_SCRIPT_DIR
+  local sentinel = (main_dir and path.join(main_dir, ".ios_target")) or ".ios_target"
+  return os.isfile(sentinel) or os.isfile(".ios_target")
       or os.getenv("XE_TARGET_IOS") == "1"
       or (os.target and os.target() == "ios")
       or os.istarget("ios")

@@ -8,10 +8,10 @@ Usage: tools/build_apple_release.sh [options]
 Builds and packages Apple release artifacts:
 - macOS arm64 DMG
 - macOS x86_64 DMG
-- iOS arm64 unsigned IPA
+- iOS arm64 ad-hoc-signed IPA
 
 Options:
-  --out DIR            Output directory (default: artifacts/release)
+  --out DIR            Output directory (default: scratch/artifacts)
   --config NAME        checked|debug|release|valgrind (default: release)
   --ios-min VERSION    iOS minimum version (default: 16.0)
   --macos-min VERSION  macOS minimum version (default: 15.0)
@@ -22,7 +22,7 @@ Options:
   -h, --help
 
 Notes:
-- iOS packaging creates an *unsigned* .ipa (for re-signing).
+- iOS packaging creates an ad-hoc-signed .ipa suitable for re-signing.
 - This script expects Xcode command line tools (xcodebuild, codesign, hdiutil).
 EOF
 }
@@ -141,7 +141,7 @@ package_macos_dmg() {
   rm -rf "$dmg_contents"
 }
 
-package_ios_ipa_unsigned() {
+package_ios_ipa() {
   local app_bundle="$1"
   local ipa_out="$2"
 
@@ -164,7 +164,7 @@ package_ios_ipa_unsigned() {
 build_ios=1
 build_macos_arm64=1
 build_macos_x86_64=1
-out_dir="artifacts/release"
+out_dir="scratch/artifacts"
 config="release"
 ios_min="16.0"
 macos_min="15.0"
@@ -300,7 +300,7 @@ fi
 
 if [ "$build_ios" -eq 1 ]; then
   echo ""
-  echo "== iOS arm64 (unsigned ipa) =="
+  echo "== iOS arm64 (ad-hoc-signed ipa) =="
   # Extra signal for Lua scripts (also used by CI).
   touch .ios_target
 
@@ -316,7 +316,12 @@ if [ "$build_ios" -eq 1 ]; then
 
   ios_dir="build/bin/iOS-ARM64/$buildcfg"
   app_bundle="$(find_first_app "$ios_dir")" || die "iOS app not found in $ios_dir"
-  package_ios_ipa_unsigned "$app_bundle" "$out_dir/xenia_edge_ios_arm64_unsigned.ipa"
+
+  # Ad-hoc sign to embed entitlements (increased-memory-limit).
+  # Re-signing tools will preserve these when applying a real identity.
+  codesign --force --sign - --entitlements "$root/xenia_ios.entitlements" "$app_bundle"
+
+  package_ios_ipa "$app_bundle" "$out_dir/xenia_edge_ios_arm64_adhoc.ipa"
 fi
 
 echo ""
