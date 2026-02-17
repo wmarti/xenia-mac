@@ -319,50 +319,62 @@ X_STATUS Emulator::Setup(
 
   std::unique_ptr<xe::cpu::backend::Backend> backend;
 
-  // On iOS, probe whether JIT (executable memory) is available at runtime.
-  // JIT requires CS_DEBUGGED (set by debugger/JIT helpers such as
-  // StikDebug/AltJIT/SideJITServer).
-  // We use the dual-mapping (split W^X via vm_remap) approach, not MAP_JIT.
+  // In profile-only UI mode, explicitly force the null backend to avoid
+  // requiring JIT / executable memory.
+  // Keep existing behavior for tooling flows that pass require_cpu_backend=false
+  // but still provide graphics / audio / input factories (for example trace
+  // tools), where a real CPU backend may still be expected.
+  const bool profile_only_mode =
+      !require_cpu_backend_ && !audio_system_factory_ &&
+      !graphics_system_factory_ && !input_driver_factory_;
+  if (profile_only_mode) {
+    backend = std::make_unique<xe::cpu::backend::NullBackend>();
+  } else {
+    // On iOS, probe whether JIT (executable memory) is available at runtime.
+    // We use the dual-mapping (split W^X via vm_remap) approach, not MAP_JIT.
 #if XE_PLATFORM_IOS
-  const bool cs_debugged = IsIOSCsDebugged();
-  const bool can_map_exec = CanMapIOSExecutePage();
-  const bool jit_available = cs_debugged && can_map_exec;
-  if (!jit_available) {
-    XELOGW(
-        "JIT is not available. Games will not run.\n"
-        "CS_DEBUGGED={} mmap(PROT_EXEC)={}\n"
-        "Enable JIT via StikDebug, AltJIT, or SideJITServer.\n"
-        "If installed via Xcode, launch with the debugger attached.",
-        cs_debugged, can_map_exec);
-  }
+    const bool cs_debugged = IsIOSCsDebugged();
+    const bool can_map_exec = CanMapIOSExecutePage();
+    // Use executable-memory probing as the authoritative runtime capability
+    // signal instead of hard-coding OS-version policy.
+    const bool jit_available = can_map_exec;
+    if (!jit_available) {
+      XELOGW(
+          "JIT is not available. Games will not run.\n"
+          "CS_DEBUGGED={} mmap(PROT_EXEC)={}\n"
+          "Enable JIT via StikDebug, AltJIT, or SideJITServer.\n"
+          "If installed via Xcode, launch with the debugger attached.",
+          cs_debugged, can_map_exec);
+    }
 #else
-  constexpr bool jit_available = true;
+    constexpr bool jit_available = true;
 #endif
 
 #if XE_ARCH_AMD64
-  if (jit_available && cvars::cpu == "x64") {
-    backend.reset(new xe::cpu::backend::x64::X64Backend());
-  }
-#endif  // XE_ARCH_AMD64
-#if XE_ARCH_ARM64
-  if (jit_available && cvars::cpu == "a64") {
-    backend.reset(new xe::cpu::backend::a64::A64Backend());
-  }
-#endif  // XE_ARCH_ARM64
-  if (jit_available && cvars::cpu == "any") {
-    if (!backend) {
-#if XE_ARCH_AMD64
+    if (jit_available && cvars::cpu == "x64") {
       backend.reset(new xe::cpu::backend::x64::X64Backend());
+    }
 #endif  // XE_ARCH_AMD64
 #if XE_ARCH_ARM64
-      if (!backend) {
-        backend.reset(new xe::cpu::backend::a64::A64Backend());
-      }
+    if (jit_available && cvars::cpu == "a64") {
+      backend.reset(new xe::cpu::backend::a64::A64Backend());
+    }
 #endif  // XE_ARCH_ARM64
+    if (jit_available && cvars::cpu == "any") {
+      if (!backend) {
+#if XE_ARCH_AMD64
+        backend.reset(new xe::cpu::backend::x64::X64Backend());
+#endif  // XE_ARCH_AMD64
+#if XE_ARCH_ARM64
+        if (!backend) {
+          backend.reset(new xe::cpu::backend::a64::A64Backend());
+        }
+#endif  // XE_ARCH_ARM64
+      }
     }
   }
   if (!backend && !require_cpu_backend_) {
-    backend.reset(new xe::cpu::backend::NullBackend());
+    backend = std::make_unique<xe::cpu::backend::NullBackend>();
   }
 
   XELOGI("{}: Initializing Processor...", __func__);
@@ -1916,7 +1928,12 @@ bool Emulator::ExceptionCallbackThunk(Exception* ex, void* data) {
 
 bool Emulator::ExceptionCallback(Exception* ex) {
   // Check to see if the exception occurred in guest code.
-  auto code_cache = processor()->backend()->code_cache();
+  auto* backend = processor() ? processor()->backend() : nullptr;
+  auto* code_cache = backend ? backend->code_cache() : nullptr;
+  if (!code_cache) {
+    // No code cache (for example, in UI/profile mode using the null backend).
+    return false;
+  }
   auto code_base = code_cache->execute_base_address();
   auto code_end = code_base + code_cache->total_size();
 
