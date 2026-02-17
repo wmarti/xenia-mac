@@ -15,6 +15,7 @@
 #include <mutex>
 #include <queue>
 
+#include "xenia/base/threading.h"
 #include "xenia/memory.h"
 #include "xenia/xbox.h"
 
@@ -235,6 +236,19 @@ class XmaContext {
     is_enabled_.store(is_enabled, std::memory_order_release);
   }
 
+  // Signals that the worker has finished processing this context after a kick.
+  void SignalWorkDone() {
+    if (work_completion_event_) {
+      work_completion_event_->Set();
+    }
+  }
+  // Blocks until the worker has finished processing this context.
+  void WaitForWorkDone() {
+    if (work_completion_event_) {
+      xe::threading::Wait(work_completion_event_.get(), false);
+    }
+  }
+
  protected:
   static void DumpRaw(AVFrame* frame, int id);
   // Convert sample format and swap bytes
@@ -248,6 +262,7 @@ class XmaContext {
   xe_mutex lock_;
   std::atomic<bool> is_allocated_ = false;
   std::atomic<bool> is_enabled_ = false;
+  std::unique_ptr<xe::threading::Event> work_completion_event_;
 
   // ffmpeg structures
   AVPacket* av_packet_ = nullptr;

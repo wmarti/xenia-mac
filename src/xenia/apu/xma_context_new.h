@@ -98,6 +98,12 @@ class XmaContextNew : public XmaContext {
   bool DecodePacket(AVCodecContext* av_context, const AVPacket* av_packet,
                     AVFrame* av_frame);
 
+  // Re-reads context from guest memory and merges only decoder-owned fields,
+  // preserving any game modifications made during decoding.
+  void StoreContextMerged(const XMA_CONTEXT_DATA& data,
+                          const XMA_CONTEXT_DATA& initial_data,
+                          uint8_t* context_ptr);
+
   std::array<uint8_t, kBytesPerPacketData * 2> input_buffer_;
   // first byte contains bit offset information
   std::array<uint8_t, 1 + 4096> xma_frame_;

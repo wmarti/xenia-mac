@@ -220,17 +220,15 @@ X_STATUS XmaDecoder::Setup(kernel::KernelState* kernel_state) {
 }
 
 void XmaDecoder::WorkerThreadMain() {
-  uint32_t idle_loop_count = 0;
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;
     for (uint32_t n = 0; n < kContextCount; n++) {
-      did_work = contexts_[n]->Work() || did_work;
-
-      // TODO: Need thread safety to do this.
-      // Probably not too important though.
-      // registers_.current_context = n;
-      // registers_.next_context = (n + 1) % kContextCount;
+      bool worked = contexts_[n]->Work();
+      if (worked) {
+        contexts_[n]->SignalWorkDone();
+      }
+      did_work = did_work || worked;
     }
 
     if (paused_.load(std::memory_order_acquire)) {
@@ -238,10 +236,8 @@ void XmaDecoder::WorkerThreadMain() {
       resume_fence_.Wait();
     }
 
-    if (!did_work) {
-      idle_loop_count++;
-    } else {
-      idle_loop_count = 0;
+    if (did_work) {
+      continue;
     }
     xe::threading::Wait(work_event_.get(), false);
   }
@@ -367,6 +363,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
 
     // The context ID is a bit in the range of the entire context array.
     const uint32_t base_context_id = (r - XmaRegister::Context0Kick) * 32;
+    const uint32_t kicked_value = value;
     while (value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
@@ -378,6 +375,16 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     }
     // Signal the decoder thread to start processing.
     work_event_->SetBoostPriority();
+    if (cvars::use_dedicated_xma_thread) {
+      // Block until the worker finishes, so the game sees updated context data.
+      uint32_t remaining = kicked_value;
+      while (remaining) {
+        const uint32_t context_id =
+            base_context_id + std::countr_zero(remaining);
+        contexts_[context_id]->WaitForWorkDone();
+        remaining &= remaining - 1;
+      }
+    }
   } else if (r >= XmaRegister::Context0Lock && r <= XmaRegister::Context9Lock) {
     // Context lock command.
     // This requests a lock by flagging the context.
@@ -387,11 +394,10 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
       context.Disable();
+      // Ensure the worker isn't mid-processing this context.
+      context.Block(false);
       value &= value - 1;
     }
-
-    // Signal the decoder thread to start processing.
-    // work_event_->Set();
   } else if (r >= XmaRegister::Context0Clear &&
              r <= XmaRegister::Context9Clear) {
     // Context clear command.

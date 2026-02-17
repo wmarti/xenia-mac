@@ -121,6 +121,7 @@ bool XmaContextNew::Work() {
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);
+  const XMA_CONTEXT_DATA initial_data = data;
 
   if (!data.output_buffer_valid) {
     return true;
@@ -142,7 +143,7 @@ bool XmaContextNew::Work() {
         data.output_buffer_read_offset == data.output_buffer_write_offset) {
       ClearLocked(&data);
     }
-    data.Store(context_ptr);
+    StoreContextMerged(data, initial_data, context_ptr);
     return true;
   }
 
@@ -156,7 +157,7 @@ bool XmaContextNew::Work() {
     XELOGD("XmaContext {}: No space for subframe decoding {}/{}!", id(),
            minimum_subframe_decode_count,
            remaining_subframe_blocks_in_output_buffer_);
-    data.Store(context_ptr);
+    StoreContextMerged(data, initial_data, context_ptr);
     return true;
   }
 
@@ -192,26 +193,11 @@ bool XmaContextNew::Work() {
     data.output_buffer_valid = 0;
   }
 
-  // TODO: Rewrite!
-  // There is a case when game can modify certain parts of context mid-play
-  // and decoder should be aware of it
-  data.Store(context_ptr);
+  StoreContextMerged(data, initial_data, context_ptr);
   return true;
 }
 
-void XmaContextNew::Enable() {
-  std::lock_guard<xe_mutex> lock(lock_);
-
-  auto context_ptr = memory()->TranslateVirtual(guest_ptr());
-  XMA_CONTEXT_DATA data(context_ptr);
-
-  XELOGAPU("XmaContext: kicking context {} (buffer {} {}/{} bits)", id(),
-           data.current_buffer, data.input_buffer_read_offset,
-           data.GetCurrentInputBufferPacketCount() * kBitsPerPacket);
-
-  data.Store(context_ptr);
-  set_is_enabled(true);
-}
+void XmaContextNew::Enable() { set_is_enabled(true); }
 
 void XmaContextNew::Clear() {
   std::lock_guard<xe_mutex> lock(lock_);
@@ -236,11 +222,7 @@ void XmaContextNew::ClearLocked(XMA_CONTEXT_DATA* data) {
   current_frame_remaining_subframes_ = 0;
 }
 
-void XmaContextNew::Disable() {
-  std::lock_guard<xe_mutex> lock(lock_);
-  XELOGAPU("XmaContext: disabling context {}", id());
-  set_is_enabled(false);
-}
+void XmaContextNew::Disable() { set_is_enabled(false); }
 
 void XmaContextNew::Release() {
   // Lock it in case the decoder thread is working on it now.
@@ -744,6 +726,37 @@ bool XmaContextNew::DecodePacket(AVCodecContext* av_context,
     return false;
   }
   return true;
+}
+
+void XmaContextNew::StoreContextMerged(const XMA_CONTEXT_DATA& data,
+                                       const XMA_CONTEXT_DATA& initial_data,
+                                       uint8_t* context_ptr) {
+  XMA_CONTEXT_DATA fresh(context_ptr);
+
+  // DWORD 0: decoder owns loop_count, output_buffer_write_offset.
+  // Only clear valid flags the decoder actually consumed (was 1, now 0).
+  fresh.loop_count = data.loop_count;
+  fresh.output_buffer_write_offset = data.output_buffer_write_offset;
+  if (initial_data.input_buffer_0_valid && !data.input_buffer_0_valid) {
+    fresh.input_buffer_0_valid = 0;
+  }
+  if (initial_data.input_buffer_1_valid && !data.input_buffer_1_valid) {
+    fresh.input_buffer_1_valid = 0;
+  }
+
+  // DWORD 1: decoder conditionally clears output_buffer_valid
+  if (initial_data.output_buffer_valid && !data.output_buffer_valid) {
+    fresh.output_buffer_valid = 0;
+  }
+
+  // DWORD 2: decoder owns input_buffer_read_offset, error_status
+  fresh.input_buffer_read_offset = data.input_buffer_read_offset;
+  fresh.error_status = data.error_status;
+
+  // DWORD 4: decoder owns current_buffer
+  fresh.current_buffer = data.current_buffer;
+
+  fresh.Store(context_ptr);
 }
 
 }  // namespace apu
