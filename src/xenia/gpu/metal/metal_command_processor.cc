@@ -2716,9 +2716,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   // Check for copy mode
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
   if (edram_mode != xenos::EdramMode::kCopy && copy_resolve_writes_pending_) {
-    // Preserve resolve write visibility when transitioning from copy-only
-    // bursts to regular draw work.
-    EndCommandBuffer();
+    // Transitioning from copy/resolve to draw work. End the current render
+    // encoder to create a GPU execution barrier — Metal guarantees that
+    // writes from a completed encoder are visible to subsequent encoders
+    // within the same command buffer. This avoids the much more expensive
+    // command buffer commit (which drains the GPU pipeline entirely).
+    // The next draw will create a fresh render encoder via the normal
+    // render target setup flow.
+    EndRenderEncoder();
+    copy_resolve_writes_pending_ = false;
   }
   if (edram_mode == xenos::EdramMode::kCopy) {
     return IssueCopy();
@@ -5087,53 +5093,24 @@ bool MetalCommandProcessor::IssueCopy() {
       render_target_cache_->IsTileResolveEnabled()) {
     if (render_target_cache_->ResolveInCurrentPassTileShader(
             *memory_, written_address, written_length)) {
-      // Tile resolve succeeded - skip the encoder break entirely.
+      // Tile resolve succeeded — keep the render encoder open.
+      // The tile dispatch wrote to the shared memory buffer (device memory)
+      // while the render targets remain valid in tile memory. We do NOT end
+      // the encoder or commit the command buffer here, preserving the TBDR
+      // benefit (no tile store/reload).
+      //
+      // Visibility contract: Metal guarantees that writes from a completed
+      // encoder are visible to subsequent encoders in the same command
+      // buffer. When the next non-copy command arrives (a draw), the
+      // copy_resolve_writes_pending_ flag triggers EndRenderEncoder(),
+      // which provides the execution barrier. This matches D3D12's
+      // deferred barrier model where resolve writes stay in the same
+      // submission until a state transition makes them visible.
       if (!written_length) {
         return true;  // No-op resolve.
       }
       MarkResolvedMemory(written_address, written_length);
-
-      // Copy-only resolve bursts stay open for coalescing.
-      if (current_draw_index_ == 0
-#if METAL_SHADER_CONVERTER_AVAILABLE
-          && command_buffer_draw_rings_.empty()
-#endif
-      ) {
-        copy_resolve_writes_pending_ = true;
-        return true;
-      }
-
-      // Resolve touched guest memory in a draw-containing submission; commit
-      // now so following reads (e.g. texture sampling from shared memory)
-      // observe the resolved data. This breaks the render pass, which
-      // reduces the TBDR benefit. A future optimization could insert
-      // appropriate buffer barriers instead of committing, but that
-      // requires careful hazard tracking of shared memory reads.
-#if METAL_SHADER_CONVERTER_AVAILABLE
-      // Need to end encoder before committing.
-      EndRenderEncoder();
-      MTL::CommandBuffer* cmd = current_command_buffer_;
-      if (cmd) {
-        ScheduleDrawRingRelease(cmd);
-        cmd->commit();
-        cmd->release();
-        current_command_buffer_ = nullptr;
-        SetActiveDrawRing(nullptr);
-      }
-#else
-      EndRenderEncoder();
-      MTL::CommandBuffer* cmd = current_command_buffer_;
-      if (cmd) {
-        if (UseSpirvCrossPath()) {
-          ScheduleSpirvUniformBufferRelease(cmd);
-        }
-        cmd->commit();
-        cmd->release();
-        current_command_buffer_ = nullptr;
-      }
-#endif
-      current_draw_index_ = 0;
-      copy_resolve_writes_pending_ = false;
+      copy_resolve_writes_pending_ = true;
       return true;
     }
     // Tile resolve declined (unsupported config) - fall through to compute
@@ -5178,35 +5155,15 @@ bool MetalCommandProcessor::IssueCopy() {
   //     written_length, true);
   //   }
 
-  // Copy-only resolve bursts can stay open and be coalesced until a draw,
-  // primary-buffer end, swap, or explicit synchronization point.
-  if (current_draw_index_ == 0
-#if METAL_SHADER_CONVERTER_AVAILABLE
-      && command_buffer_draw_rings_.empty()
-#endif
-  ) {
-    copy_resolve_writes_pending_ = true;
-    return true;
-  }
-
-  // Resolve touched guest memory in a draw-containing submission; commit now
-  // so following packets don't observe stale resolve results.
-#if METAL_SHADER_CONVERTER_AVAILABLE
-  ScheduleDrawRingRelease(copy_command_buffer);
-#else
-  if (UseSpirvCrossPath()) {
-    ScheduleSpirvUniformBufferRelease(copy_command_buffer);
-  }
-#endif
-  copy_command_buffer->commit();
-  copy_command_buffer->release();
-  current_command_buffer_ = nullptr;
-#if METAL_SHADER_CONVERTER_AVAILABLE
-  SetActiveDrawRing(nullptr);
-#endif
-  current_draw_index_ = 0;
-  copy_resolve_writes_pending_ = false;
-
+  // Defer the command buffer commit. The compute resolve already ended the
+  // render encoder (above) and ran in a compute encoder on the same command
+  // buffer. Metal guarantees that writes from completed encoders are visible
+  // to subsequent encoders within the same command buffer, so we don't need
+  // to commit here. When the next draw arrives, the copy_resolve_writes_pending_
+  // flag will trigger EndRenderEncoder() (which is a no-op if no encoder is
+  // active), providing the execution barrier. This matches D3D12's behavior
+  // of keeping the submission open until an explicit synchronization point.
+  copy_resolve_writes_pending_ = true;
   return true;
 }
 
