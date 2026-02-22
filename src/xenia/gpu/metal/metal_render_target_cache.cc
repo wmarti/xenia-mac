@@ -4673,22 +4673,23 @@ MetalRenderTargetCache::GetOrCreateTileResolvePipeline(
     return nullptr;
   }
 
-  // Build a hash of the current color attachment formats.
-  uint64_t format_hash = 0;
-  for (uint32_t i = 0; i < 4; ++i) {
-    uint64_t fmt = 0;
-    if (current_color_targets_[i] &&
-        current_color_targets_[i]->draw_texture()) {
-      fmt = static_cast<uint64_t>(
-          current_color_targets_[i]->draw_texture()->pixelFormat());
-    }
-    format_hash ^= fmt << (i * 16);
-  }
-
+  // Build a key from the full attachment format configuration.
   TileResolvePipelineKey key;
   key.src_color_index = src_color_index;
   key.raster_sample_count = static_cast<uint8_t>(sample_count);
-  key.color_format_hash = format_hash;
+  for (uint32_t i = 0; i < 4; ++i) {
+    MTL::PixelFormat fmt = MTL::PixelFormatInvalid;
+    if (current_color_targets_[i] &&
+        current_color_targets_[i]->draw_texture()) {
+      fmt = current_color_targets_[i]->draw_texture()->pixelFormat();
+    }
+    key.color_formats[i] = static_cast<uint16_t>(fmt);
+  }
+  key.depth_format = 0;
+  if (current_depth_target_ && current_depth_target_->draw_texture()) {
+    key.depth_format = static_cast<uint16_t>(
+        current_depth_target_->draw_texture()->pixelFormat());
+  }
 
   auto it = tile_resolve_pipelines_.find(key);
   if (it != tile_resolve_pipelines_.end()) {
@@ -4717,11 +4718,7 @@ MetalRenderTargetCache::GetOrCreateTileResolvePipeline(
 
   // Set color attachment formats to match the current render pass.
   for (uint32_t i = 0; i < 4; ++i) {
-    MTL::PixelFormat fmt = MTL::PixelFormatInvalid;
-    if (current_color_targets_[i] &&
-        current_color_targets_[i]->draw_texture()) {
-      fmt = current_color_targets_[i]->draw_texture()->pixelFormat();
-    }
+    MTL::PixelFormat fmt = static_cast<MTL::PixelFormat>(key.color_formats[i]);
     desc->colorAttachments()->object(i)->setPixelFormat(fmt);
   }
 
@@ -4740,8 +4737,8 @@ MetalRenderTargetCache::GetOrCreateTileResolvePipeline(
   }
 
   tile_resolve_pipelines_.emplace(key, pipeline);
-  XELOGD("Metal: created tile resolve pipeline for color{} (samples={}, hash={:016X})",
-         src_color_index, sample_count, format_hash);
+  XELOGD("Metal: created tile resolve pipeline for color{} (samples={})",
+         src_color_index, sample_count);
   return pipeline;
 }
 
@@ -4825,9 +4822,24 @@ bool MetalRenderTargetCache::ResolveInCurrentPassTileShader(
     return false;
   }
 
+  // Verify the attached RT's key matches the resolve EDRAM parameters
+  // (base tiles, pitch, format, MSAA samples). This prevents resolving from
+  // the wrong source when EDRAM aliasing is in use.
+  draw_util::ResolveEdramInfo edram_info = resolve_info.color_edram_info;
+  {
+    RenderTargetKey rt_key = source_rt->key();
+    if (rt_key.base_tiles != edram_info.base_tiles ||
+        rt_key.msaa_samples != edram_info.msaa_samples ||
+        rt_key.is_depth != 0) {
+      // The attached RT doesn't match the EDRAM region being resolved.
+      ++tile_resolve_fallback_rt_mismatch_;
+      ++tile_resolve_fallbacks_;
+      return false;
+    }
+  }
+
   // Check that this is a format we support in the tile shader.
   // v1: Only support 32bpp formats (fast path).
-  draw_util::ResolveEdramInfo edram_info = resolve_info.color_edram_info;
   if (edram_info.format_is_64bpp) {
     ++tile_resolve_fallback_64bpp_;
     ++tile_resolve_fallbacks_;
@@ -4909,6 +4921,11 @@ bool MetalRenderTargetCache::ResolveInCurrentPassTileShader(
   constants.edram_base_tiles = edram_info.base_tiles;
   constants.edram_pitch_tiles = edram_info.pitch_tiles;
   constants.format_is_64bpp = edram_info.format_is_64bpp;
+  // Source rectangle origin within the render pass attachment (in pixels).
+  // The EDRAM offset fields encode where the resolve region starts relative
+  // to the render target's EDRAM base tile.
+  constants.src_x = coord.edram_offset_x_div_8 * 8;
+  constants.src_y = coord.edram_offset_y_div_8 * 8;
 
   // Encode the tile dispatch on the current render encoder.
   MTL::RenderCommandEncoder* encoder =
@@ -4948,12 +4965,13 @@ bool MetalRenderTargetCache::ResolveInCurrentPassTileShader(
     XELOGI(
         "Metal tile resolve stats: attempts={}, successes={}, fallbacks={} "
         "(depth={}, scaled={}, clear={}, 64bpp={}, msaa={}, no_rt={}, "
-        "pipeline={})",
+        "rt_mismatch={}, pipeline={})",
         tile_resolve_attempts_, tile_resolve_successes_,
         tile_resolve_fallbacks_, tile_resolve_fallback_depth_,
         tile_resolve_fallback_scaled_, tile_resolve_fallback_clear_,
         tile_resolve_fallback_64bpp_, tile_resolve_fallback_msaa_,
-        tile_resolve_fallback_no_rt_, tile_resolve_fallback_pipeline_);
+        tile_resolve_fallback_no_rt_, tile_resolve_fallback_rt_mismatch_,
+        tile_resolve_fallback_pipeline_);
   }
 
   return true;

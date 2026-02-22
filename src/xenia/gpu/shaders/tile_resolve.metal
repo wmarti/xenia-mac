@@ -11,71 +11,54 @@
 //
 // Runs as a tile dispatch within the current render pass, reading directly from
 // tile memory via implicit imageblocks (render pass color attachments) and
-// writing the resolved color data to guest shared memory.
+// writing the resolved color data to guest shared memory using Xbox 360
+// tiled texture addressing.
 //
 // This avoids breaking the render pass (and the associated tile memory
 // store/reload cost) for color resolves on Apple Silicon.
+//
+// NOTE: This file is a reference copy. The authoritative source is the
+// embedded kTileResolveShaderSource string in tile_resolve_shaders.h, which
+// is compiled at runtime. Changes must be made there.
 
 #include <metal_stdlib>
 using namespace metal;
 
-// Must match draw_util::ResolveCopyShaderConstants layout exactly.
-// We pass only the DestRelative portion (no dest_base) plus dest_base
-// separately for the non-scaled path.
+// Must match XeTileResolveConstants in tile_resolve_shaders.h exactly.
 struct XeTileResolveConstants {
-  // ResolveEdramInfo (packed uint32_t).
   uint edram_info;
-  // ResolveCoordinateInfo (packed uint32_t).
   uint coordinate_info;
-  // RB_COPY_DEST_INFO (packed uint32_t).
   uint dest_info;
-  // ResolveCopyDestCoordinateInfo (packed uint32_t).
   uint dest_coordinate_info;
-  // Destination base address in shared memory (bytes).
   uint dest_base;
-  // Destination endianness (from RB_COPY_DEST_INFO).
   uint dest_endian;
-  // Width of resolve rect in pixels.
   uint resolve_width;
-  // Height of resolve rect in pixels.
   uint resolve_height;
-  // Source render target attachment index (0-3).
   uint src_color_index;
-  // Sample select mode: 0=averaged resolve, 1..4=specific sample.
   uint sample_select;
-  // 1 if the resolve clear should be performed after copy.
   uint do_clear;
-  // Clear color (two uint32s for 64bpp support).
   uint clear_value_lo;
   uint clear_value_hi;
-  // Destination format (xenos::ColorFormat packed).
   uint dest_format;
-  // Pitch of destination in 32-pixel units.
   uint dest_pitch_div_32;
-  // Offset X/Y of destination in 8-pixel units.
   uint dest_offset_x_div_8;
   uint dest_offset_y_div_8;
-  // EDRAM base tiles.
   uint edram_base_tiles;
-  // EDRAM pitch tiles.
   uint edram_pitch_tiles;
-  // Whether the source is 64bpp.
   uint format_is_64bpp;
+  // Source rectangle origin in pixels within the render pass attachment.
+  uint src_x;
+  uint src_y;
 };
 
 // Endian swap a 32-bit value based on Xenos endianness mode.
 static inline uint xe_endian_swap_32(uint value, uint endian) {
-  // Endian modes: 0=none, 1=swap bytes in 16-bit words, 2=swap 16-bit words,
-  // 3=swap both (full byte reversal).
   switch (endian) {
     case 1u:
-      // 8-in-16: swap bytes within each 16-bit half.
       return ((value & 0x00FF00FFu) << 8u) | ((value & 0xFF00FF00u) >> 8u);
     case 2u:
-      // 8-in-32: swap 16-bit halves.
       return ((value & 0x0000FFFFu) << 16u) | ((value >> 16u) & 0x0000FFFFu);
     case 3u:
-      // Full byte reversal.
       return ((value & 0x000000FFu) << 24u) |
              ((value & 0x0000FF00u) << 8u) |
              ((value & 0x00FF0000u) >> 8u) |
@@ -86,9 +69,6 @@ static inline uint xe_endian_swap_32(uint value, uint endian) {
 }
 
 // Pack a float4 color into a 32-bit value for the guest memory destination.
-// Uses xenos::ColorFormat values (from RB_COPY_DEST_INFO.copy_dest_format):
-//   k_8_8_8_8 = 6, k_2_10_10_10 = 7, k_8_8 = 10,
-//   k_16_16 = 25, k_16_16_FLOAT = 31, k_32_FLOAT = 36, etc.
 static inline uint xe_pack_color_32bpp(float4 color, uint format) {
   switch (format) {
     case 6u:    // k_8_8_8_8
@@ -142,70 +122,73 @@ static inline uint xe_pack_color_32bpp(float4 color, uint format) {
       return r | (g << 4u) | (b << 8u) | (a << 12u);
     }
     default: {
-      // Fallback: pack as 8_8_8_8.
       uint4 c = uint4(saturate(color) * 255.0f + 0.5f);
       return c.r | (c.g << 8u) | (c.b << 16u) | (c.a << 24u);
     }
   }
 }
 
+// Xbox 360 Tiled2D address computation, matching texture_address::Tiled2D.
+static inline int xe_tiled_2d_offset(int x, int y, uint pitch_aligned,
+                                     uint bpp_log2) {
+  int outer_blocks =
+      ((y >> 5) * int(pitch_aligned >> 5) + (x >> 5)) << 6;
+  int inner_blocks = (((y >> 1) & 7) << 3) | (x & 7);
+  int outer_inner_bytes = (outer_blocks | inner_blocks) << int(bpp_log2);
+  uint bank = uint(y >> 4) & 1u;
+  uint pipe = (uint(x >> 3) & 3u) ^ ((uint(y >> 3) & 1u) << 1u);
+  uint y_lsb = uint(y) & 1u;
+  return int((y_lsb << 4u) | (pipe << 6u) | (bank << 11u)) |
+         (outer_inner_bytes & 0xF) |
+         (((outer_inner_bytes >> 4) & 1) << 5) |
+         (((outer_inner_bytes >> 5) & 7) << 8) |
+         (outer_inner_bytes >> 8 << 12);
+}
+
 // Compute the destination byte address in guest tiled texture memory.
-// Xbox 360 textures use a tiled memory layout (32x32 pixel tiles for 32bpp).
-static inline uint xe_resolve_dest_address(uint2 pixel, uint pitch_div_32,
+static inline uint xe_resolve_dest_address(uint2 pixel_in_rect,
+                                           uint pitch_div_32,
                                            uint offset_x_div_8,
                                            uint offset_y_div_8,
                                            uint dest_base,
                                            uint bpp_log2) {
-  // Destination pixel coordinates including offset.
-  uint2 dest_pixel = pixel + uint2(offset_x_div_8 * 8u, offset_y_div_8 * 8u);
-  uint pitch = pitch_div_32 * 32u;
-
-  // Simple linear addressing for the resolve destination.
-  // The actual tiling is handled by the shared memory system.
-  uint bytes_per_pixel = 1u << bpp_log2;
-  return dest_base + (dest_pixel.y * pitch + dest_pixel.x) * bytes_per_pixel;
+  int dx = int(pixel_in_rect.x + offset_x_div_8 * 8u);
+  int dy = int(pixel_in_rect.y + offset_y_div_8 * 8u);
+  uint pitch_aligned = pitch_div_32 * 32u;
+  int tiled_offset = xe_tiled_2d_offset(dx, dy, pitch_aligned, bpp_log2);
+  return dest_base + uint(tiled_offset);
 }
 
 // ===== Tile kernel entry points =====
-// One kernel per source color attachment index (0-3).
-// Using implicit imageblocks to read from render pass color attachments.
 
-// Imageblock structure for each color attachment.
 struct TileResolveIB0 { float4 color [[color(0)]]; };
 struct TileResolveIB1 { float4 color [[color(1)]]; };
 struct TileResolveIB2 { float4 color [[color(2)]]; };
 struct TileResolveIB3 { float4 color [[color(3)]]; };
 
-// Tile kernel for resolving color attachment 0.
 kernel void xe_tile_resolve_color0(
     imageblock<TileResolveIB0, imageblock_layout_implicit> img,
     constant XeTileResolveConstants& c [[buffer(0)]],
     device uint* dest [[buffer(1)]],
     ushort2 tid [[thread_position_in_threadgroup]],
     ushort2 tgid [[threadgroup_position_in_grid]]) {
-  // Compute absolute pixel coordinate.
   uint2 pixel = uint2(tgid) * uint2(32u, 32u) + uint2(tid);
-
-  // Early-out if outside the resolve rectangle.
-  if (pixel.x >= c.resolve_width || pixel.y >= c.resolve_height) {
+  if (pixel.x < c.src_x || pixel.y < c.src_y ||
+      pixel.x >= c.src_x + c.resolve_width ||
+      pixel.y >= c.src_y + c.resolve_height) {
     return;
   }
-
-  // Read from tile memory (implicit imageblock).
+  uint2 pixel_in_rect = pixel - uint2(c.src_x, c.src_y);
   auto data = img.read(tid);
   float4 color = data.color;
-
-  // Pack and write to destination.
   uint packed = xe_pack_color_32bpp(color, c.dest_format);
   packed = xe_endian_swap_32(packed, c.dest_endian);
-
   uint addr = xe_resolve_dest_address(
-      pixel, c.dest_pitch_div_32, c.dest_offset_x_div_8,
+      pixel_in_rect, c.dest_pitch_div_32, c.dest_offset_x_div_8,
       c.dest_offset_y_div_8, c.dest_base, 2u);
   dest[addr >> 2u] = packed;
 }
 
-// Tile kernel for resolving color attachment 1.
 kernel void xe_tile_resolve_color1(
     imageblock<TileResolveIB1, imageblock_layout_implicit> img,
     constant XeTileResolveConstants& c [[buffer(0)]],
@@ -213,20 +196,22 @@ kernel void xe_tile_resolve_color1(
     ushort2 tid [[thread_position_in_threadgroup]],
     ushort2 tgid [[threadgroup_position_in_grid]]) {
   uint2 pixel = uint2(tgid) * uint2(32u, 32u) + uint2(tid);
-  if (pixel.x >= c.resolve_width || pixel.y >= c.resolve_height) {
+  if (pixel.x < c.src_x || pixel.y < c.src_y ||
+      pixel.x >= c.src_x + c.resolve_width ||
+      pixel.y >= c.src_y + c.resolve_height) {
     return;
   }
+  uint2 pixel_in_rect = pixel - uint2(c.src_x, c.src_y);
   auto data = img.read(tid);
   float4 color = data.color;
   uint packed = xe_pack_color_32bpp(color, c.dest_format);
   packed = xe_endian_swap_32(packed, c.dest_endian);
   uint addr = xe_resolve_dest_address(
-      pixel, c.dest_pitch_div_32, c.dest_offset_x_div_8,
+      pixel_in_rect, c.dest_pitch_div_32, c.dest_offset_x_div_8,
       c.dest_offset_y_div_8, c.dest_base, 2u);
   dest[addr >> 2u] = packed;
 }
 
-// Tile kernel for resolving color attachment 2.
 kernel void xe_tile_resolve_color2(
     imageblock<TileResolveIB2, imageblock_layout_implicit> img,
     constant XeTileResolveConstants& c [[buffer(0)]],
@@ -234,20 +219,22 @@ kernel void xe_tile_resolve_color2(
     ushort2 tid [[thread_position_in_threadgroup]],
     ushort2 tgid [[threadgroup_position_in_grid]]) {
   uint2 pixel = uint2(tgid) * uint2(32u, 32u) + uint2(tid);
-  if (pixel.x >= c.resolve_width || pixel.y >= c.resolve_height) {
+  if (pixel.x < c.src_x || pixel.y < c.src_y ||
+      pixel.x >= c.src_x + c.resolve_width ||
+      pixel.y >= c.src_y + c.resolve_height) {
     return;
   }
+  uint2 pixel_in_rect = pixel - uint2(c.src_x, c.src_y);
   auto data = img.read(tid);
   float4 color = data.color;
   uint packed = xe_pack_color_32bpp(color, c.dest_format);
   packed = xe_endian_swap_32(packed, c.dest_endian);
   uint addr = xe_resolve_dest_address(
-      pixel, c.dest_pitch_div_32, c.dest_offset_x_div_8,
+      pixel_in_rect, c.dest_pitch_div_32, c.dest_offset_x_div_8,
       c.dest_offset_y_div_8, c.dest_base, 2u);
   dest[addr >> 2u] = packed;
 }
 
-// Tile kernel for resolving color attachment 3.
 kernel void xe_tile_resolve_color3(
     imageblock<TileResolveIB3, imageblock_layout_implicit> img,
     constant XeTileResolveConstants& c [[buffer(0)]],
@@ -255,15 +242,18 @@ kernel void xe_tile_resolve_color3(
     ushort2 tid [[thread_position_in_threadgroup]],
     ushort2 tgid [[threadgroup_position_in_grid]]) {
   uint2 pixel = uint2(tgid) * uint2(32u, 32u) + uint2(tid);
-  if (pixel.x >= c.resolve_width || pixel.y >= c.resolve_height) {
+  if (pixel.x < c.src_x || pixel.y < c.src_y ||
+      pixel.x >= c.src_x + c.resolve_width ||
+      pixel.y >= c.src_y + c.resolve_height) {
     return;
   }
+  uint2 pixel_in_rect = pixel - uint2(c.src_x, c.src_y);
   auto data = img.read(tid);
   float4 color = data.color;
   uint packed = xe_pack_color_32bpp(color, c.dest_format);
   packed = xe_endian_swap_32(packed, c.dest_endian);
   uint addr = xe_resolve_dest_address(
-      pixel, c.dest_pitch_div_32, c.dest_offset_x_div_8,
+      pixel_in_rect, c.dest_pitch_div_32, c.dest_offset_x_div_8,
       c.dest_offset_y_div_8, c.dest_base, 2u);
   dest[addr >> 2u] = packed;
 }

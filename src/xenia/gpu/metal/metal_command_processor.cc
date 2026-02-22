@@ -1291,10 +1291,10 @@ bool MetalCommandProcessor::SetupContext() {
   mesh_shader_supported_ = supports_apple7 || supports_mac2;
 
   // Tile shaders require Apple GPU Family 4+ (A11 and later).
-  // Discrete GPUs (Mac family) do not have tile memory / TBDR.
-  supports_tile_shaders_ =
-      device_->supportsFamily(MTL::GPUFamilyApple4) &&
-      !supports_mac2;
+  // Apple Silicon Macs report both Apple family AND Mac2 support, so we
+  // must NOT exclude Mac2 — the correct gate is simply requiring Apple
+  // family support, which indicates a TBDR architecture with tile memory.
+  supports_tile_shaders_ = device_->supportsFamily(MTL::GPUFamilyApple4);
   XELOGD("Metal TBDR tile shaders: {}",
          supports_tile_shaders_ ? "supported" : "not supported");
 
@@ -5104,7 +5104,11 @@ bool MetalCommandProcessor::IssueCopy() {
       }
 
       // Resolve touched guest memory in a draw-containing submission; commit
-      // now so following packets don't observe stale results.
+      // now so following reads (e.g. texture sampling from shared memory)
+      // observe the resolved data. This breaks the render pass, which
+      // reduces the TBDR benefit. A future optimization could insert
+      // appropriate buffer barriers instead of committing, but that
+      // requires careful hazard tracking of shared memory reads.
 #if METAL_SHADER_CONVERTER_AVAILABLE
       // Need to end encoder before committing.
       EndRenderEncoder();

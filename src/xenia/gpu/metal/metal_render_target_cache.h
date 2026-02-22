@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -284,23 +285,29 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
 
   // ---- TBDR tile resolve pipeline cache (Apple TBDR GPUs only) ----
 
-  // Key for tile resolve pipeline lookup.
+  // Key for tile resolve pipeline lookup. Stores the full attachment format
+  // configuration to avoid hash collisions with partial keys.
   struct TileResolvePipelineKey {
     uint8_t src_color_index;       // 0..3
     uint8_t raster_sample_count;   // 1, 2, or 4
-    uint64_t color_format_hash;    // Hash of color attachment pixel formats
+    uint16_t color_formats[4];     // MTL::PixelFormat truncated to 16 bits
+    uint16_t depth_format;         // Depth/stencil pixel format
+
+    TileResolvePipelineKey() { memset(this, 0, sizeof(*this)); }
 
     bool operator==(const TileResolvePipelineKey& other) const {
-      return src_color_index == other.src_color_index &&
-             raster_sample_count == other.raster_sample_count &&
-             color_format_hash == other.color_format_hash;
+      return memcmp(this, &other, sizeof(*this)) == 0;
     }
 
     struct Hasher {
       size_t operator()(const TileResolvePipelineKey& key) const {
-        size_t h = size_t(key.src_color_index);
-        h ^= size_t(key.raster_sample_count) << 8;
-        h ^= size_t(key.color_format_hash) * 0x9E3779B97F4A7C15ULL;
+        // FNV-1a over the raw bytes of the key.
+        size_t h = 0xcbf29ce484222325ULL;
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&key);
+        for (size_t i = 0; i < sizeof(key); ++i) {
+          h ^= size_t(p[i]);
+          h *= 0x100000001b3ULL;
+        }
         return h;
       }
     };
@@ -331,6 +338,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   uint64_t tile_resolve_fallback_64bpp_ = 0;
   uint64_t tile_resolve_fallback_msaa_ = 0;
   uint64_t tile_resolve_fallback_no_rt_ = 0;
+  uint64_t tile_resolve_fallback_rt_mismatch_ = 0;
   uint64_t tile_resolve_fallback_pipeline_ = 0;
 
   // Transfer shaders (host RT ownership transfers) - modeled after D3D12.
