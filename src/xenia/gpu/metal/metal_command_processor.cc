@@ -1290,6 +1290,14 @@ bool MetalCommandProcessor::SetupContext() {
   bool supports_mac2 = device_->supportsFamily(MTL::GPUFamilyMac2);
   mesh_shader_supported_ = supports_apple7 || supports_mac2;
 
+  // Tile shaders require Apple GPU Family 4+ (A11 and later).
+  // Discrete GPUs (Mac family) do not have tile memory / TBDR.
+  supports_tile_shaders_ =
+      device_->supportsFamily(MTL::GPUFamilyApple4) &&
+      !supports_mac2;
+  XELOGD("Metal TBDR tile shaders: {}",
+         supports_tile_shaders_ ? "supported" : "not supported");
+
   draw_ring_count_ = std::max<int32_t>(1, ::cvars::metal_draw_ring_count);
 #if XE_PLATFORM_IOS && !METAL_SHADER_CONVERTER_AVAILABLE
   // On iOS SPIRV-Cross path, very large per-command-buffer ring sizes can keep
@@ -5064,6 +5072,70 @@ bool MetalCommandProcessor::IssueDrawMsl(
 }
 
 bool MetalCommandProcessor::IssueCopy() {
+  if (!render_target_cache_) {
+    XELOGW("MetalCommandProcessor::IssueCopy - No render target cache");
+    return true;
+  }
+
+  uint32_t written_address = 0;
+  uint32_t written_length = 0;
+
+  // Try TBDR tile resolve first: resolve inline within the current render pass
+  // without ending the encoder. This avoids the costly tile memory
+  // store/reload cycle on Apple Silicon GPUs.
+  if (current_render_encoder_ &&
+      render_target_cache_->IsTileResolveEnabled()) {
+    if (render_target_cache_->ResolveInCurrentPassTileShader(
+            *memory_, written_address, written_length)) {
+      // Tile resolve succeeded - skip the encoder break entirely.
+      if (!written_length) {
+        return true;  // No-op resolve.
+      }
+      MarkResolvedMemory(written_address, written_length);
+
+      // Copy-only resolve bursts stay open for coalescing.
+      if (current_draw_index_ == 0
+#if METAL_SHADER_CONVERTER_AVAILABLE
+          && command_buffer_draw_rings_.empty()
+#endif
+      ) {
+        copy_resolve_writes_pending_ = true;
+        return true;
+      }
+
+      // Resolve touched guest memory in a draw-containing submission; commit
+      // now so following packets don't observe stale results.
+#if METAL_SHADER_CONVERTER_AVAILABLE
+      // Need to end encoder before committing.
+      EndRenderEncoder();
+      MTL::CommandBuffer* cmd = current_command_buffer_;
+      if (cmd) {
+        ScheduleDrawRingRelease(cmd);
+        cmd->commit();
+        cmd->release();
+        current_command_buffer_ = nullptr;
+        SetActiveDrawRing(nullptr);
+      }
+#else
+      EndRenderEncoder();
+      MTL::CommandBuffer* cmd = current_command_buffer_;
+      if (cmd) {
+        if (UseSpirvCrossPath()) {
+          ScheduleSpirvUniformBufferRelease(cmd);
+        }
+        cmd->commit();
+        cmd->release();
+        current_command_buffer_ = nullptr;
+      }
+#endif
+      current_draw_index_ = 0;
+      copy_resolve_writes_pending_ = false;
+      return true;
+    }
+    // Tile resolve declined (unsupported config) - fall through to compute
+    // resolve.
+  }
+
   // Finish any in-flight rendering so render target contents are visible to
   // resolve logic.
   EndRenderEncoder();
@@ -5072,14 +5144,6 @@ bool MetalCommandProcessor::IssueCopy() {
     XELOGE("MetalCommandProcessor::IssueCopy: failed to get command buffer");
     return false;
   }
-
-  if (!render_target_cache_) {
-    XELOGW("MetalCommandProcessor::IssueCopy - No render target cache");
-    return true;
-  }
-
-  uint32_t written_address = 0;
-  uint32_t written_length = 0;
 
   if (!render_target_cache_->Resolve(*memory_, written_address, written_length,
                                      copy_command_buffer)) {

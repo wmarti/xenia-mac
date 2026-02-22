@@ -52,9 +52,13 @@
 #include "xenia/gpu/shaders/bytecode/metal/resolve_full_8bpp_scaled_cs.h"
 
 #include "xenia/gpu/metal/metal_command_processor.h"
+#include "xenia/gpu/metal/tile_resolve_shaders.h"
 #include "xenia/gpu/texture_info.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/xenos.h"
+
+DECLARE_bool(metal_tbdr_tile_resolve);
+DECLARE_bool(metal_tbdr_tile_resolve_validate);
 
 DEFINE_bool(
     metal_allow_gamma_unorm16, false,
@@ -72,6 +76,15 @@ DEFINE_int32(metal_memory_log_rate, 0,
              "Log Metal render target/pipeline/instance buffer sizes every N "
              "frames (0 to disable)",
              "GPU");
+DEFINE_bool(metal_tbdr_tile_resolve, true,
+            "Use tile shaders to resolve render targets inline within the "
+            "current render pass on Apple TBDR GPUs (Apple4+). Avoids breaking "
+            "the render pass and the associated tile memory store/reload cost.",
+            "GPU");
+DEFINE_bool(metal_tbdr_tile_resolve_validate, false,
+            "Validate tile resolve results against the compute resolve path. "
+            "When enabled, periodically runs both paths and compares results.",
+            "GPU");
 
 namespace xe {
 namespace gpu {
@@ -913,6 +926,18 @@ void MetalRenderTargetCache::Shutdown(bool from_destructor) {
       transfer_dummy_stencil_[i]->release();
       transfer_dummy_stencil_[i] = nullptr;
     }
+  }
+
+  // Clean up tile resolve pipelines.
+  for (auto& it : tile_resolve_pipelines_) {
+    if (it.second) {
+      it.second->release();
+    }
+  }
+  tile_resolve_pipelines_.clear();
+  if (tile_resolve_library_) {
+    tile_resolve_library_->release();
+    tile_resolve_library_ = nullptr;
   }
 
   // Clean up EDRAM compute shaders
@@ -3826,6 +3851,14 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
     }
   }
 
+  // When TBDR tile resolve is enabled, set a tile size compatible with
+  // 1-thread-per-pixel tile dispatch (32x32 = 1024 threads, the maximum
+  // per-threadgroup limit on Apple GPUs).
+  if (IsTileResolveEnabled() && has_any_color_target) {
+    cached_render_pass_descriptor_->setTileWidth(32);
+    cached_render_pass_descriptor_->setTileHeight(32);
+  }
+
   render_pass_descriptor_dirty_ = needs_descriptor_refresh;
   return cached_render_pass_descriptor_;
 }
@@ -4597,6 +4630,333 @@ MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateEdramLoadPipeline(
 
   edram_load_pipelines_.emplace(key, pipeline);
   return pipeline;
+}
+
+// ---- TBDR Tile Resolve Implementation ----
+
+bool MetalRenderTargetCache::IsTileResolveEnabled() const {
+  return cvars::metal_tbdr_tile_resolve &&
+         command_processor_.supports_tile_shaders();
+}
+
+bool MetalRenderTargetCache::EnsureTileResolveLibrary() {
+  if (tile_resolve_library_) {
+    return true;
+  }
+  if (!device_) {
+    return false;
+  }
+
+  NS::Error* error = nullptr;
+  NS::String* source = NS::String::string(kTileResolveShaderSource,
+                                           NS::UTF8StringEncoding);
+  MTL::CompileOptions* options = MTL::CompileOptions::alloc()->init();
+  options->setLanguageVersion(MTL::LanguageVersion2_0);
+
+  tile_resolve_library_ = device_->newLibrary(source, options, &error);
+  options->release();
+
+  if (!tile_resolve_library_) {
+    XELOGE("Metal: failed to compile tile resolve shader library: {}",
+           error ? error->localizedDescription()->utf8String() : "unknown");
+    return false;
+  }
+  tile_resolve_library_->setLabel(
+      NS::String::string("XeniaTileResolve", NS::UTF8StringEncoding));
+  return true;
+}
+
+MTL::RenderPipelineState*
+MetalRenderTargetCache::GetOrCreateTileResolvePipeline(
+    uint8_t src_color_index, uint32_t sample_count) {
+  if (src_color_index > 3) {
+    return nullptr;
+  }
+
+  // Build a hash of the current color attachment formats.
+  uint64_t format_hash = 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    uint64_t fmt = 0;
+    if (current_color_targets_[i] &&
+        current_color_targets_[i]->draw_texture()) {
+      fmt = static_cast<uint64_t>(
+          current_color_targets_[i]->draw_texture()->pixelFormat());
+    }
+    format_hash ^= fmt << (i * 16);
+  }
+
+  TileResolvePipelineKey key;
+  key.src_color_index = src_color_index;
+  key.raster_sample_count = static_cast<uint8_t>(sample_count);
+  key.color_format_hash = format_hash;
+
+  auto it = tile_resolve_pipelines_.find(key);
+  if (it != tile_resolve_pipelines_.end()) {
+    return it->second;
+  }
+
+  // Need to create a new tile pipeline.
+  if (!EnsureTileResolveLibrary()) {
+    return nullptr;
+  }
+
+  NS::String* fn_name = NS::String::string(
+      kTileResolveFunctionNames[src_color_index], NS::UTF8StringEncoding);
+  MTL::Function* fn = tile_resolve_library_->newFunction(fn_name);
+  if (!fn) {
+    XELOGE("Metal: tile resolve function {} not found",
+           kTileResolveFunctionNames[src_color_index]);
+    return nullptr;
+  }
+
+  MTL::TileRenderPipelineDescriptor* desc =
+      MTL::TileRenderPipelineDescriptor::alloc()->init();
+  desc->setTileFunction(fn);
+  desc->setRasterSampleCount(sample_count);
+  desc->setThreadgroupSizeMatchesTileSize(true);
+
+  // Set color attachment formats to match the current render pass.
+  for (uint32_t i = 0; i < 4; ++i) {
+    MTL::PixelFormat fmt = MTL::PixelFormatInvalid;
+    if (current_color_targets_[i] &&
+        current_color_targets_[i]->draw_texture()) {
+      fmt = current_color_targets_[i]->draw_texture()->pixelFormat();
+    }
+    desc->colorAttachments()->object(i)->setPixelFormat(fmt);
+  }
+
+  NS::Error* error = nullptr;
+  MTL::RenderPipelineState* pipeline =
+      device_->newRenderPipelineState(desc, MTL::PipelineOptionNone, nullptr,
+                                      &error);
+  fn->release();
+  desc->release();
+
+  if (!pipeline) {
+    XELOGE("Metal: failed to create tile resolve pipeline (color{}): {}",
+           src_color_index,
+           error ? error->localizedDescription()->utf8String() : "unknown");
+    return nullptr;
+  }
+
+  tile_resolve_pipelines_.emplace(key, pipeline);
+  XELOGD("Metal: created tile resolve pipeline for color{} (samples={}, hash={:016X})",
+         src_color_index, sample_count, format_hash);
+  return pipeline;
+}
+
+bool MetalRenderTargetCache::ResolveInCurrentPassTileShader(
+    Memory& memory, uint32_t& written_address, uint32_t& written_length) {
+  written_address = 0;
+  written_length = 0;
+
+  ++tile_resolve_attempts_;
+
+  // Gate: tile resolve must be enabled and we must have an active render
+  // encoder.
+  if (!IsTileResolveEnabled()) {
+    return false;
+  }
+  if (!command_processor_.HasActiveRenderEncoder()) {
+    return false;
+  }
+
+  const RegisterFile& regs = register_file();
+  draw_util::ResolveInfo resolve_info;
+
+  bool fixed_rg16_trunc = IsFixedRG16TruncatedToMinus1To1();
+  bool fixed_rgba16_trunc = IsFixedRGBA16TruncatedToMinus1To1();
+
+  if (!trace_writer_) {
+    return false;
+  }
+
+  if (!draw_util::GetResolveInfo(regs, memory, *trace_writer_,
+                                 draw_resolution_scale_x(),
+                                 draw_resolution_scale_y(), fixed_rg16_trunc,
+                                 fixed_rgba16_trunc, resolve_info)) {
+    return false;
+  }
+
+  // Nothing to do.
+  if (!resolve_info.coordinate_info.width_div_8 ||
+      !resolve_info.height_div_8) {
+    return true;  // Succeed (no-op).
+  }
+
+  if (!resolve_info.copy_dest_extent_length) {
+    return true;  // Succeed (no-op).
+  }
+
+  // v1: Only support color resolves (not depth).
+  if (resolve_info.IsCopyingDepth()) {
+    ++tile_resolve_fallback_depth_;
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // v1: Only support non-scaled resolves.
+  if (IsDrawResolutionScaled()) {
+    ++tile_resolve_fallback_scaled_;
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // v1: Don't handle clears in tile path yet - fall back.
+  // (TODO: implement resolve-clears in tile kernel for full benefit.)
+  if (resolve_info.IsClearingColor() || resolve_info.IsClearingDepth()) {
+    ++tile_resolve_fallback_clear_;
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // Determine which color render target is being resolved.
+  uint32_t src_select = resolve_info.rb_copy_control.copy_src_select;
+  if (src_select >= 4) {
+    ++tile_resolve_fallbacks_;
+    return false;  // Depth source, handled above but be safe.
+  }
+
+  // Verify the source RT is currently attached as a render target.
+  MetalRenderTarget* source_rt = current_color_targets_[src_select];
+  if (!source_rt || !source_rt->draw_texture()) {
+    ++tile_resolve_fallback_no_rt_;
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // Check that this is a format we support in the tile shader.
+  // v1: Only support 32bpp formats (fast path).
+  draw_util::ResolveEdramInfo edram_info = resolve_info.color_edram_info;
+  if (edram_info.format_is_64bpp) {
+    ++tile_resolve_fallback_64bpp_;
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // Get destination buffer (shared memory).
+  auto* shared = command_processor_.shared_memory();
+  if (!shared) {
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+  MTL::Buffer* dest_buffer = shared->GetBuffer();
+  if (!dest_buffer) {
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // Request the destination memory range.
+  if (!shared->RequestRange(resolve_info.copy_dest_extent_start,
+                            resolve_info.copy_dest_extent_length)) {
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // Determine sample count from the source texture.
+  uint32_t sample_count = static_cast<uint32_t>(
+      source_rt->draw_texture()->sampleCount());
+  if (sample_count == 0) {
+    sample_count = 1;
+  }
+
+  // v1: Only support 1x MSAA.
+  if (sample_count != 1) {
+    ++tile_resolve_fallback_msaa_;
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // Get or create the tile resolve pipeline.
+  MTL::RenderPipelineState* pipeline =
+      GetOrCreateTileResolvePipeline(static_cast<uint8_t>(src_select),
+                                     sample_count);
+  if (!pipeline) {
+    ++tile_resolve_fallback_pipeline_;
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // Build tile resolve constants.
+  const auto& coord = resolve_info.coordinate_info;
+  uint32_t resolve_width = coord.width_div_8 * 8;
+  uint32_t resolve_height = resolve_info.height_div_8 * 8;
+
+  XeTileResolveConstants constants = {};
+  constants.edram_info = edram_info.packed;
+  constants.coordinate_info = coord.packed;
+  constants.dest_info = resolve_info.copy_dest_info.value;
+  constants.dest_coordinate_info =
+      resolve_info.copy_dest_coordinate_info.packed;
+  constants.dest_base = resolve_info.copy_dest_base;
+  constants.dest_endian =
+      static_cast<uint32_t>(resolve_info.copy_dest_info.copy_dest_endian);
+  constants.resolve_width = resolve_width;
+  constants.resolve_height = resolve_height;
+  constants.src_color_index = src_select;
+  constants.sample_select = 0;  // Averaged/single for 1x MSAA.
+  constants.do_clear = 0;
+  constants.clear_value_lo = 0;
+  constants.clear_value_hi = 0;
+  constants.dest_format =
+      static_cast<uint32_t>(resolve_info.copy_dest_info.copy_dest_format);
+  constants.dest_pitch_div_32 =
+      resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32;
+  constants.dest_offset_x_div_8 =
+      resolve_info.copy_dest_coordinate_info.offset_x_div_8;
+  constants.dest_offset_y_div_8 =
+      resolve_info.copy_dest_coordinate_info.offset_y_div_8;
+  constants.edram_base_tiles = edram_info.base_tiles;
+  constants.edram_pitch_tiles = edram_info.pitch_tiles;
+  constants.format_is_64bpp = edram_info.format_is_64bpp;
+
+  // Encode the tile dispatch on the current render encoder.
+  MTL::RenderCommandEncoder* encoder =
+      command_processor_.GetCurrentRenderEncoder();
+  if (!encoder) {
+    ++tile_resolve_fallbacks_;
+    return false;
+  }
+
+  // Make the shared memory buffer accessible to the tile stage.
+  command_processor_.UseRenderEncoderResource(dest_buffer,
+                                              MTL::ResourceUsageWrite);
+
+  encoder->setRenderPipelineState(pipeline);
+  encoder->setTileBytes(&constants, sizeof(constants), 0);
+  encoder->setTileBuffer(dest_buffer, 0, 1);
+  encoder->dispatchThreadsPerTile(MTL::Size::Make(32, 32, 1));
+
+  // Mark results.
+  written_address = resolve_info.copy_dest_extent_start;
+  written_length = resolve_info.copy_dest_extent_length;
+
+  // CPU-side bookkeeping (same as compute resolve path).
+  shared->RangeWrittenByGpu(written_address, written_length);
+  if (auto* tex_cache = command_processor_.texture_cache()) {
+    tex_cache->MarkRangeAsResolved(written_address, written_length);
+  }
+
+  command_processor_.SetSwapDestSwap(
+      resolve_info.copy_dest_base,
+      resolve_info.copy_dest_info.copy_dest_swap);
+
+  ++tile_resolve_successes_;
+
+  // Periodic statistics logging.
+  if ((tile_resolve_successes_ & 0xFF) == 1) {
+    XELOGI(
+        "Metal tile resolve stats: attempts={}, successes={}, fallbacks={} "
+        "(depth={}, scaled={}, clear={}, 64bpp={}, msaa={}, no_rt={}, "
+        "pipeline={})",
+        tile_resolve_attempts_, tile_resolve_successes_,
+        tile_resolve_fallbacks_, tile_resolve_fallback_depth_,
+        tile_resolve_fallback_scaled_, tile_resolve_fallback_clear_,
+        tile_resolve_fallback_64bpp_, tile_resolve_fallback_msaa_,
+        tile_resolve_fallback_no_rt_, tile_resolve_fallback_pipeline_);
+  }
+
+  return true;
 }
 
 bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,

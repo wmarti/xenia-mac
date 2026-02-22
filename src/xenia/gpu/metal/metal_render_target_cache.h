@@ -190,6 +190,17 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
                uint32_t& written_length,
                MTL::CommandBuffer* command_buffer = nullptr);
 
+  // Attempt to resolve the current render target using a tile shader dispatch
+  // within the active render pass (Apple TBDR only). Returns true if the
+  // resolve was performed inline; false if the caller should fall back to the
+  // normal compute resolve path (which requires ending the render encoder).
+  bool ResolveInCurrentPassTileShader(Memory& memory,
+                                      uint32_t& written_address,
+                                      uint32_t& written_length);
+
+  // Whether TBDR tile resolve is available and enabled.
+  bool IsTileResolveEnabled() const;
+
  protected:
   // Virtual methods from RenderTargetCache
   uint32_t GetMaxRenderTargetWidth() const override;
@@ -270,6 +281,57 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
 
   // Host depth store compute shaders (1x/2x/4x MSAA).
   MTL::ComputePipelineState* host_depth_store_pipelines_[3] = {};
+
+  // ---- TBDR tile resolve pipeline cache (Apple TBDR GPUs only) ----
+
+  // Key for tile resolve pipeline lookup.
+  struct TileResolvePipelineKey {
+    uint8_t src_color_index;       // 0..3
+    uint8_t raster_sample_count;   // 1, 2, or 4
+    uint64_t color_format_hash;    // Hash of color attachment pixel formats
+
+    bool operator==(const TileResolvePipelineKey& other) const {
+      return src_color_index == other.src_color_index &&
+             raster_sample_count == other.raster_sample_count &&
+             color_format_hash == other.color_format_hash;
+    }
+
+    struct Hasher {
+      size_t operator()(const TileResolvePipelineKey& key) const {
+        size_t h = size_t(key.src_color_index);
+        h ^= size_t(key.raster_sample_count) << 8;
+        h ^= size_t(key.color_format_hash) * 0x9E3779B97F4A7C15ULL;
+        return h;
+      }
+    };
+  };
+
+  // Compiled tile resolve library (from runtime MSL compilation).
+  MTL::Library* tile_resolve_library_ = nullptr;
+
+  // Cached tile render pipeline states keyed by attachment configuration.
+  std::unordered_map<TileResolvePipelineKey, MTL::RenderPipelineState*,
+                     TileResolvePipelineKey::Hasher>
+      tile_resolve_pipelines_;
+
+  // Get or create a tile resolve pipeline for the current render pass config.
+  MTL::RenderPipelineState* GetOrCreateTileResolvePipeline(
+      uint8_t src_color_index, uint32_t sample_count);
+
+  // Ensure the tile resolve shader library is compiled.
+  bool EnsureTileResolveLibrary();
+
+  // ---- Tile resolve statistics (for debugging / validation) ----
+  uint64_t tile_resolve_attempts_ = 0;
+  uint64_t tile_resolve_successes_ = 0;
+  uint64_t tile_resolve_fallbacks_ = 0;
+  uint64_t tile_resolve_fallback_depth_ = 0;
+  uint64_t tile_resolve_fallback_scaled_ = 0;
+  uint64_t tile_resolve_fallback_clear_ = 0;
+  uint64_t tile_resolve_fallback_64bpp_ = 0;
+  uint64_t tile_resolve_fallback_msaa_ = 0;
+  uint64_t tile_resolve_fallback_no_rt_ = 0;
+  uint64_t tile_resolve_fallback_pipeline_ = 0;
 
   // Transfer shaders (host RT ownership transfers) - modeled after D3D12.
 

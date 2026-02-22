@@ -93,7 +93,11 @@ class MetalCommandProcessor : public CommandProcessor {
     return current_command_buffer_;
   }
   bool HasActiveRenderEncoder() const { return current_render_encoder_ != nullptr; }
+  MTL::RenderCommandEncoder* GetCurrentRenderEncoder() const {
+    return current_render_encoder_;
+  }
   uint32_t current_draw_index() const { return current_draw_index_; }
+  bool supports_tile_shaders() const { return supports_tile_shaders_; }
   uint64_t GetCurrentSubmission() const;
   uint64_t GetCompletedSubmission() const;
   MTL::CommandBuffer* EnsureCommandBuffer();
@@ -420,6 +424,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // to avoid redundant driver calls across draws within the same encoder.
   std::unordered_map<MTL::Resource*, uint32_t> render_encoder_resource_usage_;
   std::unordered_set<MTL::Heap*> render_encoder_heap_usage_;
+
+  // TBDR tile shader support (Apple GPU Family 4+).
+  bool supports_tile_shaders_ = false;
 
   // Shared memory for Xbox 360 memory access
   std::unique_ptr<MetalSharedMemory> shared_memory_;
