@@ -1356,6 +1356,8 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 - (void)inGameLiveLogTapped:(UIButton*)sender;
 - (void)exitGameTapped:(UIButton*)sender;
 - (void)hideInGameMenuOverlay;
+- (NSString*)launchURLStringForGamePath:(const std::filesystem::path&)game_path;
+- (BOOL)handleIncomingURL:(NSURL*)url;
 @end
 
 @implementation XeniaViewController {
@@ -2459,6 +2461,20 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   }
 }
 
+- (NSString*)launchURLStringForGamePath:(const std::filesystem::path&)game_path {
+  NSString* path_ns = ToNSString(game_path.string());
+  if (!path_ns.length) {
+    return nil;
+  }
+
+  // URL contract: xenia-edge://launch?path=/absolute/path/to/game.iso
+  NSURLComponents* components = [[NSURLComponents alloc] init];
+  components.scheme = @"xenia-edge";
+  components.host = @"launch";
+  components.queryItems = @[ [NSURLQueryItem queryItemWithName:@"path" value:path_ns] ];
+  return components.URL.absoluteString;
+}
+
 #pragma mark - UICollectionViewDataSource
 
 - (NSInteger)collectionView:(UICollectionView* __unused)collectionView
@@ -2507,6 +2523,50 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
   }
   const IOSDiscoveredGame& game = discovered_games_[static_cast<size_t>(indexPath.item)];
   [self launchGameAtPath:game.path displayName:ToNSString(game.title)];
+}
+
+- (UIContextMenuConfiguration*)collectionView:(UICollectionView* __unused)collectionView
+    contextMenuConfigurationForItemAtIndexPath:(NSIndexPath*)indexPath
+                                         point:(CGPoint)__unused point {
+  if (indexPath.item < 0 || static_cast<size_t>(indexPath.item) >= discovered_games_.size()) {
+    return nil;
+  }
+
+  const IOSDiscoveredGame& game = discovered_games_[static_cast<size_t>(indexPath.item)];
+  NSString* display_name =
+      game.title.empty() ? ToNSString(game.path.stem().string()) : ToNSString(game.title);
+  NSString* game_path_string = ToNSString(game.path.string());
+  NSString* launch_url = [self launchURLStringForGamePath:game.path];
+  if (!launch_url.length || !game_path_string.length) {
+    return nil;
+  }
+
+  UIAction* copy_url_action = [UIAction
+      actionWithTitle:@"Copy Launch URL"
+                image:[UIImage systemImageNamed:@"link"]
+           identifier:nil
+              handler:^(__unused UIAction* action) {
+                [UIPasteboard generalPasteboard].string = launch_url;
+                self.statusLabel.text =
+                    [NSString stringWithFormat:@"Copied launch URL for %@.", display_name];
+              }];
+
+  UIAction* launch_action = [UIAction
+      actionWithTitle:@"Launch"
+                image:[UIImage systemImageNamed:@"play.fill"]
+           identifier:nil
+              handler:^(__unused UIAction* action) {
+                std::filesystem::path game_path([game_path_string UTF8String]);
+                [self launchGameAtPath:game_path displayName:display_name];
+              }];
+
+  return [UIContextMenuConfiguration
+      configurationWithIdentifier:nil
+                  previewProvider:nil
+                   actionProvider:^UIMenu*(__unused NSArray<UIMenuElement*>* suggestedActions) {
+                     return [UIMenu menuWithTitle:display_name
+                                         children:@[ copy_url_action, launch_action ]];
+                   }];
 }
 
 #pragma mark - UICollectionViewDelegateFlowLayout
@@ -2622,6 +2682,89 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController* __unused)controller {
   XELOGI("iOS: Document picker cancelled");
+}
+
+- (BOOL)handleIncomingURL:(NSURL*)url {
+  if (!url) {
+    return NO;
+  }
+
+  NSURL* source_url = nil;
+  if (url.isFileURL) {
+    source_url = url;
+  } else {
+    NSString* scheme = url.scheme.lowercaseString;
+    NSSet<NSString*>* allowed_schemes =
+        [NSSet setWithObjects:@"xenia-edge", @"xeniaedge", @"xenia", nil];
+    if (![allowed_schemes containsObject:scheme]) {
+      return NO;
+    }
+
+    NSURLComponents* components =
+        [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    NSString* path_or_url = nil;
+    for (NSURLQueryItem* item in components.queryItems) {
+      NSString* key = item.name.lowercaseString;
+      if ([key isEqualToString:@"url"] || [key isEqualToString:@"file"] ||
+          [key isEqualToString:@"path"] || [key isEqualToString:@"game"]) {
+        path_or_url = item.value;
+        if (path_or_url.length) {
+          break;
+        }
+      }
+    }
+
+    if (path_or_url.length) {
+      NSURL* parsed = [NSURL URLWithString:path_or_url];
+      if (parsed.isFileURL) {
+        source_url = parsed;
+      } else if ([path_or_url hasPrefix:@"/"]) {
+        source_url = [NSURL fileURLWithPath:path_or_url];
+      }
+    } else if (url.path.length > 0 && [url.path hasPrefix:@"/"]) {
+      // Allow xenia-edge:///absolute/path/to/game.iso style links.
+      source_url = [NSURL fileURLWithPath:url.path];
+    }
+  }
+
+  if (!source_url) {
+    XELOGW("iOS: Received URL but no importable file path was found: {}",
+           url.absoluteString.UTF8String);
+    return NO;
+  }
+
+  BOOL access_granted = [source_url startAccessingSecurityScopedResource];
+  XELOGI("iOS: Handling incoming game URL: {} (security-scoped: {})",
+         source_url.path.UTF8String, access_granted ? "yes" : "no");
+
+  NSError* import_error = nil;
+  std::filesystem::path imported_path = [self importGameIntoLibrary:source_url error:&import_error];
+  if (access_granted) {
+    [source_url stopAccessingSecurityScopedResource];
+  }
+
+  if (imported_path.empty()) {
+    NSString* message = import_error.localizedDescription ?: @"Failed to import linked game.";
+    UIAlertController* alert =
+        [UIAlertController alertControllerWithTitle:@"Import Failed"
+                                            message:message
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+    return YES;
+  }
+
+  [self refreshImportedGames];
+  NSString* imported_name = ToNSString(imported_path.filename().string());
+  if (self.jitAcquired) {
+    [self launchGameAtPath:imported_path displayName:imported_name];
+  } else {
+    self.statusLabel.text =
+        [NSString stringWithFormat:@"Imported %@. Waiting for JIT.", imported_name];
+  }
+  return YES;
 }
 
 #pragma mark - Status bar / home indicator
@@ -2807,6 +2950,13 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
     vc.appContext->LaunchGame(std::string());
   }
 
+  NSURL* launch_url = launchOptions[UIApplicationLaunchOptionsURLKey];
+  if (launch_url) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [vc handleIncomingURL:launch_url];
+    });
+  }
+
   XELOGI("iOS: Application launched successfully");
   return YES;
 }
@@ -2818,6 +2968,16 @@ typedef void (^IOSChoiceSelectionHandler)(int64_t value);
     return [root supportedInterfaceOrientations];
   }
   return UIInterfaceOrientationMaskPortrait;
+}
+
+- (BOOL)application:(UIApplication* __unused)application
+            openURL:(NSURL*)url
+            options:(NSDictionary<UIApplicationOpenURLOptionsKey, id>*)__unused options {
+  UIViewController* root = self.window.rootViewController;
+  if (![root isKindOfClass:[XeniaViewController class]]) {
+    return NO;
+  }
+  return [(XeniaViewController*)root handleIncomingURL:url];
 }
 
 - (void)applicationWillTerminate:(UIApplication*)application {
