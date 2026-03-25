@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-13 # This explicitly forces an Intel Mac! No more ARM64 errors!
+    runs-on: macos-12 # This explicitly forces an Intel Mac! No more ARM64 errors!
 
     steps:
     - name: Checkout Code
