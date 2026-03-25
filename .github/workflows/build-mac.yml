@@ -1,0 +1,30 @@
+name: Build Xenia Mac
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "fix-metal-text-swizzle" ]
+
+jobs:
+  build:
+    runs-on: macos-13 # This explicitly forces an Intel Mac! No more ARM64 errors!
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Dependencies
+      run: |
+        brew install sdl2
+
+    - name: Setup & Build Xenia
+      run: |
+        python3 xenia-build.py setup
+        python3 xenia-build.py build
+
+    - name: Upload Compiled App
+      uses: actions/upload-artifact@v4
+      with:
+        name: Xenia-Canary-Mac-App
+        path: build/bin/
