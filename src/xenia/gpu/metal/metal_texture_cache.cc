@@ -2929,7 +2929,7 @@ std::unique_ptr<TextureCache::Texture> MetalTextureCache::CreateTexture(
   }
 
   MTL::TextureSwizzleChannels metal_swizzle =
-      ToMetalTextureSwizzle(xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA);
+      ToMetalTextureSwizzle(GetHostFormatSwizzle(key));
 
   MTL::Texture* metal_texture = nullptr;
   uint32_t width = key.GetWidth();
