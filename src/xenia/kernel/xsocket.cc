@@ -9,6 +9,7 @@
 
 #include "src/xenia/kernel/xsocket.h"
 
+#include <cerrno>
 #include <cstring>
 
 #include "xenia/base/logging.h"
@@ -170,21 +171,26 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
     return X_STATUS_UNSUCCESSFUL;
   }
   return X_STATUS_SUCCESS;
-#elif XE_PLATFORM_LINUX
-  int native_cmd = cmd;
-
-  assert_false(!supported_controls.contains(cmd));
-
-  if (supported_controls.contains(cmd)) {
-    native_cmd = supported_controls.at(cmd);
+#else
+  // POSIX (Linux and macOS). The guest argument is a big-endian u_long, so it
+  // can't be handed to ioctl directly. Previously macOS had no branch at all,
+  // so FIONBIO never took effect: sockets stayed blocking and a guest
+  // recvfrom() poll (Gears of War 3's system-link discovery) could block the
+  // main thread forever.
+  auto it = supported_controls.find(cmd);
+  if (it == supported_controls.end()) {
+    XELOGE("XSocket::IOControl: unsupported command {:08X}", cmd);
+    return X_STATUS_UNSUCCESSFUL;
   }
-
-  int ret = ioctl(native_handle_, native_cmd, arg_ptr);
-
+  auto* guest_arg = reinterpret_cast<xe::be<uint32_t>*>(arg_ptr);
+  int value = guest_arg ? int(uint32_t(*guest_arg)) : 0;
+  int ret = ioctl(native_handle_, it->second, &value);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
-
+  if (it->second == FIONREAD && guest_arg) {
+    *guest_arg = uint32_t(value);
+  }
   return X_STATUS_SUCCESS;
 #endif
 }
@@ -366,8 +372,63 @@ uint32_t XSocket::GetLastWSAError() const {
   // Xbox error codes might not match with what we receive from OS
 #ifdef XE_PLATFORM_WIN32
   return WSAGetLastError();
+#else
+  // Titles compare against WinSock codes (e.g. polling a non-blocking socket
+  // until it stops returning WSAEWOULDBLOCK), so translate POSIX errno.
+  switch (errno) {
+    case EAGAIN:
+#if EWOULDBLOCK != EAGAIN
+    case EWOULDBLOCK:
 #endif
-  return errno;
+      return 10035;  // WSAEWOULDBLOCK
+    case EINPROGRESS:
+      return 10036;  // WSAEINPROGRESS
+    case EALREADY:
+      return 10037;  // WSAEALREADY
+    case ENOTSOCK:
+      return 10038;  // WSAENOTSOCK
+    case EDESTADDRREQ:
+      return 10039;  // WSAEDESTADDRREQ
+    case EMSGSIZE:
+      return 10040;  // WSAEMSGSIZE
+    case EADDRINUSE:
+      return 10048;  // WSAEADDRINUSE
+    case EADDRNOTAVAIL:
+      return 10049;  // WSAEADDRNOTAVAIL
+    case ENETDOWN:
+      return 10050;  // WSAENETDOWN
+    case ENETUNREACH:
+      return 10051;  // WSAENETUNREACH
+    case ECONNABORTED:
+      return 10053;  // WSAECONNABORTED
+    case ECONNRESET:
+      return 10054;  // WSAECONNRESET
+    case ENOBUFS:
+      return 10055;  // WSAENOBUFS
+    case EISCONN:
+      return 10056;  // WSAEISCONN
+    case ENOTCONN:
+      return 10057;  // WSAENOTCONN
+    case ETIMEDOUT:
+      return 10060;  // WSAETIMEDOUT
+    case ECONNREFUSED:
+      return 10061;  // WSAECONNREFUSED
+    case EHOSTUNREACH:
+      return 10065;  // WSAEHOSTUNREACH
+    case EBADF:
+      return 10009;  // WSAEBADF
+    case EACCES:
+      return 10013;  // WSAEACCES
+    case EFAULT:
+      return 10014;  // WSAEFAULT
+    case EINVAL:
+      return 10022;  // WSAEINVAL
+    case EMFILE:
+      return 10024;  // WSAEMFILE
+    default:
+      return uint32_t(errno);
+  }
+#endif
 }
 
 }  // namespace kernel

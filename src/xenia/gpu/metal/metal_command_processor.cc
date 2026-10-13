@@ -92,6 +92,24 @@ DEFINE_bool(metal_capture_frame, false,
 DEFINE_bool(metal_disable_swap_dest_swap, false,
             "Disable forcing RB swap based on resolve dest_swap (debug).",
             "GPU");
+DEFINE_bool(
+    metal_sync_on_swap, true,
+    "Wait for the frame's GPU work to finish at swap before presenting. This is "
+    "a single CPU<->GPU sync per presented frame that guarantees all draws and "
+    "EDRAM resolves for the frame have completed before the swap texture is "
+    "read by the presenter, preventing race-condition color corruption. Much "
+    "cheaper than a per-resolve sync; disable only to measure raw throughput.",
+    "GPU");
+DEFINE_bool(
+    metal_sync_on_resolve, true,
+    "Wait for each EDRAM resolve's GPU work to finish before the command "
+    "processor continues. Prevents intra-frame race-condition color corruption "
+    "where a subsequent draw/texture-upload samples a resolve target whose GPU "
+    "write has not completed (the per-frame metal_sync_on_swap sync is too "
+    "coarse to catch mid-frame hazards). This is the correctness-first setting; "
+    "it costs one CPU<->GPU sync per resolve (several per frame). Disable to "
+    "measure throughput or when relying on a cheaper GPU-side fence instead.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -1624,10 +1642,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // End any active render encoder
   EndRenderEncoder();
 
-  // Submit and wait for command buffer
+  // Submit the frame's command buffer. With metal_sync_on_swap (default on) we
+  // wait for it to complete before the swap texture is handed to the presenter
+  // below. The per-resolve GPU drain that used to provide this ordering (the
+  // debug render-target readback) was removed for performance; without a
+  // replacement sync the presenter could read the swap texture while the
+  // frame's draws/resolves were still in flight, producing full-screen color
+  // corruption. One sync per presented frame is far cheaper than the old
+  // per-resolve sync (there are many resolves per frame).
   if (current_command_buffer_) {
     ScheduleDrawRingRelease(current_command_buffer_);
     current_command_buffer_->commit();
+    if (cvars::metal_sync_on_swap) {
+      current_command_buffer_->waitUntilCompleted();
+    }
     current_command_buffer_->release();
     current_command_buffer_ = nullptr;
     SetActiveDrawRing(nullptr);
@@ -2241,7 +2269,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     used_texture_mask |= pixel_shader->GetUsedTextureMaskAfterTranslation();
   }
   if (texture_cache_ && used_texture_mask) {
+    in_draw_texture_request_ = true;
     texture_cache_->RequestTextures(used_texture_mask);
+    in_draw_texture_request_ = false;
+    if (!current_command_buffer_) {
+      // A texture upload submitted the draws recorded so far (see
+      // SubmitBeforeTextureUpload); continue in a new command buffer.
+      BeginCommandBuffer();
+      EnsureDrawRingCapacity();
+      if (!current_render_encoder_) {
+        return Fail("no render encoder available after texture upload");
+      }
+    }
   }
 
   struct VertexBindingRange {
@@ -3296,23 +3335,37 @@ bool MetalCommandProcessor::IssueCopy() {
   // with stale MemoryRead commands from the trace file.
   MarkResolvedMemory(written_address, written_length);
 
-  // The resolve writes into guest memory via the shared memory buffer.
-  // Any cached views of this memory (especially textures sourced from it)
-  // must be invalidated, otherwise subsequent render-to-texture / postprocess
-  // passes will sample stale host textures and produce corrupted output.
-  //   if (shared_memory_) {
-  //     shared_memory_->MemoryInvalidationCallback(written_address,
-  //     written_length, true);
-  //   }
-  //   if (primitive_processor_) {
-  //     primitive_processor_->MemoryInvalidationCallback(written_address,
-  //     written_length, true);
-  //   }
+  // The resolve writes into guest memory via the shared memory buffer. Any
+  // cached views of this memory (especially textures sourced from it) must be
+  // invalidated, otherwise subsequent render-to-texture / postprocess passes
+  // sample stale host textures and produce corrupted output. This mirrors the
+  // D3D12 backend, which passes shared_memory_/texture_cache_ into Resolve so
+  // the written region is invalidated. shared_memory_->MemoryInvalidationCallback
+  // fires the memory watches that the texture cache registers
+  // (texture_cache.cc WatchMemoryRange), marking affected textures for re-upload
+  // from the freshly-resolved data — a cheap, targeted alternative to draining
+  // the whole GPU after every resolve (metal_sync_on_resolve).
+  if (shared_memory_) {
+    shared_memory_->MemoryInvalidationCallback(written_address, written_length,
+                                               true);
+  }
+  if (primitive_processor_) {
+    primitive_processor_->MemoryInvalidationCallback(written_address,
+                                                     written_length, true);
+  }
 
-  // Submit the command buffer without waiting - the resolve writes are now
-  // ordered in the same submission as the preceding draws.
+  // Submit the command buffer. The resolve writes are ordered in the same
+  // submission as the preceding draws; with metal_sync_on_resolve (default on)
+  // we also wait for the resolve's GPU work to complete before continuing, so a
+  // subsequent draw or texture upload cannot sample this resolve target while
+  // its write is still in flight (the intermittent intra-frame color
+  // corruption). This is the correctness-first path; it can later be replaced
+  // with a finer-grained GPU-side fence if the cost is too high.
   ScheduleDrawRingRelease(current_command_buffer_);
   current_command_buffer_->commit();
+  if (cvars::metal_sync_on_resolve) {
+    current_command_buffer_->waitUntilCompleted();
+  }
   current_command_buffer_->release();
   current_command_buffer_ = nullptr;
   SetActiveDrawRing(nullptr);
@@ -3619,6 +3672,20 @@ void MetalCommandProcessor::EnsureDrawRingCapacity() {
   SetActiveDrawRing(ring);
   command_buffer_draw_rings_.push_back(ring);
   current_draw_index_ = 0;
+}
+
+void MetalCommandProcessor::SubmitBeforeTextureUpload() {
+  if (!in_draw_texture_request_ || !current_command_buffer_) {
+    return;
+  }
+  EndRenderEncoder();
+  ScheduleDrawRingRelease(current_command_buffer_);
+  current_command_buffer_->commit();
+  current_command_buffer_->release();
+  current_command_buffer_ = nullptr;
+  SetActiveDrawRing(nullptr);
+  current_draw_index_ = 0;
+  // The autorelease pool is kept and reused by the next BeginCommandBuffer.
 }
 
 void MetalCommandProcessor::EndCommandBuffer() {

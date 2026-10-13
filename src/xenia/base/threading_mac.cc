@@ -972,12 +972,18 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     std::unique_lock lock(thread->handle_.state_mutex_);
     thread->handle_.state_ =
         create_suspended ? State::kSuspended : State::kRunning;
+    // Publish the suspend count together with the state. Setting it later,
+    // after dropping the lock, let a Resume() that saw kSuspended decrement
+    // the count from 0 to UINT32_MAX first; the thread then set it to 1 and
+    // waited forever (an intermittent hang of the title's main thread at boot).
+    if (create_suspended) {
+      thread->handle_.suspend_count_ = 1;
+    }
     thread->handle_.state_signal_.notify_all();
   }
 
   if (create_suspended) {
     std::unique_lock lock(thread->handle_.state_mutex_);
-    thread->handle_.suspend_count_ = 1;
     thread->handle_.state_signal_.wait(
         lock, [thread] { return thread->handle_.suspend_count_ == 0; });
   }

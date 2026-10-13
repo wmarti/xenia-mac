@@ -56,6 +56,16 @@
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/xenos.h"
 
+// Debug-only render-target pixel readback. Each call dispatches a command buffer
+// and BLOCKS the GPU thread on waitUntilCompleted, forcing a full CPU<->GPU sync
+// on every resolve (many per frame) — measured at ~75% of GPU-thread time during
+// gameplay. Off by default; enable only when diagnosing render-target contents.
+DEFINE_bool(mtl_debug_log_rt_pixels, false,
+            "Read back and log the top-left pixels of Metal render targets on "
+            "each resolve. Severe performance cost (synchronous GPU stall); for "
+            "debugging only.",
+            "GPU");
+
 namespace xe {
 namespace gpu {
 namespace metal {
@@ -212,6 +222,11 @@ constexpr uint32_t kMetalEdramDumpFlagDepthRound = 1u << 1;
 void LogMetalRenderTargetTopLeftPixels(
     MetalRenderTargetCache::MetalRenderTarget* rt, const char* tag,
     MTL::Device* device, MTL::CommandQueue* queue) {
+  // Disabled by default: this blocks the GPU thread on waitUntilCompleted every
+  // resolve. See the mtl_debug_log_rt_pixels cvar note above.
+  if (!cvars::mtl_debug_log_rt_pixels) {
+    return;
+  }
   if (!rt || !device || !queue) {
     return;
   }

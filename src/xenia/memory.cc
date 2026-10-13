@@ -1433,9 +1433,50 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
     }
   } else {
 #if XE_PLATFORM_MAC
-    XELOGW("BaseHeap::Protect: unaligned to host page size; skipping mprotect");
+    // Guest pages (4 KB) are smaller than host pages (16 KB on Apple Silicon),
+    // and the 0xE0000000 physical window adds a host_address_offset, so a single
+    // host page backs up to four guest pages. Host mprotect granularity is the
+    // 16 KB host page. Previously this case skipped the host protection change
+    // entirely, which let the host page's real protection drift out of sync with
+    // the guest page table: a stale read-only host page over a guest page the
+    // table believes is writable makes the next guest write fault straight into
+    // the fatal exception handler (observed freezing GoW2's intro at a
+    // `std` into the 0xE0000000 window).
+    //
+    // Instead, set each affected host page to the most-permissive access of any
+    // guest page it covers. This never makes a host page stricter than a guest
+    // page wants, so writes to writable guest pages never spuriously fault. The
+    // trade-off is that a read-only guest page sharing a host page with a
+    // writable one isn't hardware-enforced - acceptable, and far better than a
+    // hard freeze.
     if (old_protect) {
       *old_protect = page_table_[start_page_number].current_protect;
+    }
+    uint8_t* protect_base = membase_ + heap_base_;
+    uint32_t host_off = host_address_offset();
+    uint32_t host_page_shift = xe::log2_floor(xe_page_size);
+    uint32_t host_page_first =
+        ((start_page_number << page_size_shift_) + host_off) >> host_page_shift;
+    uint32_t host_page_last =
+        ((end_page_number << page_size_shift_) + page_size_ - 1 + host_off) >>
+        host_page_shift;
+    for (uint32_t hp = host_page_first; hp <= host_page_last; ++hp) {
+      uint32_t cover_first =
+          xe::sat_sub(hp << host_page_shift, host_off) >> page_size_shift_;
+      uint32_t cover_last =
+          xe::sat_sub((hp << host_page_shift) + xe_page_size - 1, host_off) >>
+          page_size_shift_;
+      cover_last = std::min(cover_last, uint32_t(page_table_.size() - 1));
+      uint32_t union_protect = 0;
+      for (uint32_t gp = cover_first; gp <= cover_last; ++gp) {
+        uint32_t gp_protect = (gp >= start_page_number && gp <= end_page_number)
+                                  ? protect
+                                  : page_table_[gp].current_protect;
+        union_protect |=
+            gp_protect & (kMemoryProtectRead | kMemoryProtectWrite);
+      }
+      xe::memory::Protect(protect_base + (hp << host_page_shift), xe_page_size,
+                          ToPageAccess(union_protect));
     }
 #else
     XELOGW("BaseHeap::Protect: ignoring request as not 4k page aligned");
@@ -2087,11 +2128,33 @@ bool PhysicalHeap::TriggerCallbacks(
       bool unprotect_page = (system_page_flags_[i >> 6].notify_on_invalidation &
                              (uint64_t(1) << (i & 63))) != 0;
       if (unprotect_page) {
-        uint32_t guest_page_number =
+        // A host/system page may be larger than a guest page (e.g. 16 KB host
+        // pages on macOS emulating 4 KB guest pages, with a 0x1000
+        // host_address_offset). The host mprotect granularity is the system
+        // page, so it is all-or-nothing: this system page must be made writable
+        // if ANY of the guest pages it covers is writable. Checking only a
+        // single (offset-shifted) guest sub-page both targets the wrong page
+        // under host_address_offset and leaves the host page read-only while
+        // the watch bit is cleared below, which later faults straight into the
+        // fatal exception handler. Scan every covered guest page instead.
+        uint32_t first_guest_page =
             xe::sat_sub(i << system_page_shift_, host_address_offset()) >>
             page_size_shift_;
-        if (ToPageAccess(page_table_[guest_page_number].current_protect) !=
-            xe::memory::PageAccess::kReadWrite) {
+        uint32_t last_guest_page =
+            xe::sat_sub((i << system_page_shift_) + system_page_size_ - 1,
+                        host_address_offset()) >>
+            page_size_shift_;
+        last_guest_page =
+            std::min(last_guest_page, uint32_t(page_table_.size() - 1));
+        bool any_writable = false;
+        for (uint32_t gp = first_guest_page; gp <= last_guest_page; ++gp) {
+          if (ToPageAccess(page_table_[gp].current_protect) ==
+              xe::memory::PageAccess::kReadWrite) {
+            any_writable = true;
+            break;
+          }
+        }
+        if (!any_writable) {
           unprotect_page = false;
         }
       }

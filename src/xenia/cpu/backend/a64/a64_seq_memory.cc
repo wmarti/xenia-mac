@@ -15,6 +15,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
 #include "xenia/cpu/backend/a64/a64_tracers.h"
+#include "xenia/cpu/ppc/ppc_context.h"
 
 namespace xe {
 namespace cpu {
@@ -416,23 +417,41 @@ EMITTER_OPCODE_TABLE(OPCODE_ATOMIC_COMPARE_EXCHANGE,
 // ============================================================================
 // OPCODE_RESERVED_LOAD / OPCODE_RESERVED_STORE
 // ============================================================================
+// Reserved load/store (PowerPC lwarx/stwcx, ldarx/stdcx) use a *software*
+// reservation that caches the loaded value in PPCContext::reserved_val, exactly
+// like the x64 backend. A naive LDAXR/STLXR pair does NOT work here: the guest's
+// own instructions between lwarx and stwcx are translated to ordinary loads and
+// stores, and on AArch64 any intervening memory access may clear the local
+// exclusive monitor. That makes the STLXR fail every time, so the guest's
+// stwcx-retry spinlocks never make progress and the game deadlocks. By comparing
+// the cached value with a self-contained CAS in the store (below), we avoid
+// depending on a monitor that has to survive across arbitrary guest code.
 struct RESERVED_LOAD_INT32
     : Sequence<RESERVED_LOAD_INT32, I<OPCODE_RESERVED_LOAD, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     const XReg address = ComputeMemoryAddress(e, i.src1, W3);
-    e.LDAXR(i.dest, address);
+    e.LDAR(i.dest, address);
+    // Writing the W register zero-extends, so toX() holds the zero-extended
+    // reservation value.
+    e.STR(i.dest.reg().toX(), e.GetContextReg(),
+          offsetof(ppc::PPCContext, reserved_val));
   }
 };
 struct RESERVED_LOAD_INT64
     : Sequence<RESERVED_LOAD_INT64, I<OPCODE_RESERVED_LOAD, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     const XReg address = ComputeMemoryAddress(e, i.src1, W3);
-    e.LDAXR(i.dest, address);
+    e.LDAR(i.dest, address);
+    e.STR(i.dest, e.GetContextReg(), offsetof(ppc::PPCContext, reserved_val));
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RESERVED_LOAD, RESERVED_LOAD_INT32,
                      RESERVED_LOAD_INT64);
 
+// Conditional store: succeed (dest = 1) only if memory still holds the value
+// cached by the matching reserved-load. The LDAXR/STLXR loop here is
+// self-contained (no guest code runs between them), so the exclusive monitor
+// stays valid and the store is reliable. See the comment on RESERVED_LOAD.
 struct RESERVED_STORE_INT32
     : Sequence<RESERVED_STORE_INT32,
                I<OPCODE_RESERVED_STORE, I8Op, I64Op, I32Op>> {
@@ -442,9 +461,22 @@ struct RESERVED_STORE_INT32
     if (i.src2.is_constant) {
       e.MOV(value, static_cast<uint32_t>(i.src2.constant()));
     }
+    // Expected = cached reservation value.
+    e.LDR(W5, e.GetContextReg(), offsetof(ppc::PPCContext, reserved_val));
+
+    oaknut::Label retry, fail, done;
+    e.l(retry);
+    e.LDAXR(W1, address);
+    e.CMP(W1, W5);
+    e.B(Cond::NE, fail);
     e.STLXR(W0, value, address);
-    e.CMP(W0, 0);
-    e.CSET(i.dest, Cond::EQ);
+    e.CBNZ(W0, retry);
+    e.MOV(i.dest.reg().toW(), 1);
+    e.B(done);
+    e.l(fail);
+    e.CLREX();
+    e.MOV(i.dest.reg().toW(), 0);
+    e.l(done);
   }
 };
 
@@ -457,9 +489,22 @@ struct RESERVED_STORE_INT64
     if (i.src2.is_constant) {
       e.MOV(value, i.src2.constant());
     }
+    // Expected = cached reservation value.
+    e.LDR(X5, e.GetContextReg(), offsetof(ppc::PPCContext, reserved_val));
+
+    oaknut::Label retry, fail, done;
+    e.l(retry);
+    e.LDAXR(X1, address);
+    e.CMP(X1, X5);
+    e.B(Cond::NE, fail);
     e.STLXR(W0, value, address);
-    e.CMP(W0, 0);
-    e.CSET(i.dest, Cond::EQ);
+    e.CBNZ(W0, retry);
+    e.MOV(i.dest.reg().toW(), 1);
+    e.B(done);
+    e.l(fail);
+    e.CLREX();
+    e.MOV(i.dest.reg().toW(), 0);
+    e.l(done);
   }
 };
 

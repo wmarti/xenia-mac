@@ -409,18 +409,22 @@ struct ROUND_F64 : Sequence<ROUND_F64, I<OPCODE_ROUND, F64Op, F64Op>> {
 };
 struct ROUND_V128 : Sequence<ROUND_V128, I<OPCODE_ROUND, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const QReg src = i.src1.is_constant ? Q0 : i.src1.reg();
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src, i.src1.constant());
+    }
     switch (i.instr->flags) {
       case ROUND_TO_ZERO:
-        e.FRINTZ(i.dest.reg().S4(), i.src1.reg().S4());
+        e.FRINTZ(i.dest.reg().S4(), src.S4());
         break;
       case ROUND_TO_NEAREST:
-        e.FRINTN(i.dest.reg().S4(), i.src1.reg().S4());
+        e.FRINTN(i.dest.reg().S4(), src.S4());
         break;
       case ROUND_TO_MINUS_INFINITY:
-        e.FRINTM(i.dest.reg().S4(), i.src1.reg().S4());
+        e.FRINTM(i.dest.reg().S4(), src.S4());
         break;
       case ROUND_TO_POSITIVE_INFINITY:
-        e.FRINTP(i.dest.reg().S4(), i.src1.reg().S4());
+        e.FRINTP(i.dest.reg().S4(), src.S4());
         break;
     }
   }
@@ -1845,12 +1849,20 @@ EMITTER_OPCODE_TABLE(OPCODE_ABS, ABS_F32, ABS_F64, ABS_V128);
 // ============================================================================
 struct SQRT_F32 : Sequence<SQRT_F32, I<OPCODE_SQRT, F32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.FSQRT(i.dest, i.src1);
+    const SReg src = i.src1.is_constant ? S0 : i.src1;
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src.toQ(), i.src1.constant());
+    }
+    e.FSQRT(i.dest, src);
   }
 };
 struct SQRT_F64 : Sequence<SQRT_F64, I<OPCODE_SQRT, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.FSQRT(i.dest, i.src1);
+    const DReg src = i.src1.is_constant ? D1 : i.src1;
+    if (i.src1.is_constant) {
+      e.LoadConstantV(src.toQ(), i.src1.constant());
+    }
+    e.FSQRT(i.dest, src);
   }
 };
 struct SQRT_V128 : Sequence<SQRT_V128, I<OPCODE_SQRT, V128Op, V128Op>> {

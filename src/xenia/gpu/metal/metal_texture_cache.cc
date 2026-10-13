@@ -1067,8 +1067,10 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     release_buffer_after(cmd, dest_buffer, size_t(dest_buffer_size));
     cmd->retain();
     cmd->addCompletedHandler([](MTL::CommandBuffer* cb) { cb->release(); });
+    command_processor_->SubmitBeforeTextureUpload();
     cmd->commit();
   } else {
+    command_processor_->SubmitBeforeTextureUpload();
     cmd->commit();
     cmd->waitUntilCompleted();
 

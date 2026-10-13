@@ -130,7 +130,20 @@ class MetalCommandProcessor : public CommandProcessor {
   bool IssueCopy() override;
   void WriteRegister(uint32_t index, uint32_t value) override;
 
+ public:
+  // Called by the texture cache right before it commits a texture upload.
+  // Uploads go into their own command buffer, so draws already recorded for
+  // the current frame must be submitted first, or the GPU applies the upload
+  // before them (mid-frame texture updates, e.g. UE3 mip streaming, then
+  // corrupt earlier draws at random). Only acts while IssueDraw is requesting
+  // textures; IssueDraw reopens the command buffer afterwards.
+  // Must not drain the command-buffer autorelease pool: the caller is inside
+  // its own nested pool, and draining an outer pool from there is fatal.
+  void SubmitBeforeTextureUpload();
+
  private:
+  bool in_draw_texture_request_ = false;
+
   // Initialize shader translation pipeline
   bool InitializeShaderTranslation();
 

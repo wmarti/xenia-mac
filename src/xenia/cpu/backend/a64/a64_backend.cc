@@ -678,7 +678,15 @@ void A64ThunkEmitter::EmitSaveVolatileRegs() {
   STP(Q25, Q26, SP, offsetof(StackLayout::Thunk, xmm[16]));
   STP(Q27, Q28, SP, offsetof(StackLayout::Thunk, xmm[18]));
   STP(Q29, Q30, SP, offsetof(StackLayout::Thunk, xmm[20]));
-  STR(Q31, SP, offsetof(StackLayout::Thunk, xmm[21]));
+  STR(Q31, SP, offsetof(StackLayout::Thunk, xmm[30]));
+
+  // Q8-Q15 hold allocated guest values (A64Emitter::fpr_reg_map_). AAPCS64
+  // only requires a callee to preserve their low 64 bits (D8-D15), so a host
+  // call may clobber the upper halves of live guest vectors. Save them whole.
+  STP(Q8, Q9, SP, offsetof(StackLayout::Thunk, xmm[22]));
+  STP(Q10, Q11, SP, offsetof(StackLayout::Thunk, xmm[24]));
+  STP(Q12, Q13, SP, offsetof(StackLayout::Thunk, xmm[26]));
+  STP(Q14, Q15, SP, offsetof(StackLayout::Thunk, xmm[28]));
 }
 
 void A64ThunkEmitter::EmitLoadVolatileRegs() {
@@ -706,7 +714,12 @@ void A64ThunkEmitter::EmitLoadVolatileRegs() {
   LDP(Q25, Q26, SP, offsetof(StackLayout::Thunk, xmm[16]));
   LDP(Q27, Q28, SP, offsetof(StackLayout::Thunk, xmm[18]));
   LDP(Q29, Q30, SP, offsetof(StackLayout::Thunk, xmm[20]));
-  LDR(Q31, SP, offsetof(StackLayout::Thunk, xmm[21]));
+  LDR(Q31, SP, offsetof(StackLayout::Thunk, xmm[30]));
+
+  LDP(Q8, Q9, SP, offsetof(StackLayout::Thunk, xmm[22]));
+  LDP(Q10, Q11, SP, offsetof(StackLayout::Thunk, xmm[24]));
+  LDP(Q12, Q13, SP, offsetof(StackLayout::Thunk, xmm[26]));
+  LDP(Q14, Q15, SP, offsetof(StackLayout::Thunk, xmm[28]));
 }
 
 void A64ThunkEmitter::EmitSaveNonvolatileRegs() {

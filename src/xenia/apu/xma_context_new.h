@@ -61,6 +61,9 @@ class XmaContextNew : public XmaContext {
   void Release();
 
  private:
+  // Lock-free body of Clear(); caller must already hold lock_.
+  void ClearInternal();
+
   static void SwapInputBuffer(XMA_CONTEXT_DATA* data);
   // Convert sampling rate from ID to frequency.
   static int GetSampleRate(int id);

@@ -684,7 +684,12 @@ struct VECTOR_SHR_V128
       }
       if (all_same) {
         // Every count is the same, so we can use USHR
-        e.USHR(i.dest.reg().B16(), i.src1.reg().B16(), shamt.u8[0] & 0x7);
+        // A zero shift is a copy; SSHR/USHR cannot encode #0.
+        if ((shamt.u8[0] & 0x7) == 0) {
+          e.MOV(i.dest.reg().B16(), i.src1.reg().B16());
+        } else {
+          e.USHR(i.dest.reg().B16(), i.src1.reg().B16(), shamt.u8[0] & 0x7);
+        }
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
@@ -708,7 +713,12 @@ struct VECTOR_SHR_V128
       }
       if (all_same) {
         // Every count is the same, so we can use USHR
-        e.USHR(i.dest.reg().H8(), i.src1.reg().H8(), shamt.u16[0] & 0xF);
+        // A zero shift is a copy; SSHR/USHR cannot encode #0.
+        if ((shamt.u16[0] & 0xF) == 0) {
+          e.MOV(i.dest.reg().B16(), i.src1.reg().B16());
+        } else {
+          e.USHR(i.dest.reg().H8(), i.src1.reg().H8(), shamt.u16[0] & 0xF);
+        }
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
@@ -732,7 +742,12 @@ struct VECTOR_SHR_V128
       }
       if (all_same) {
         // Every count is the same, so we can use USHR
-        e.USHR(i.dest.reg().S4(), i.src1.reg().S4(), shamt.u32[0] & 0x1F);
+        // A zero shift is a copy; SSHR/USHR cannot encode #0.
+        if ((shamt.u32[0] & 0x1F) == 0) {
+          e.MOV(i.dest.reg().B16(), i.src1.reg().B16());
+        } else {
+          e.USHR(i.dest.reg().S4(), i.src1.reg().S4(), shamt.u32[0] & 0x1F);
+        }
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
@@ -780,7 +795,12 @@ struct VECTOR_SHA_V128
       }
       if (all_same) {
         // Every count is the same, so we can use SSHR
-        e.SSHR(i.dest.reg().B16(), i.src1.reg().B16(), shamt.u8[0] & 0x7);
+        // A zero shift is a copy; SSHR/USHR cannot encode #0.
+        if ((shamt.u8[0] & 0x7) == 0) {
+          e.MOV(i.dest.reg().B16(), i.src1.reg().B16());
+        } else {
+          e.SSHR(i.dest.reg().B16(), i.src1.reg().B16(), shamt.u8[0] & 0x7);
+        }
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
@@ -804,7 +824,12 @@ struct VECTOR_SHA_V128
       }
       if (all_same) {
         // Every count is the same, so we can use SSHR
-        e.SSHR(i.dest.reg().H8(), i.src1.reg().H8(), shamt.u16[0] & 0xF);
+        // A zero shift is a copy; SSHR/USHR cannot encode #0.
+        if ((shamt.u16[0] & 0xF) == 0) {
+          e.MOV(i.dest.reg().B16(), i.src1.reg().B16());
+        } else {
+          e.SSHR(i.dest.reg().H8(), i.src1.reg().H8(), shamt.u16[0] & 0xF);
+        }
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));
@@ -828,7 +853,12 @@ struct VECTOR_SHA_V128
       }
       if (all_same) {
         // Every count is the same, so we can use SSHR
-        e.SSHR(i.dest.reg().S4(), i.src1.reg().S4(), shamt.u32[0] & 0x1F);
+        // A zero shift is a copy; SSHR/USHR cannot encode #0.
+        if ((shamt.u32[0] & 0x1F) == 0) {
+          e.MOV(i.dest.reg().B16(), i.src1.reg().B16());
+        } else {
+          e.SSHR(i.dest.reg().S4(), i.src1.reg().S4(), shamt.u32[0] & 0x1F);
+        }
         return;
       }
       e.ADD(e.GetNativeParam(1), SP, e.StashConstantV(1, i.src2.constant()));

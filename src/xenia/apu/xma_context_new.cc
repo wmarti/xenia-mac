@@ -131,7 +131,9 @@ bool XmaContextNew::Work() {
   if (data.IsConsumeOnlyContext()) {
     Consume(&output_rb, &data);
     if (data.output_buffer_read_offset == data.output_buffer_write_offset) {
-      Clear();
+      // Already holding lock_ — must not call Clear() (would re-lock the
+      // non-recursive lock_ and self-deadlock the XMA decoder thread).
+      ClearInternal();
     }
     data.Store(context_ptr);
     return true;
@@ -217,6 +219,15 @@ bool XmaContextNew::Block(bool poll) {
 
 void XmaContextNew::Clear() {
   std::lock_guard<xe_mutex> lock(lock_);
+  ClearInternal();
+}
+
+// Caller MUST already hold lock_. Work() calls this directly because it has
+// already taken lock_; calling the public Clear() (which re-locks the
+// non-recursive lock_) from there self-deadlocks the XMA decoder thread, which
+// in turn wedges any guest thread waiting on lock_ via WriteRegister/Disable
+// (observed hanging Gears of War during menu audio).
+void XmaContextNew::ClearInternal() {
   XELOGAPU("XmaContext: reset context {}", id());
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());

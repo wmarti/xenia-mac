@@ -1120,6 +1120,15 @@ class BuildShadersCommand(Command):
             if sys.platform == "darwin":
                 print("Building Metal MSL shaders...")
 
+                # Pin the Metal deployment target so the emitted .metallib
+                # loads on the runtime OS. Without this the compiler stamps
+                # the SDK's default target (e.g. macOS 26 on Xcode 26), which
+                # newLibraryWithData rejects on older systems with
+                # "deployment target (0x...) that is not supported on this OS".
+                # Matches MACOSX_DEPLOYMENT_TARGET in premake5.lua.
+                macos_min = os.environ.get(
+                    "MACOSX_DEPLOYMENT_TARGET", "15.0")
+
                 metal = shutil.which("metal") or "metal"
                 metallib = shutil.which("metallib") or "metallib"
                 use_xcrun = False
@@ -1158,6 +1167,7 @@ class BuildShadersCommand(Command):
                             "xcrun", "-sdk", "macosx", "metal",
                             "-x", "metal",
                             "-std=metal3.0",
+                            f"-mmacosx-version-min={macos_min}",
                             "-D", "XESL_LANGUAGE_MSL=1",
                             "-I", src_dir,
                             "-c",
@@ -1171,6 +1181,7 @@ class BuildShadersCommand(Command):
                             metal,
                             "-x", "metal",
                             "-std=metal3.0",
+                            f"-mmacosx-version-min={macos_min}",
                             "-D", "XESL_LANGUAGE_MSL=1",
                             "-I", src_dir,
                             "-c",
